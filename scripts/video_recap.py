@@ -12,20 +12,22 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 import urllib.request
 import urllib.error
+import wave
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── 配置 ──────────────────────────────────────────────────────────────
 
 CONFIG = {
-    "api_url": os.environ.get("OPENAI_API_URL", "https://yunwu.ai/v1/chat/completions"),
+    "api_url": os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions"),
     "api_key": os.environ.get("OPENAI_API_KEY", ""),
-    "vlm_model": "doubao-seed-2-0-pro-260215",
-    "llm_model": "doubao-seed-2-0-pro-260215",
-    "asr_bin": "/Users/pite/qwen3-asr-rs/target/release/examples/local_transcribe",
-    "asr_model_dir": "/Users/pite/qwen3-asr-models/0.6B",
+    "vlm_model": os.environ.get("OPENAI_MODEL", "gpt-4o"),
+    "llm_model": os.environ.get("OPENAI_MODEL", "gpt-4o"),
+    "asr_bin": os.environ.get("ASR_BIN", "local_transcribe"),
+    "asr_model_dir": os.environ.get("ASR_MODEL_DIR", ""),
     "scene_threshold": 0.1,
     "tts_engine": "auto",  # auto | indextts2 | edge-tts | say
     "edge_tts_voice": "zh-CN-YunxiNeural",
@@ -1087,6 +1089,7 @@ def generate_narration(scenes_analysis, asr_result, work_dir, style="纪录片",
                 except Exception as e:
                     scene = futures[future]
                     log(f"  fill 场景{scene['scene_id']+1} 失败: {e}")
+                    log(f"  详细错误: {traceback.format_exc()}")
                     continue
                 if seg:
                     narration.append(seg)
@@ -1146,6 +1149,7 @@ def generate_narration(scenes_analysis, asr_result, work_dir, style="纪录片",
                     seg = future.result()
                 except Exception as e:
                     log(f"  temporal fill 失败: {e}")
+                    log(f"  详细错误: {traceback.format_exc()}")
                     continue
                 if seg:
                     narration.append(seg)
@@ -1164,28 +1168,23 @@ def generate_narration(scenes_analysis, asr_result, work_dir, style="纪录片",
                 covered_scenes.add(s["scene_id"])
                 break
     still_uncovered = [s for s in scenes_analysis if s["scene_id"] not in covered_scenes]
-    if still_uncovered:
-        for scene in still_uncovered:
-            dur = scene["end"] - scene["start"]
-            if dur < 5.0:
-                continue
-            max_chars = max(5, int((dur - 0.6) * CONFIG["speech_rate"] * CONFIG["speech_safety_margin"]))
-            # 从 depth_analysis 或 description 截取
-            source = scene.get("depth_analysis", "") or scene.get("description", "")
-            # 取前 max_chars 个中文字符
-            chars = re.findall(r'[一-鿿　-〿＀-￯]', source)
-            text = "".join(chars[:max_chars])
-            if len(text) >= 5:
-                if not text.endswith(("。", "！", "？", "！")):
-                    text = text[:max_chars - 1] + "。"
-                narration.append({
-                    "start": scene["start"],
-                    "end": scene["end"],
-                    "narration": text,
-                    "pause_after_ms": 600,
-                })
-                log(f"  fallback 场景{scene['scene_id']+1}: \"{text}\"")
-        narration.sort(key=lambda x: x["start"])
+    # Fallback: 跳过未覆盖场景（避免低质量硬拼）
+    # 注意：不再从 depth_analysis 截取中文字符拼凑解说，
+    # 覆盖率 60% 优于垃圾内容 100%
+    uncovered_count = 0
+    too_short_count = 0
+    for scene in still_uncovered:
+        dur = scene["end"] - scene["start"]
+        if dur < 5.0:
+            too_short_count += 1
+            log(f"  未覆盖场景{scene['scene_id']+1} ({dur:.1f}s): 过短，跳过")
+        else:
+            uncovered_count += 1
+            log(f"  未覆盖场景{scene['scene_id']+1} ({dur:.1f}s): 跳过（无可用解说源）")
+    if uncovered_count:
+        log(f"{uncovered_count} 个场景无解说覆盖，建议手动补充或增大 fill_thresholds")
+    if too_short_count:
+        log(f"{too_short_count} 个场景过短（<5s）未覆盖")
 
     # 过滤空段
     narration = [n for n in narration if n.get("narration", "").strip()]
@@ -1357,18 +1356,31 @@ def _generate_temporal_fill(scene, gap_start, gap_end, existing_narration="", sc
     return seg
 
 
+def _text_char_count(text):
+    """计算文本的有效字数（去除标点和空白，这些不占 TTS 朗读时间）"""
+    return len(re.sub(r'[，。！？、；：…“”‘’《》〈〉\s"\'「」『』（）()【】\[\]—～·,.!?;:\\-]', '', text))
+
+
 def _truncate_at_sentence(text, max_chars):
-    """在句子边界截断，不产生残句。回退到逗号截断+补句号"""
-    if len(text) <= max_chars:
+    """在句子边界截断，不产生残句。max_chars 按有效字符计（不含标点空白）"""
+    if _text_char_count(text) <= max_chars:
         return text
+    # 将有效字符预算转换为字符串位置
+    eff = 0
+    cutoff = len(text)
+    for i, ch in enumerate(text):
+        eff += 1 if _text_char_count(ch) else 0
+        if eff > max_chars:
+            cutoff = i + 1
+            break
     # 先尝试在句号/感叹号/问号处截断
     for sep in ['。', '！', '？', '!', '?']:
-        idx = text[:max_chars].rfind(sep)
+        idx = text[:cutoff].rfind(sep)
         if idx > 0:
             return text[:idx + 1]
     # 回退：在最后一个逗号/顿号处截断，补句号
     for sep in ['，', '、', '；', ',']:
-        idx = text[:max_chars].rfind(sep)
+        idx = text[:cutoff].rfind(sep)
         if idx > 3:
             return text[:idx] + '。'
     # 无法在合理边界截断，跳过该段（避免产生不通顺的半句话）
@@ -1395,7 +1407,7 @@ def _validate_narration_budget(narration, scenes_analysis):
         max_chars = max(5, int(available * effective_rate))
         # 短段弹性系数更低：3s以下不弹性，3-5s 允许 20%，5s+ 允许 30%
         flex = 1.0 if seg_duration < 3.0 else (1.2 if seg_duration < 5.0 else 1.3)
-        if len(text) > max_chars * flex:
+        if _text_char_count(text) > max_chars * flex:
             truncated = _truncate_at_sentence(text, max_chars)
             if truncated and len(truncated) >= 5:
                 n["narration"] = truncated
@@ -2158,13 +2170,27 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
             "[orig][narr]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
         )
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(input_video),
-        "-i", str(narration_wav),
-        "-filter_complex", filter_complex,
-        "-map", "0:v", "-map", "[aout]",
-    ]
+    # 对于超长 volume 表达式（多段解说），使用 -filter_complex_script 避免命令行溢出
+    filter_complex_bytes = filter_complex.encode('utf-8')
+    if len(filter_complex_bytes) > 8000:
+        fc_script = Path(work_dir) / ".filter_complex.txt"
+        fc_script.write_text(filter_complex)
+        log(f"使用 filter_complex_script (表达式长度 {len(filter_complex_bytes)} bytes)")
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(input_video),
+            "-i", str(narration_wav),
+            "-filter_complex_script", str(fc_script),
+            "-map", "0:v", "-map", "[aout]",
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(input_video),
+            "-i", str(narration_wav),
+            "-filter_complex", filter_complex,
+            "-map", "0:v", "-map", "[aout]",
+        ]
 
     if CONFIG.get("burn_subtitles", False):
         # ffmpeg subtitles filter 需要转义 : 和 \
@@ -2175,9 +2201,14 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
         cmd += ["-c:v", "copy"]
 
     cmd += ["-c:a", "aac", "-b:a", "192k", "-t", str(video_duration), str(output_path)]
-    result = run_cmd(cmd)
-    if result.returncode != 0:
-        raise RuntimeError(f"视频组装失败: {result.stderr}")
+    try:
+        result = run_cmd(cmd)
+        if result.returncode != 0:
+            raise RuntimeError(f"视频组装失败: {result.stderr}")
+    finally:
+        # 清理临时 filter_complex 脚本（无论 ffmpeg 是否成功）
+        if len(filter_complex_bytes) > 8000:
+            fc_script.unlink(missing_ok=True)
 
     log(f"最终视频: {output_path} ({output_path.stat().st_size / 1024 / 1024:.1f}MB)")
     return output_path
@@ -2227,8 +2258,6 @@ def _adjust_tts_speed(audio_path, target_duration, work_dir, tts_rate_offset=0.0
 
 def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
     """将 TTS 片段按时间轴放置到一条与视频等长的音轨上"""
-    import wave
-
     sample_rate = 44100
     total_samples = int(video_duration * sample_rate)
     buffer = bytearray(total_samples * 2)
@@ -2240,6 +2269,24 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         seg_pause_ms = seg.get("pause_after_ms", CONFIG.get("breath_ms", 600))
 
         if not os.path.exists(wav_path):
+            prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
+            continue
+
+        # WAV 格式验证 + 采样率检查（合并为一次 wave.open）
+        original_wav_path = wav_path
+        _do_resample = False
+        try:
+            with wave.open(wav_path, 'rb') as wf_check:
+                wf_channels = wf_check.getnchannels()
+                wf_sampwidth = wf_check.getsampwidth()
+                if wf_sampwidth != 2 or wf_channels != 1:
+                    log(f"  跳过非标准 WAV: {wav_path} (channels={wf_channels}, sampwidth={wf_sampwidth}), 需要 mono 16-bit")
+                    prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
+                    continue
+                if wf_check.getframerate() != sample_rate:
+                    _do_resample = True
+        except Exception as e:
+            log(f"  WAV 读取失败: {wav_path}: {e}")
             prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
             continue
 
@@ -2264,14 +2311,10 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         else:
             actual_dur = tts_dur
 
-        # 采样率安全检查：确保 TTS 输出格式匹配
-        need_resample = False
-        with wave.open(wav_path, "rb") as wf_check:
-            if (wf_check.getframerate() != sample_rate or
-                    wf_check.getnchannels() != 1 or
-                    wf_check.getsampwidth() != 2):
-                need_resample = True
-        if need_resample:
+        # _adjust_tts_speed 输出固定 44100Hz mono 16bit，若文件被替换则无需 resample
+        if wav_path != original_wav_path:
+            _do_resample = False
+        if _do_resample:
             tmp_path = str(Path(work_dir) / f"_rs_{seg.get('index', 0)}.wav")
             run_cmd(["ffmpeg", "-y", "-i", wav_path,
                      "-ar", str(sample_rate), "-ac", "1",
@@ -2377,7 +2420,8 @@ def check_prerequisites(skip_asr=False):
 # ── Main Pipeline ─────────────────────────────────────────────────────
 
 def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
-                 scene_threshold=None, skip_asr=False, resume_dir=None):
+                 scene_threshold=None, skip_asr=False, resume_dir=None,
+                 agent_mode=False):
     """执行完整的视频解说 pipeline"""
     pipeline_start = time.time()
     if not CONFIG.get("api_key"):
@@ -2521,6 +2565,19 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
     if _is_step_done(work_dir, "script"):
         narration = json.loads((work_dir / "narration.json").read_text())
         log(f"跳过解说脚本（已存在 {len(narration)} 段）")
+    elif agent_mode:
+        # Agent 模式：在 Step 5 前暂停，等待 Agent 手动写解说词
+        log("=" * 50)
+        log("⏸  Agent 模式：Pipeline 在此暂停")
+        log("   请 Agent 基于 vlm_analysis.json / asr_result.json / silence_periods.json 亲自撰写解说词")
+        log(f"   写入 {work_dir}/narration.json 后执行:")
+        log(f"   touch {work_dir}/.step_script.done")
+        log(f"   python3 {__file__} {video_path} --resume {work_dir}")
+        log("=" * 50)
+        (Path(work_dir) / ".step_script.paused").write_text("")
+        # 创建空 narration.json 占位，防止 resume 时 FileNotFoundError
+        (Path(work_dir) / "narration.json").write_text("[]")
+        return {"status": "paused", "work_dir": str(work_dir), "next_step": "write narration"}
     else:
         t0 = time.time()
         if CONFIG.get("narration_mode") == "zone":
@@ -2643,6 +2700,16 @@ def main():
                         default=None, help="音频 ducking 模式 (默认: sidechaincompress)")
     parser.add_argument("--context", type=str, default="",
                         help="额外上下文（节目名、角色名等）")
+    parser.add_argument("--model", type=str, default=None,
+                        help="覆盖 VLM/LLM 模型名 (默认: gpt-4o 或 OPENAI_MODEL 环境变量)")
+    parser.add_argument("--vlm-model", type=str, default=None,
+                        help="单独覆盖 VLM 模型名 (优先级高于 --model)")
+    parser.add_argument("--llm-model", type=str, default=None,
+                        help="单独覆盖 LLM 模型名 (优先级高于 --model)")
+    parser.add_argument("--agent-mode", action="store_true",
+                        help="Agent 模式：在解说脚本步骤暂停，等待 Agent 手动写解说词")
+    parser.add_argument("--voice", type=str, default=None,
+                        help="覆盖 edge-tts 音色 (如 zh-CN-YunxiNeural)")
 
     args = parser.parse_args()
 
@@ -2651,6 +2718,15 @@ def main():
     CONFIG["fps"] = args.fps
     CONFIG["burn_subtitles"] = args.burn_subtitles
     CONFIG["context_info"] = args.context
+    if args.model:
+        CONFIG["vlm_model"] = args.model
+        CONFIG["llm_model"] = args.model
+    if args.vlm_model:
+        CONFIG["vlm_model"] = args.vlm_model
+    if args.llm_model:
+        CONFIG["llm_model"] = args.llm_model
+    if args.voice:
+        CONFIG["edge_tts_voice"] = args.voice
     if args.scene_threshold:
         CONFIG["scene_threshold"] = args.scene_threshold
     if args.ducking:
@@ -2665,6 +2741,7 @@ def main():
             scene_threshold=args.scene_threshold,
             skip_asr=args.skip_asr,
             resume_dir=args.resume,
+            agent_mode=args.agent_mode,
         )
         if isinstance(result, dict):
             print(json.dumps(result, ensure_ascii=False, indent=2))
