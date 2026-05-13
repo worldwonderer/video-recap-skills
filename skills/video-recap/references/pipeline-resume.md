@@ -9,7 +9,9 @@ Pipeline 用 `.step_<name>.done` 标记文件控制跳过已完成的步骤。
 | `.step_extract.done` | 帧提取 |
 | `.step_detect.done` | 场景检测 |
 | `.step_asr.done` | ASR 转录 |
-| `.step_analyze.done` | VLM 分析 |
+| `.step_silence.done` | 静音检测 + 解说区识别 |
+| `.step_vlm.done` | VLM 视觉分析 |
+| `.step_narrative.done` | 叙事结构分析（可跳过） |
 | `.step_script.done` | 解说词撰写 |
 | `.step_tts.done` | TTS 合成 |
 | `.step_assemble.done` | 视频组装 |
@@ -43,7 +45,7 @@ python3 scripts/video_recap.py <video> --resume work_dir --burn-subtitles
 ### 4. 换 VLM 模型重分析
 
 ```bash
-rm work_dir/.step_analyze.done work_dir/.step_script.done \
+rm work_dir/.step_vlm.done work_dir/.step_narrative.done work_dir/.step_script.done \
   work_dir/tts_segments/ work_dir/.step_tts.done \
   work_dir/.step_assemble.done work_dir/tts_meta.json
 OPENAI_MODEL=新模型 python3 scripts/video_recap.py <video> --resume work_dir --agent-mode

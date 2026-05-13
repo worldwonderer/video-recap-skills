@@ -16,6 +16,11 @@
 | `--burn-subtitles` | 烧录字幕到视频（需重编码） | false | 需要内嵌字幕时开启 |
 | `--output, -o` | 输出目录 | 视频所在目录/output | 自定义输出位置 |
 | `--step` | 仅执行: extract / detect / asr / analyze / script / tts / assemble | 全部 | 调试单步或重跑特定阶段 |
+| `--skip-asr` | 跳过 ASR 转录（需已有缓存） | false | 无本地 ASR 或已有 asr_result.json 时使用 |
+| `--fps` | 帧提取 fps（0=自动：≤60s→2fps, ≤5min→1.5fps, >5min→1fps） | 0 | 视频细节多时可调高 |
+| `--ducking` | 音频 ducking 模式: sidechaincompress / fixed / none | sidechaincompress | 解说与原声重叠时的音量压低策略 |
+| `--vlm-model` | 单独覆盖 VLM 模型名（优先级高于 --model） | `$OPENAI_MODEL` | VLM 和 LLM 用不同模型时设置 |
+| `--llm-model` | 单独覆盖 LLM 模型名（优先级高于 --model） | `$OPENAI_MODEL` | VLM 和 LLM 用不同模型时设置 |
 
 ## 环境变量
 

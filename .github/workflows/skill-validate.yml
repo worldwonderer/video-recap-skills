@@ -34,3 +34,5 @@ jobs:
                   exit(1)
           print(f'All {len(anchors)} anchors OK')
           "
+      - name: Test
+        run: cd skills/video-recap && python3 -m pytest tests/ -v
