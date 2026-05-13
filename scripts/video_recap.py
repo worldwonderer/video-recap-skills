@@ -1383,6 +1383,11 @@ def _fill_api_call(prompt, max_chars):
             if isinstance(segments, dict):
                 segments = [segments]
             if not segments or not isinstance(segments, list):
+                # Fallback: 尝试从纯文本提取解说
+                clean = text.strip().strip('`').strip('"').strip("'")
+                if 5 <= len(clean) <= max_chars * 1.5:
+                    return {"narration": clean[:max_chars], "start": 0, "end": 0,
+                            "pause_after_ms": 600}
                 if _attempt == 0:
                     time.sleep(1)
                     continue
@@ -1994,9 +1999,29 @@ def _zone_coverage_fill(narration, scenes_analysis, asr_result, silence_periods,
         log(f"Zone+Fill 覆盖率 {coverage:.0%} 已达标 ({len(covered)}/{len(scenes_analysis)})")
         return narration
 
-    # 找未覆盖的重要场景（>5s）
-    uncovered = [s for s in scenes_analysis
-                 if s["scene_id"] not in covered and (s["end"] - s["start"]) >= 5.0]
+    # 找未覆盖的重要场景（>5s），长场景拆分为子段
+    uncovered_raw = [s for s in scenes_analysis
+                     if s["scene_id"] not in covered and (s["end"] - s["start"]) >= 5.0]
+    uncovered = []
+    for s in uncovered_raw:
+        dur = s["end"] - s["start"]
+        if dur <= 30:
+            uncovered.append(s)
+        else:
+            # 拆分为 ~20s 子段
+            sub_dur = 20.0
+            pos = s["start"]
+            idx = 0
+            while pos < s["end"]:
+                sub_end = min(pos + sub_dur, s["end"])
+                sub = dict(s)
+                sub["start"] = pos
+                sub["end"] = sub_end
+                sub["is_sub"] = True
+                sub["sub_idx"] = idx
+                uncovered.append(sub)
+                pos = sub_end
+                idx += 1
     if not uncovered:
         return narration
     log(f"Zone 覆盖率 {coverage:.0%}，补充 {len(uncovered)} 个重要未覆盖场景 (ducking)")
