@@ -186,7 +186,7 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
         log("跳过叙事结构分析（skip_narrative_analysis=True）")
     elif _is_step_done(work_dir, "narrative"):
         vlm_analysis = json.loads((work_dir / "narrative_structure.json").read_text())
-        log(f"跳过叙事结构分析（已存在）")
+        log("跳过叙事结构分析（已存在）")
     else:
         t0 = time.time()
         vlm_analysis = analyze_narrative_structure(vlm_analysis, work_dir)
@@ -266,7 +266,7 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
     # Step 7: 组装
     output_path = work_dir / "output.mp4"
     if _is_step_done(work_dir, "assemble") and output_path.exists():
-        log(f"跳过视频组装（已存在）")
+        log("跳过视频组装（已存在）")
     else:
         t0 = time.time()
         assemble_video(video_path, tts_segments, work_dir, output_path)

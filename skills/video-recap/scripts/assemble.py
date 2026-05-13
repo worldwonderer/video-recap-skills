@@ -325,9 +325,9 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         available_samples = end_boundary - actual_start
         available_duration = max(available_samples / sample_rate, 0)
         if tts_dur > available_duration > 0:
-            wav_path, actual_dur = _adjust_tts_speed(wav_path, available_duration, work_dir, tts_rate_offset)
+            wav_path, _actual_dur = _adjust_tts_speed(wav_path, available_duration, work_dir, tts_rate_offset)
         else:
-            actual_dur = tts_dur
+            pass  # tts_dur <= available_duration, no speed adjust needed
 
         # _adjust_tts_speed 输出固定 44100Hz mono 16bit，若文件被替换则无需 resample
         if wav_path != original_wav_path:

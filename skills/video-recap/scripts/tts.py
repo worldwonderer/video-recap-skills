@@ -20,8 +20,6 @@ def _compute_tts_params(text, narration, seg_index):
     rate = "+5%"
     pitch = "+0Hz"
     total = len(narration)
-    last_char = text[-1] if text else ""
-
     # 位置相关
     if seg_index == 0:
         rate = "+5%"       # 开头稍快，抓住注意力
@@ -177,7 +175,7 @@ def _detect_tts_engine():
     """自动检测可用的 TTS 引擎"""
     # 优先 IndexTTS2
     try:
-        from indextts.infer_v2 import IndexTTS2  # noqa: F401
+        import importlib; importlib.import_module('indextts.infer_v2')
         return "indextts2"
     except ImportError:
         pass

@@ -541,7 +541,7 @@ def _fill_api_call(prompt, max_chars):
                     continue
                 return None
             return seg
-        except Exception as e:
+        except Exception:
             if _attempt == 0:
                 time.sleep(2)
                 continue
@@ -799,11 +799,11 @@ def _validate_narration_budget(narration, scenes_analysis):
                                 if text and len(text) <= mc * 1.1:
                                     n["narration"] = text
                 except (_json.JSONDecodeError, TypeError):
-                    log(f"    重写结果解析失败，丢弃超预算段")
+                    log("    重写结果解析失败，丢弃超预算段")
                     for n, mc, sid in rewrite_tasks:
                         n["narration"] = ""
         except (KeyError, IndexError, RuntimeError):
-            log(f"    重写 API 异常，丢弃超预算段")
+            log("    重写 API 异常，丢弃超预算段")
             for n, mc, sid in rewrite_tasks:
                 n["narration"] = ""
 
@@ -1044,7 +1044,6 @@ def _rewrite_segment_with_constraints(seg, vlm_analysis, mismatched):
     """对不匹配的解说段执行约束重写（最多1轮）"""
     start = seg.get("start", 0)
     end = seg.get("end", 0)
-    original = seg.get("narration", "")
     effective_rate = CONFIG["speech_rate"] * CONFIG["speech_safety_margin"]
     breath_sec = CONFIG.get("breath_ms", 600) / 1000
     max_chars = max(10, int((end - start - breath_sec) * effective_rate))
