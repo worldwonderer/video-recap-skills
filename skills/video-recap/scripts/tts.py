@@ -1,11 +1,11 @@
-import json
 import os
 import re
-import wave
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import CONFIG
 from common import log, run_cmd
+from narration import _truncate_at_sentence
 
 def _parse_rate_offset(rate_str):
     """'+5%' -> 0.05, '-3%' -> -0.03, '+0%' -> 0.0"""

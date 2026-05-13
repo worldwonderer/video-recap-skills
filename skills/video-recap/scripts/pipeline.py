@@ -1,7 +1,9 @@
 import json
+import os
 import shutil
 import sys
 import time
+from pathlib import Path
 
 from config import CONFIG
 from common import log, api_call, get_video_duration
