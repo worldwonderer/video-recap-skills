@@ -1416,7 +1416,7 @@ def _fill_api_call(prompt, max_chars):
     return None
 
 
-def _generate_single_fill(scene, silence_periods=None, existing_narration="", scene_dialogue=""):
+def _generate_single_fill(scene, silence_periods=None, existing_narration="", scene_dialogue="", research_ctx=""):
     """为单个未覆盖场景生成一句简短解说，返回 dict 或 None"""
     duration = scene["end"] - scene["start"]
     if duration < 5.0:
@@ -1453,12 +1453,16 @@ def _generate_single_fill(scene, silence_periods=None, existing_narration="", sc
     if scene_dialogue:
         dialog_block = f"\n原始对白(英文，翻译融入解说): {scene_dialogue}\n"
 
+    research_block = ""
+    if research_ctx:
+        research_block = f"\n{research_ctx}\n"
+
     prompt = (
         f"为这个视频场景写一句中文解说。\n"
         f"场景: {scene['start']:.1f}s-{scene['end']:.1f}s "
         f"({target_chars}-{max_chars}字){quiet_info}\n"
         f"画面: {scene['description']}{depth_text}"
-        f"{ctx_block}{dialog_block}\n"
+        f"{research_block}{ctx_block}{dialog_block}\n"
         f"要求：{target_chars}-{max_chars}字，揭示角色意图或潜台词，与前后解说自然衔接，以句号/感叹号结尾。避免重复用词和相同句式，用不同的表达方式。\n"
         f"严格输出 JSON: {{\"start\": {best_start:.1f}, \"end\": {scene['end']:.1f}, "
         f"\"narration\": \"...\", \"pause_after_ms\": 600}}"
@@ -2037,31 +2041,15 @@ def _zone_coverage_fill(narration, scenes_analysis, asr_result, silence_periods,
         if not gaps:
             continue
 
-        # 合并策略：同场景的所有间隙合并为1个 fill 请求
-        # 只有大间隙(>25s)才拆分为2个 fill
-        total_gap = sum(ge - gs for gs, ge in gaps)
-        if total_gap <= 25 or len(gaps) == 1:
-            merged_start = gaps[0][0]
-            merged_end = gaps[-1][1]
+        # 同一场景只取最大间隙生成1个 fill，避免重复内容
+        best_gap = max(gaps, key=lambda g: g[1] - g[0])
+        gap_s, gap_e = best_gap
+        if gap_e - gap_s >= 3.0:
             sub = dict(s)
-            sub["start"] = merged_start
-            sub["end"] = min(merged_end, merged_start + 25)  # 最多覆盖25s
+            sub["start"] = gap_s
+            sub["end"] = min(gap_e, gap_s + 25)  # 最多覆盖25s
             sub["is_sub"] = True
             uncovered.append(sub)
-        else:
-            # 超长间隙拆为2段：前半+后半，各最多25s
-            mid = gaps[0][0] + total_gap / 2
-            sub1 = dict(s)
-            sub1["start"] = gaps[0][0]
-            sub1["end"] = min(mid, gaps[0][0] + 25)
-            sub1["is_sub"] = True
-            uncovered.append(sub1)
-            if mid < gaps[-1][1]:
-                sub2 = dict(s)
-                sub2["start"] = max(mid, gaps[-1][1] - 25)
-                sub2["end"] = gaps[-1][1]
-                sub2["is_sub"] = True
-                uncovered.append(sub2)
     if not uncovered:
         return narration
     log(f"Zone 覆盖率 {coverage:.0%}，补充 {len(uncovered)} 个重要未覆盖场景 (ducking)")
@@ -2087,11 +2075,28 @@ def _zone_coverage_fill(narration, scenes_analysis, asr_result, silence_periods,
     )
 
     # 并行 fill
+    # 加载背景调研
+    research_ctx = ""
+    research_path = Path(work_dir) / "background_research.json"
+    if research_path.exists():
+        try:
+            research = json.loads(research_path.read_text("utf-8"))
+            parts = []
+            if research.get("characters"):
+                parts.append("角色: " + ", ".join(f"{k}({v})" for k, v in research["characters"].items()))
+            if research.get("episode_context"):
+                parts.append(research["episode_context"])
+            if parts:
+                research_ctx = "【背景】" + "; ".join(parts)
+        except (json.JSONDecodeError, KeyError):
+            pass
+
     fill_workers = min(len(uncovered), CONFIG.get("fill_workers", 4))
     with ThreadPoolExecutor(max_workers=fill_workers) as executor:
         futures = {executor.submit(
             _generate_single_fill, scene, silence_periods, existing_ctx,
-            "; ".join(scene_asr.get(scene["scene_id"], []))
+            "; ".join(scene_asr.get(scene["scene_id"], [])),
+            research_ctx
         ): scene for scene in uncovered}
         for future in as_completed(futures):
             try:
