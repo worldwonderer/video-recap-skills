@@ -35,6 +35,15 @@ OPENAI_API_KEY=xxx OPENAI_API_URL=xxx \
 #    写入 work_dir/narration.json：
 #    [{"start": 秒数, "end": 秒数, "narration": "解说文本", "pause_after_ms": 600, "overlaps_speech": false}]
 
+# 2.5 [可选] 用 browser-cdp 调研剧情背景
+#    Agent 用 browser-cdp skill 搜索：
+#    - "{节目名} 剧情 介绍" → synopsis
+#    - "{节目名} 人物 关系" → characters
+#    - "{节目名} 世界观/设定" → worldbuilding
+#    写入 work_dir/background_research.json：
+#    {"synopsis": "...", "characters": {"角色名": "简介"}, "worldbuilding": "...", "episode_context": "..."}
+#    Pipeline 会自动检测并注入到解说生成的 system prompt 中
+
 # 3. 标记完成 + 清理缓存 + 重新跑 TTS
 touch work_dir/.step_script.done
 rm -rf work_dir/tts_segments/ work_dir/.step_tts.done work_dir/.step_assemble.done work_dir/tts_meta.json
@@ -50,6 +59,30 @@ python3 scripts/video_recap.py <video> --resume work_dir
 - **大段解说 + 原声交替**：解说区集中在安静窗口，原声区保留原始对白
 - **字数预算**：每段字数 ≤ (end - start - 0.6) × 3，超限会被截断
 - 如果提供了 `--context`，使用角色名（如 Big、凯莉）
+
+## 帧级 VLM 数据（Phase 1-3）
+
+启用 `vlm_frame_facts: True` 后，VLM 分析会额外输出每帧的动作描述（而非仅场景概括）。
+
+**vlm_analysis.json 格式变化**:
+```json
+{
+  "scene_id": 1, "start": 5.0, "end": 15.0,
+  "description": "男子闯入房间",
+  "depth_analysis": "...",
+  "frame_facts": {
+    "5.0": ["男子闯入房间, 头发蓬乱表情紧张"],
+    "10.0": ["男子俯身盯着床上男孩, 男孩睁眼惊醒"],
+    "12.0": ["男孩拿起桌上茶壶直接对嘴喝了一口"]
+  }
+}
+```
+
+**Agent 模式利用帧级数据**: 读取 `vlm_analysis.json` 时，`frame_facts` 提供了精确到每帧的画面动作细节，可用于撰写精确对齐画面的解说词。
+
+**Auto 模式增强**: 启用后 pipeline 自动将帧动作注入解说 prompt，LLM 获得精确画面信息，减少幻觉。
+
+**相关 CONFIG**: `vlm_frame_facts`, `vlm_max_tokens`, `narration_auto_rewrite`, `asr_temporal_annotation`。详见 [references/internal-config.md](references/internal-config.md)
 
 ## 参数
 
