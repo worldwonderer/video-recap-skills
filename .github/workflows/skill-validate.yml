@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install deps
-        run: pip3 install --break-system-packages pyflakes
+        run: pip3 install --break-system-packages pyflakes pytest
       - name: Lint
         run: cd skills/video-recap/scripts && python3 -m pyflakes *.py
       - name: Check SKILL.md
