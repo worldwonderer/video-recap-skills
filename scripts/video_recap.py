@@ -3189,6 +3189,12 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
                 covered.add(s["scene_id"])
                 break
     coverage_pct = len(covered) / len(vlm_analysis) * 100 if vlm_analysis else 100
+    # 过滤空解说段（重写链路可能产生空文本）
+    before = len(narration)
+    narration = [n for n in narration if n.get("narration", "").strip()]
+    removed = before - len(narration)
+    if removed:
+        log(f"  过滤 {removed} 个空解说段")
     narration.sort(key=lambda x: x["start"])
     overlaps = sum(1 for i in range(1, len(narration)) if narration[i]["start"] < narration[i-1]["end"])
     total_time = time.time() - pipeline_start
