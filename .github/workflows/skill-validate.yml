@@ -1,0 +1,36 @@
+name: Skill Validate
+on:
+  pull_request:
+    paths:
+      - 'skills/**'
+
+jobs:
+  validate:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: pip3 install pyflakes
+      - name: Lint
+        run: cd skills/video-recap/scripts && python3 -m pyflakes *.py
+      - name: Check SKILL.md
+        run: |
+          LINES=$(wc -l < skills/video-recap/SKILL.md)
+          if [ "$LINES" -gt 100 ]; then echo "SKILL.md has $LINES lines, must be ≤100"; exit 1; fi
+          head -1 skills/video-recap/SKILL.md | grep -q "^---" || { echo "SKILL.md missing frontmatter"; exit 1; }
+      - name: Validate prompt anchors
+        run: |
+          cd skills/video-recap/scripts
+          python3 -c "
+          import re, glob
+          anchors = set()
+          for f in glob.glob('*.py'):
+              for m in re.finditer(r'load_prompt\([\"\\x27](.+?)[\"\\x27]\)', open(f).read()):
+                  anchors.add(m.group(1))
+          content = open('../references/prompt-templates.md').read()
+          for a in sorted(anchors):
+              if f'### {a}' not in content:
+                  print(f'MISSING anchor: ### {a}')
+                  exit(1)
+          print(f'All {len(anchors)} anchors OK')
+          "
