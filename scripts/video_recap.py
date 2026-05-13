@@ -58,7 +58,6 @@ CONFIG = {
     "narration_mode": "zone",       # "zone": 大段解说+原声交替 | "scene": 逐场景解说
     "zone_min_duration": 6.0,        # 解说区最短秒数，短于此的安静窗口不单独成区
     "zone_merge_gap": 3.0,          # 相邻安静窗口间隔<此值时合并为一个解说区
-    "zone_bridge_speech_max": 8.0,  # 桥接最长多少秒的语音段（0=不桥接，8=桥接短对话创建更长的解说区）
     "zone_ducking_volume": 0.12,    # 解说区原声音量（大幅压低）
     "zone_fade_seconds": 0.5,      # 解说/原声切换的淡入淡出时长(秒)
     "narration_delay_seconds": 6.0,  # 解说延迟放置秒数，让画面先出现再解说
@@ -77,10 +76,6 @@ CONFIG = {
     "fill_workers": 4,           # 填充解说并行 API 线程数
     "skip_narrative_analysis": True,  # 跳过叙事结构分析（省57-130s，对质量影响极小）
     "burn_subtitles": False,  # 烧录字幕到视频（需要重编码）
-    "vlm_frame_facts": False,  # 启用帧级动作描述（Phase 1）
-    "vlm_max_tokens": 800,  # VLM 最大输出 token（500=原始, 800=含帧标签）
-    "narration_auto_rewrite": False,  # 启用关键词检测+自动重写（Phase 2）
-    "asr_temporal_annotation": False,  # 启用ASR模糊时间标注（Phase 3）
 }
 
 SCRIPT_DIR = Path(__file__).parent
@@ -428,11 +423,11 @@ def detect_silence_periods(video_path, work_dir, asr_result=None):
 def identify_narration_zones(silence_periods, scenes_analysis, video_duration):
     """将相邻安静窗口合并为解说区，返回解说区列表。
     每个解说区: {start, end, duration, scenes: [...]}
-    支持桥接短语音段（zone_bridge_speech_max）来创建更长的解说区。
+    支持桥接短语音段来创建更长的解说区。
     """
     merge_gap = CONFIG.get("zone_merge_gap", 3.0)
     min_dur = CONFIG.get("zone_min_duration", 6.0)
-    bridge_speech = CONFIG.get("zone_bridge_speech_max", 0.0)
+    bridge_speech = 0.0
 
     # 只取安静窗口
     quiets = sorted(
@@ -494,20 +489,19 @@ def _parse_vlm_depth_response(raw_text):
 
     # 提取【帧标签】
     frame_facts = {}
-    if CONFIG.get("vlm_frame_facts"):
-        facts_match = re.search(r'【帧标签】\s*\n?(.*?)(?=【深层分析】|$)', raw_text, re.DOTALL)
-        if facts_match:
-            for line in facts_match.group(1).strip().split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                # 格式: "12.0s | 男子拿起茶壶对嘴喝, 满脸疲惫"
-                m = re.match(r'([\d.]+)\s*s?\s*\|\s*(.+)', line)
-                if m:
-                    ts = m.group(1)
-                    actions = [a.strip() for a in m.group(2).split(",") if a.strip()]
-                    if actions:
-                        frame_facts[ts] = actions
+    facts_match = re.search(r'【帧标签】\s*\n?(.*?)(?=【深层分析】|$)', raw_text, re.DOTALL)
+    if facts_match:
+        for line in facts_match.group(1).strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            # 格式: "12.0s | 男子拿起茶壶对嘴喝, 满脸疲惫"
+            m = re.match(r'([\d.]+)\s*s?\s*\|\s*(.+)', line)
+            if m:
+                ts = m.group(1)
+                actions = [a.strip() for a in m.group(2).split(",") if a.strip()]
+                if actions:
+                    frame_facts[ts] = actions
 
     # 提取【深层分析】
     depth_match = re.search(r'【深层分析】\s*\n?(.*?)$', raw_text, re.DOTALL)
@@ -578,17 +572,14 @@ def analyze_scenes(scenes, frames, work_dir):
             })
 
         # 帧级事实标签：将帧时间注入prompt
-        if CONFIG.get("vlm_frame_facts"):
-            frame_ts_list = [f"{frame_times[f]:.1f}s" for f in scene_frames]
-            frame_ts_text = "帧时间点: " + ", ".join(frame_ts_list)
-            content_parts.append({"type": "text", "text": frame_ts_text + "\n\n" + vlm_prompt})
-        else:
-            content_parts.append({"type": "text", "text": vlm_prompt})
+        frame_ts_list = [f"{frame_times[f]:.1f}s" for f in scene_frames]
+        frame_ts_text = "帧时间点: " + ", ".join(frame_ts_list)
+        content_parts.append({"type": "text", "text": frame_ts_text + "\n\n" + vlm_prompt})
 
         payload = {
             "model": CONFIG["vlm_model"],
             "messages": [{"role": "user", "content": content_parts}],
-            "max_tokens": CONFIG.get("vlm_max_tokens", 800) if CONFIG.get("vlm_frame_facts") else 500,
+            "max_tokens": 800,
         }
 
         log(f"VLM 分析场景 {i+1}/{len(scenes)} ({len(scene_frames)} 帧)...")
@@ -612,7 +603,7 @@ def analyze_scenes(scenes, frames, work_dir):
                 payload = {
                     "model": CONFIG["vlm_model"],
                     "messages": [{"role": "user", "content": retry_parts}],
-                    "max_tokens": CONFIG.get("vlm_max_tokens", 800) if CONFIG.get("vlm_frame_facts") else 500,
+                    "max_tokens": 800,
                 }
 
         # 解析 【描述】、【帧标签】和【深层分析】
@@ -742,8 +733,6 @@ def _distribute_asr_by_time(asr_result, scenes_analysis):
 
 def _annotate_asr_temporal(asr_result, scenes_analysis):
     """利用帧动作描述中的对白/字幕信息为 ASR 大块文本添加模糊时间标注"""
-    if not CONFIG.get("vlm_frame_facts") or not CONFIG.get("asr_temporal_annotation"):
-        return _distribute_asr_by_scenes(asr_result, scenes_analysis)
 
     # 从帧动作描述中收集带时间的锚点文本
     anchors = []  # [(timestamp, snippet_text)]
@@ -1052,7 +1041,7 @@ def _fallback_zone_narration(zones):
 def _format_frame_facts(scene):
     """将帧动作描述格式化为可注入 scenes_text/zones_text 的文本"""
     facts = scene.get("frame_facts", {})
-    if not facts or not CONFIG.get("vlm_frame_facts"):
+    if not facts:
         return ""
     lines = []
     for ts in sorted(facts.keys(), key=lambda x: float(x)):
@@ -1135,9 +1124,7 @@ def generate_narration(scenes_analysis, asr_result, work_dir, style="纪录片",
             scenes_text += f"- 场景{s['scene_id']+1}{role_tag} ({s['start']:.1f}s-{s['end']:.1f}s, 总预算{max_chars}字, 每段≤{per_seg_max}字): {s['description']}{depth_text}{_format_frame_facts(s)}{quiet_text}\n"
 
     # 组装 ASR 文本（按场景时间段分配）
-    asr_text = _annotate_asr_temporal(asr_result, scenes_analysis) \
-        if (CONFIG.get("vlm_frame_facts") and CONFIG.get("asr_temporal_annotation")) \
-        else _distribute_asr_by_scenes(asr_result, scenes_analysis)
+    asr_text = _annotate_asr_temporal(asr_result, scenes_analysis)
 
     user_content = user_prompt_template.format(
         scenes_analysis=scenes_text.strip(),
@@ -1815,9 +1802,6 @@ def _post_dedup_narration(narration):
 
 def _validate_and_rewrite_narration(narration, vlm_analysis, work_dir):
     """关键词检测 → 约束重写闭环"""
-    if not CONFIG.get("vlm_frame_facts"):
-        return narration, {"segments": [], "summary": "skipped: vlm_frame_facts disabled"}
-
     pass_threshold = 0.30
     warn_threshold = 0.10
     report_segments = []
@@ -1884,7 +1868,7 @@ def _validate_and_rewrite_narration(narration, vlm_analysis, work_dir):
         report_segments.append(seg_report)
 
         # WARN_HIGH 且启用自动重写 → 约束重写
-        if level == "WARN_HIGH" and CONFIG.get("narration_auto_rewrite"):
+        if level == "WARN_HIGH":
             log(f"  对齐检测 WARN_HIGH ({match_rate:.0%}): \"{text[:30]}...\" → 触发重写")
             rewritten = _rewrite_segment_with_constraints(n, vlm_analysis, mismatched)
             if rewritten:

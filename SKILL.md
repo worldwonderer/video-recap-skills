@@ -60,11 +60,14 @@ python3 scripts/video_recap.py <video> --resume work_dir
 - **字数预算**：每段字数 ≤ (end - start - 0.6) × 3，超限会被截断
 - 如果提供了 `--context`，使用角色名（如 Big、凯莉）
 
-## 帧级 VLM 数据（Phase 1-3）
+## 帧级 VLM 数据
 
-启用 `vlm_frame_facts: True` 后，VLM 分析会额外输出每帧的动作描述（而非仅场景概括）。
+VLM 分析始终输出每帧的动作描述（`frame_facts`），pipeline 自动用于：
+- 解说生成时注入精确画面信息，减少幻觉
+- 解说-画面对齐检测，不匹配时自动约束重写
+- ASR 文本时间标注，提升解说与对白的时间对齐
 
-**vlm_analysis.json 格式变化**:
+**vlm_analysis.json 示例**:
 ```json
 {
   "scene_id": 1, "start": 5.0, "end": 15.0,
@@ -72,17 +75,10 @@ python3 scripts/video_recap.py <video> --resume work_dir
   "depth_analysis": "...",
   "frame_facts": {
     "5.0": ["男子闯入房间, 头发蓬乱表情紧张"],
-    "10.0": ["男子俯身盯着床上男孩, 男孩睁眼惊醒"],
-    "12.0": ["男孩拿起桌上茶壶直接对嘴喝了一口"]
+    "10.0": ["男子俯身盯着床上男孩, 男孩睁眼惊醒"]
   }
 }
 ```
-
-**Agent 模式利用帧级数据**: 读取 `vlm_analysis.json` 时，`frame_facts` 提供了精确到每帧的画面动作细节，可用于撰写精确对齐画面的解说词。
-
-**Auto 模式增强**: 启用后 pipeline 自动将帧动作注入解说 prompt，LLM 获得精确画面信息，减少幻觉。
-
-**相关 CONFIG**: `vlm_frame_facts`, `vlm_max_tokens`, `narration_auto_rewrite`, `asr_temporal_annotation`。详见 [references/internal-config.md](references/internal-config.md)
 
 ## 参数
 
