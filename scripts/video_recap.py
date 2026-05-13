@@ -60,7 +60,7 @@ CONFIG = {
     "zone_merge_gap": 3.0,          # 相邻安静窗口间隔<此值时合并为一个解说区
     "zone_ducking_volume": 0.12,    # 解说区原声音量（大幅压低）
     "zone_fade_seconds": 0.5,      # 解说/原声切换的淡入淡出时长(秒)
-    "narration_delay_seconds": 6.0,  # 解说延迟放置秒数，让画面先出现再解说
+    "narration_delay_seconds": 1.5,  # 解说延迟放置秒数，让画面先出现再解说
     "quiet_ducking_volume": 0.7,     # 解说在安静窗口时原声音量(scene模式)
     "speech_ducking_volume": 0.2,    # 解说与对白重叠时原声音量(scene模式)
     "silence_noise_threshold": "-25dB",  # ffmpeg silencedetect 噪声阈值
@@ -394,12 +394,19 @@ def detect_silence_periods(video_path, work_dir, asr_result=None):
     periods = [p for p in merged if p["duration"] >= quiet_min]
 
     # 与 ASR 交叉验证：标记有语音的窗口
-    # 处理 ASR 只有少量大段（如整段视频一个段）的情况：
-    # 如果 ASR 段数 <= 3 且覆盖 >80% 视频时长，跳过交叉验证（信息量不足）
+    # 跳过条件：ASR 段太粗（无法精确判断语音位置）
+    # 1. 段数少(<=5)且覆盖>80%视频时长 → 时间戳不可靠
+    # 2. 覆盖率>150% → 时间戳明显异常
+    # 3. 平均段长>30s → 粒度太粗，无法判断哪些窗口有语音
     if asr_result:
         video_dur = get_video_duration(str(audio_path))
         asr_coverage = sum(seg.get("end", 0) - seg.get("start", 0) for seg in asr_result)
-        skip_cross_check = len(asr_result) <= 3 and asr_coverage > video_dur * 0.8
+        avg_seg_dur = asr_coverage / len(asr_result) if asr_result else 0
+        skip_cross_check = (
+            (len(asr_result) <= 5 and asr_coverage > video_dur * 0.8) or
+            asr_coverage > video_dur * 1.5 or
+            avg_seg_dur > 30
+        )
         if not skip_cross_check:
             for qp in periods:
                 for seg in asr_result:
@@ -1964,6 +1971,93 @@ def _extract_json_from_text(text):
     return ""
 
 
+def _zone_coverage_fill(narration, scenes_analysis, asr_result, silence_periods, work_dir):
+    """混合模式补充：zone 解说后，为未覆盖的重要场景生成 fill 解说。
+    fill 段标记 overlaps_speech=True，组装时使用 speech ducking。
+    """
+    if not narration or not scenes_analysis:
+        return narration
+
+    # 计算当前覆盖的场景
+    covered = set()
+    for n in narration:
+        if not n.get("narration", "").strip():
+            continue
+        n_mid = (n["start"] + n["end"]) / 2
+        for s in scenes_analysis:
+            if s["start"] <= n_mid <= s["end"]:
+                covered.add(s["scene_id"])
+                break
+    coverage = len(covered) / len(scenes_analysis)
+    target = 0.60
+    if coverage >= target:
+        log(f"Zone+Fill 覆盖率 {coverage:.0%} 已达标 ({len(covered)}/{len(scenes_analysis)})")
+        return narration
+
+    # 找未覆盖的重要场景（>5s）
+    uncovered = [s for s in scenes_analysis
+                 if s["scene_id"] not in covered and (s["end"] - s["start"]) >= 5.0]
+    if not uncovered:
+        return narration
+    log(f"Zone 覆盖率 {coverage:.0%}，补充 {len(uncovered)} 个重要未覆盖场景 (ducking)")
+
+    # 构建 ASR 场景映射
+    scene_asr = {}
+    if asr_result:
+        for seg in asr_result:
+            text = seg.get("text", "").strip()
+            if not text:
+                continue
+            a_start = seg.get("start", 0)
+            a_end = seg.get("end", 0)
+            for s in scenes_analysis:
+                if s["start"] < a_end and s["end"] > a_start:
+                    scene_asr.setdefault(s["scene_id"], []).append(text)
+
+    # 构建 context
+    narration_sorted = sorted(narration, key=lambda x: x["start"])
+    existing_ctx = "\n".join(
+        f"  [{n['start']:.1f}-{n['end']:.1f}] {n['narration']}"
+        for n in narration_sorted
+    )
+
+    # 并行 fill
+    fill_workers = min(len(uncovered), CONFIG.get("fill_workers", 4))
+    with ThreadPoolExecutor(max_workers=fill_workers) as executor:
+        futures = {executor.submit(
+            _generate_single_fill, scene, silence_periods, existing_ctx,
+            "; ".join(scene_asr.get(scene["scene_id"], []))
+        ): scene for scene in uncovered}
+        for future in as_completed(futures):
+            try:
+                seg = future.result()
+            except Exception:
+                continue
+            if seg:
+                seg["overlaps_speech"] = True
+                narration.append(seg)
+
+    narration.sort(key=lambda x: x["start"])
+    # 去重
+    narration = _post_dedup_narration(narration)
+
+    # 报告最终覆盖率
+    covered2 = set()
+    for n in narration:
+        if not n.get("narration", "").strip():
+            continue
+        n_mid = (n["start"] + n["end"]) / 2
+        for s in scenes_analysis:
+            if s["start"] <= n_mid <= s["end"]:
+                covered2.add(s["scene_id"])
+                break
+    final_cov = len(covered2) / len(scenes_analysis) if scenes_analysis else 1.0
+    zone_count = sum(1 for n in narration if not n.get("overlaps_speech"))
+    fill_count = sum(1 for n in narration if n.get("overlaps_speech"))
+    log(f"混合模式完成: {len(narration)} 段 (zone={zone_count}, fill={fill_count}), 覆盖率 {final_cov:.0%}")
+    return narration
+
+
 def _align_narration_to_quiet(narration, scenes_analysis, silence_periods):
     """将解说段移到同场景内的安静窗口，标记是否与语音重叠"""
     if not silence_periods:
@@ -2947,6 +3041,9 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
                 narration, _ = _validate_and_rewrite_narration(narration, vlm_analysis, work_dir)
                 narration = _post_dedup_narration(narration)
                 narration = _align_narration_to_quiet(narration, vlm_analysis, silence_periods)
+                # 混合补充：zone 模式覆盖率不足时，为重要未覆盖场景补充 fill 解说
+                narration = _zone_coverage_fill(narration, vlm_analysis, asr_result,
+                                                silence_periods, work_dir)
             else:
                 log("解说区为空，fallback 到逐场景模式")
                 narration = generate_narration(vlm_analysis, asr_result, work_dir, style,
