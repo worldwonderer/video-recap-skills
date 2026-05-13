@@ -423,11 +423,9 @@ def detect_silence_periods(video_path, work_dir, asr_result=None):
 def identify_narration_zones(silence_periods, scenes_analysis, video_duration):
     """将相邻安静窗口合并为解说区，返回解说区列表。
     每个解说区: {start, end, duration, scenes: [...]}
-    支持桥接短语音段来创建更长的解说区。
     """
     merge_gap = CONFIG.get("zone_merge_gap", 3.0)
     min_dur = CONFIG.get("zone_min_duration", 6.0)
-    bridge_speech = 0.0
 
     # 只取安静窗口
     quiets = sorted(
@@ -437,18 +435,13 @@ def identify_narration_zones(silence_periods, scenes_analysis, video_duration):
     if not quiets:
         return []
 
-    # 合并相邻窗口（支持桥接短语音段）
+    # 合并相邻窗口
     merged = [dict(quiets[0])]
     for qp in quiets[1:]:
         gap = qp["start"] - merged[-1]["end"]
         if gap <= merge_gap:
             merged[-1]["end"] = qp["end"]
             merged[-1]["duration"] = merged[-1]["end"] - merged[-1]["start"]
-        elif bridge_speech > 0 and gap <= bridge_speech:
-            # 桥接短语音段：扩展解说区但标记包含桥接语音
-            merged[-1]["end"] = qp["end"]
-            merged[-1]["duration"] = merged[-1]["end"] - merged[-1]["start"]
-            merged[-1]["has_bridged_speech"] = True
         else:
             merged.append(dict(qp))
 
