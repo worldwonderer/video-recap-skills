@@ -1774,8 +1774,11 @@ def _extract_frame_entities(vlm_analysis, start, end):
     return entities
 
 
+def _char_bigrams(text):
+    return {text[i:i+2] for i in range(len(text)-1) if text[i:i+2].strip()}
+
 def _post_dedup_narration(narration):
-    """去除相邻相似解说段（字符级 Jaccard >60% 则合并）"""
+    """去除相邻相似解说段（bigram Jaccard >50% 则合并）"""
     if len(narration) < 2:
         return narration
     result = [narration[0]]
@@ -1784,13 +1787,13 @@ def _post_dedup_narration(narration):
         if not prev["narration"].strip() or not seg["narration"].strip():
             result.append(seg)
             continue
-        # 字符级 Jaccard 相似度
-        set_a, set_b = set(prev["narration"]), set(seg["narration"])
+        # bigram 级 Jaccard 相似度
+        set_a, set_b = _char_bigrams(prev["narration"]), _char_bigrams(seg["narration"])
         if not set_a or not set_b:
             result.append(seg)
             continue
         overlap = len(set_a & set_b) / min(len(set_a), len(set_b))
-        if overlap > 0.6:
+        if overlap > 0.4:
             # 保留更长的版本，合并时间范围
             if len(seg["narration"]) > len(prev["narration"]):
                 prev["narration"] = seg["narration"]
@@ -1983,45 +1986,82 @@ def _zone_coverage_fill(narration, scenes_analysis, asr_result, silence_periods,
     if not narration or not scenes_analysis:
         return narration
 
-    # 计算当前覆盖的场景
-    covered = set()
-    for n in narration:
-        if not n.get("narration", "").strip():
-            continue
-        n_mid = (n["start"] + n["end"]) / 2
-        for s in scenes_analysis:
-            if s["start"] <= n_mid <= s["end"]:
-                covered.add(s["scene_id"])
-                break
+    # 计算每个场景的覆盖百分比
+    scene_cov_pct = {}
+    for s in scenes_analysis:
+        s_dur = s["end"] - s["start"]
+        narrated = 0.0
+        for n in narration:
+            if not n.get("narration", "").strip():
+                continue
+            ov_start = max(n["start"], s["start"])
+            ov_end = min(n["end"], s["end"])
+            if ov_end > ov_start:
+                narrated += ov_end - ov_start
+        scene_cov_pct[s["scene_id"]] = narrated / s_dur if s_dur > 0 else 1.0
+
+    covered = {sid for sid, pct in scene_cov_pct.items() if pct >= 0.5}
     coverage = len(covered) / len(scenes_analysis)
     target = 0.60
     if coverage >= target:
         log(f"Zone+Fill 覆盖率 {coverage:.0%} 已达标 ({len(covered)}/{len(scenes_analysis)})")
         return narration
 
-    # 找未覆盖的重要场景（>5s），长场景拆分为子段
+    # 找覆盖不足的场景（<50%），同场景合并为单次 fill 避免重复
     uncovered_raw = [s for s in scenes_analysis
-                     if s["scene_id"] not in covered and (s["end"] - s["start"]) >= 5.0]
+                     if scene_cov_pct.get(s["scene_id"], 0) < 0.5 and (s["end"] - s["start"]) >= 5.0]
     uncovered = []
     for s in uncovered_raw:
-        dur = s["end"] - s["start"]
-        if dur <= 30:
-            uncovered.append(s)
+        s_dur = s["end"] - s["start"]
+        # 计算该场景内已解说区间
+        narrated_intervals = []
+        for n in narration:
+            if not n.get("narration", "").strip():
+                continue
+            ov_start = max(n["start"], s["start"])
+            ov_end = min(n["end"], s["end"])
+            if ov_end > ov_start:
+                narrated_intervals.append((ov_start, ov_end))
+        narrated_intervals.sort()
+
+        # 计算未覆盖的间隙
+        gaps = []
+        cursor = s["start"]
+        for ns, ne in narrated_intervals:
+            if ns > cursor + 1.0:
+                gaps.append((cursor, ns))
+            cursor = max(cursor, ne)
+        if cursor < s["end"] - 1.0:
+            gaps.append((cursor, s["end"]))
+
+        if not gaps:
+            continue
+
+        # 合并策略：同场景的所有间隙合并为1个 fill 请求
+        # 只有大间隙(>25s)才拆分为2个 fill
+        total_gap = sum(ge - gs for gs, ge in gaps)
+        if total_gap <= 25 or len(gaps) == 1:
+            merged_start = gaps[0][0]
+            merged_end = gaps[-1][1]
+            sub = dict(s)
+            sub["start"] = merged_start
+            sub["end"] = min(merged_end, merged_start + 25)  # 最多覆盖25s
+            sub["is_sub"] = True
+            uncovered.append(sub)
         else:
-            # 拆分为 ~20s 子段
-            sub_dur = 20.0
-            pos = s["start"]
-            idx = 0
-            while pos < s["end"]:
-                sub_end = min(pos + sub_dur, s["end"])
-                sub = dict(s)
-                sub["start"] = pos
-                sub["end"] = sub_end
-                sub["is_sub"] = True
-                sub["sub_idx"] = idx
-                uncovered.append(sub)
-                pos = sub_end
-                idx += 1
+            # 超长间隙拆为2段：前半+后半，各最多25s
+            mid = gaps[0][0] + total_gap / 2
+            sub1 = dict(s)
+            sub1["start"] = gaps[0][0]
+            sub1["end"] = min(mid, gaps[0][0] + 25)
+            sub1["is_sub"] = True
+            uncovered.append(sub1)
+            if mid < gaps[-1][1]:
+                sub2 = dict(s)
+                sub2["start"] = max(mid, gaps[-1][1] - 25)
+                sub2["end"] = gaps[-1][1]
+                sub2["is_sub"] = True
+                uncovered.append(sub2)
     if not uncovered:
         return narration
     log(f"Zone 覆盖率 {coverage:.0%}，补充 {len(uncovered)} 个重要未覆盖场景 (ducking)")
@@ -2066,16 +2106,20 @@ def _zone_coverage_fill(narration, scenes_analysis, asr_result, silence_periods,
     # 去重
     narration = _post_dedup_narration(narration)
 
-    # 报告最终覆盖率
+    # 报告最终覆盖率（基于时长百分比）
     covered2 = set()
-    for n in narration:
-        if not n.get("narration", "").strip():
-            continue
-        n_mid = (n["start"] + n["end"]) / 2
-        for s in scenes_analysis:
-            if s["start"] <= n_mid <= s["end"]:
-                covered2.add(s["scene_id"])
-                break
+    for s in scenes_analysis:
+        s_dur = s["end"] - s["start"]
+        narrated = 0.0
+        for n in narration:
+            if not n.get("narration", "").strip():
+                continue
+            ov_start = max(n["start"], s["start"])
+            ov_end = min(n["end"], s["end"])
+            if ov_end > ov_start:
+                narrated += ov_end - ov_start
+        if narrated / s_dur >= 0.5 if s_dur > 0 else True:
+            covered2.add(s["scene_id"])
     final_cov = len(covered2) / len(scenes_analysis) if scenes_analysis else 1.0
     zone_count = sum(1 for n in narration if not n.get("overlaps_speech"))
     fill_count = sum(1 for n in narration if n.get("overlaps_speech"))
