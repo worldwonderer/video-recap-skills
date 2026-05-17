@@ -40,6 +40,21 @@ def generate_narration_zones(zones, asr_result, work_dir, style="纪录片"):
                 parts.append(f"世界观设定: {research['worldbuilding']}")
             if research.get("episode_context"):
                 parts.append(f"当前集上下文: {research['episode_context']}")
+            if research.get("character_details"):
+                details = []
+                for name, info in research["character_details"].items():
+                    rels = ", ".join(info.get("relationships", []))
+                    role = info.get("role", "")
+                    details.append(f"  - {name}({role}): {rels}")
+                parts.append(f"角色关系:\n" + "\n".join(details))
+            if research.get("plot_arcs"):
+                arcs = "\n".join(f"  - {a['name']}: {a['description']} ({a.get('status','')})"
+                                 for a in research["plot_arcs"])
+                parts.append(f"剧情线索:\n{arcs}")
+            if research.get("cultural_notes"):
+                notes = "\n".join(f"  - {n['item']}: {n['explanation']}"
+                                  for n in research["cultural_notes"])
+                parts.append(f"文化背景:\n{notes}")
             if parts:
                 system_prompt += "\n\n【背景知识（从网络调研获得）】\n" + "\n".join(parts)
                 log(f"  注入背景调研: {len(parts)} 个维度")

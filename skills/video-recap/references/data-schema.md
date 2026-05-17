@@ -70,6 +70,21 @@ Agent 撰写的解说词（字段详见 `agent-mode-workflow.md`）：
   "synopsis": "剧情概要",
   "characters": {"角色名": "角色简介"},
   "worldbuilding": "世界观设定",
-  "episode_context": "集数上下文"
+  "episode_context": "集数上下文",
+  "character_details": {
+    "角色名": {
+      "aliases": ["别名/昵称"],
+      "role": "主角|配角|反派|次要角色",
+      "relationships": ["与XX是夫妻", "与YY是师徒"]
+    }
+  },
+  "plot_arcs": [
+    {"name": "线索名称", "description": "简要描述", "status": "进行中|已解决|伏笔"}
+  ],
+  "cultural_notes": [
+    {"item": "文化梗/典故/时代背景", "explanation": "解释"}
+  ]
 }
 ```
+
+> `character_details`、`plot_arcs`、`cultural_notes` 为（可选，新增）字段。仅含 `synopsis`、`characters`、`worldbuilding`、`episode_context` 四个原始字段的旧 JSON 仍然有效。

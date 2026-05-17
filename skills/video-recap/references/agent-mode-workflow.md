@@ -10,7 +10,11 @@ Agent 写解说词前，先读取以下中间文件（均在 work_dir/ 下）：
 | `asr_result.json` | 语音转文字结果，含时间戳和对白文本 |
 | `silence_periods.json` | 静音窗口列表，用于确定解说放置位置 |
 
-## 背景调研（可选）
+## 背景调研（推荐）
+
+详细操作指南见 `references/research-guide.md`。以下为快速参考。
+
+当 `--context` 包含节目/电影名称时，推荐使用 `browser-cdp` skill 进行背景调研。调研结果可丰富解说中的角色关系、剧情走向和文化背景，提升解说深度。若用户拒绝或 `browser-cdp` 不可用，则跳过调研继续后续流程。
 
 用 `browser-cdp` skill 搜索以下内容，写入 `work_dir/background_research.json`：
 
