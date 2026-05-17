@@ -30,6 +30,16 @@ def _is_step_done(work_dir, step_name):
     """检查步骤是否已完成"""
     return (work_dir / f".step_{step_name}.done").exists()
 
+
+def _command_available(command):
+    """Return True when command is an existing path or resolvable on PATH."""
+    if not command:
+        return False
+    if os.path.sep in command or (os.path.altsep and os.path.altsep in command):
+        return os.path.exists(command)
+    return shutil.which(command) is not None
+
+
 def check_prerequisites(skip_asr=False):
     """检查依赖"""
     checks = {
@@ -37,8 +47,11 @@ def check_prerequisites(skip_asr=False):
         "ffprobe": shutil.which("ffprobe") is not None,
     }
     if not skip_asr:
-        checks["asr_binary"] = os.path.exists(CONFIG["asr_bin"])
-        checks["asr_model"] = os.path.exists(CONFIG["asr_model_dir"])
+        if not CONFIG.get("asr_model_dir"):
+            log("未设置 ASR_MODEL_DIR，ASR 步骤失败时将继续无 ASR")
+        else:
+            checks["asr_binary"] = _command_available(CONFIG["asr_bin"])
+            checks["asr_model"] = os.path.exists(CONFIG["asr_model_dir"])
 
     missing = [k for k, v in checks.items() if not v]
     if missing:
@@ -49,6 +62,53 @@ def check_prerequisites(skip_asr=False):
     return True
 
 
+def _load_json_file(path, label):
+    """Load a required pipeline JSON artifact with a clear error message."""
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"缺少 {label}: {path}") from exc
+
+
+def _run_cached_tail_step(video_path, work_dir, step, style, output_dir):
+    """Run tts/assemble from existing artifacts without VLM/LLM/API prerequisites."""
+    if step not in ("tts", "assemble"):
+        return None
+
+    if step == "tts":
+        narration = _load_json_file(work_dir / "narration.json", "narration.json")
+        tts_segments, engine_used = synthesize_tts(narration, work_dir)
+        tts_meta = work_dir / "tts_meta.json"
+        tts_meta.write_text(json.dumps({
+            "segments": tts_segments, "engine": engine_used
+        }, ensure_ascii=False, indent=2))
+        _step_done(work_dir, "tts")
+        log(f"步骤 tts 完成 ({len(tts_segments)} 段, 引擎: {engine_used})")
+        return {"segments": tts_segments, "engine": engine_used}
+
+    tts_meta = work_dir / "tts_meta.json"
+    if tts_meta.exists():
+        tts_info = _load_json_file(tts_meta, "tts_meta.json")
+        tts_segments = tts_info["segments"]
+    else:
+        narration = _load_json_file(work_dir / "narration.json", "narration.json")
+        tts_segments, engine_used = synthesize_tts(narration, work_dir)
+        tts_meta.write_text(json.dumps({
+            "segments": tts_segments, "engine": engine_used
+        }, ensure_ascii=False, indent=2))
+        _step_done(work_dir, "tts")
+
+    output_path = work_dir / "output.mp4"
+    assemble_video(video_path, tts_segments, work_dir, output_path)
+    _step_done(work_dir, "assemble")
+
+    final_output = Path(output_dir) / f"recap_{video_path.stem}.mp4" if output_dir else work_dir.parent / f"recap_{video_path.stem}.mp4"
+    if final_output != output_path:
+        shutil.copy2(str(output_path), str(final_output))
+    log(f"步骤 assemble 完成: {final_output}")
+    return {"output": str(final_output), "work_dir": str(work_dir)}
+
+
 # ── Main Pipeline ─────────────────────────────────────────────────────
 
 def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
@@ -56,9 +116,6 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
                  agent_mode=False):
     """执行完整的视频解说 pipeline"""
     pipeline_start = time.time()
-    if not CONFIG.get("api_key"):
-        raise RuntimeError("请设置 OPENAI_API_KEY 环境变量")
-
     video_path = Path(video_path)
     if not video_path.exists():
         raise FileNotFoundError(f"视频不存在: {video_path}")
@@ -99,6 +156,9 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
             result = steps[step]()
             log(f"步骤 {step} 完成")
             return result
+        cached_result = _run_cached_tail_step(video_path, work_dir, step, style, output_dir)
+        if cached_result is not None:
+            return cached_result
         else:
             log(f"步骤 {step} 需要完整 pipeline，自动运行全部步骤")
 
@@ -107,8 +167,13 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
     log("开始完整视频解说 pipeline")
     log("=" * 50)
 
+    needs_vlm_api = not _is_step_done(work_dir, "vlm")
+    needs_script_api = not agent_mode and not _is_step_done(work_dir, "script")
+    if not CONFIG.get("api_key") and (needs_vlm_api or needs_script_api):
+        raise RuntimeError("请设置 OPENAI_API_KEY 环境变量")
+
     # API 连通性预检（避免跑完帧提取+ASR 才发现 API 不可用）
-    if not _is_step_done(work_dir, "vlm"):
+    if needs_vlm_api:
         log("API 连通性预检...")
         try:
             api_call({
@@ -150,6 +215,9 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
         log(f"跳过 ASR（已存在 {len(asr_result)} 段）")
     elif skip_asr:
         asr_result = []
+        (work_dir / "asr_result.json").write_text(
+            json.dumps(asr_result, ensure_ascii=False, indent=2))
+        _step_done(work_dir, "asr")
         log("跳过 ASR")
     else:
         t0 = time.time()
@@ -204,7 +272,8 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
         log("   请 Agent 基于 vlm_analysis.json / asr_result.json / silence_periods.json 亲自撰写解说词")
         log(f"   写入 {work_dir}/narration.json 后执行:")
         log(f"   touch {work_dir}/.step_script.done")
-        log(f"   python3 {__file__} {video_path} --resume {work_dir}")
+        cli_path = Path(__file__).with_name("video_recap.py")
+        log(f"   python3 {cli_path} {video_path} --resume {work_dir}")
         log("=" * 50)
         (Path(work_dir) / ".step_script.paused").write_text("")
         # 创建空 narration.json 占位，防止 resume 时 FileNotFoundError
@@ -245,9 +314,6 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
         log(f"[{time.time()-t0:.1f}s] 解说脚本完成")
 
     # Step 6: TTS
-    style_voice = CONFIG.get("style_voices", {}).get(style)
-    if style_voice and CONFIG["tts_engine"] in ("auto", "edge-tts"):
-        CONFIG["edge_tts_voice"] = style_voice
     tts_meta = work_dir / "tts_meta.json"
     if _is_step_done(work_dir, "tts") and tts_meta.exists():
         tts_info = json.loads(tts_meta.read_text())
@@ -317,5 +383,3 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
         "overlaps": overlaps,
         "total_seconds": round(total_time),
     }
-
-

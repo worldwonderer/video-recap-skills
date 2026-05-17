@@ -5,7 +5,9 @@ from common import log, run_cmd
 
 def extract_frames(video_path, work_dir, fps=None):
     """提取视频帧"""
-    fps = fps or CONFIG["fps"]
+    fps = CONFIG["fps"] if fps is None else fps
+    if fps <= 0:
+        raise ValueError("fps 必须大于 0；完整 pipeline 会自动计算 fps")
     frames_dir = work_dir / "frames"
     frames_dir.mkdir(exist_ok=True)
 
@@ -19,4 +21,3 @@ def extract_frames(video_path, work_dir, fps=None):
     frames = sorted(frames_dir.glob("frame_*.jpg"))
     log(f"提取了 {len(frames)} 帧 ({fps}fps)")
     return frames
-

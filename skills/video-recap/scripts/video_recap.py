@@ -39,7 +39,8 @@ def main():
     parser.add_argument("--burn-subtitles", action="store_true",
                         help="烧录字幕到视频（会增加处理时间）")
     parser.add_argument("--ducking", choices=["sidechaincompress", "fixed", "none"],
-                        default=None, help="音频 ducking 模式 (默认: sidechaincompress)")
+                        default=None,
+                        help=f"音频 ducking 模式；默认使用配置值 {CONFIG['ducking_mode']}")
     parser.add_argument("--context", type=str, default="",
                         help="额外上下文（节目名、角色名等）")
     parser.add_argument("--model", type=str, default=None,
@@ -52,6 +53,14 @@ def main():
                         help="Agent 模式：在解说脚本步骤暂停，等待 Agent 手动写解说词")
     parser.add_argument("--voice", type=str, default=None,
                         help="覆盖 edge-tts 音色 (如 zh-CN-YunxiNeural)")
+    parser.add_argument("--vlm-workers", type=int, default=None,
+                        help="VLM 并行线程数；代理超时时建议设为 1 (默认: VLM_WORKERS 或配置值)")
+    parser.add_argument("--tts-workers", type=int, default=None,
+                        help="TTS 并行线程数 (默认: TTS_WORKERS 或配置值)")
+    parser.add_argument("--tts-timeout", type=int, default=None,
+                        help="单段 TTS 命令超时秒数 (默认: TTS_TIMEOUT 或配置值)")
+    parser.add_argument("--allow-partial-tts", action="store_true",
+                        help="允许部分 TTS 段失败后继续组装（默认失败即中止）")
 
     args = parser.parse_args()
 
@@ -69,7 +78,15 @@ def main():
         CONFIG["llm_model"] = args.llm_model
     if args.voice:
         CONFIG["edge_tts_voice"] = args.voice
-    if args.scene_threshold:
+    if args.vlm_workers is not None:
+        CONFIG["vlm_workers"] = max(1, args.vlm_workers)
+    if args.tts_workers is not None:
+        CONFIG["tts_workers"] = max(1, args.tts_workers)
+    if args.tts_timeout is not None:
+        CONFIG["tts_timeout"] = max(1, args.tts_timeout)
+    if args.allow_partial_tts:
+        CONFIG["allow_partial_tts"] = True
+    if args.scene_threshold is not None:
         CONFIG["scene_threshold"] = args.scene_threshold
     if args.ducking:
         CONFIG["ducking_mode"] = args.ducking

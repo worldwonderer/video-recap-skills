@@ -14,7 +14,11 @@ package: ## package skill
 	~/.claude/skills/skill-creator/scripts/package_skill.py $(SKILL_DIR)
 
 lint: ## lint
-	cd $(SKILL_DIR)/scripts && python3 -m pyflakes *.py
+	cd $(SKILL_DIR) && if command -v ruff >/dev/null 2>&1; then \
+		ruff check scripts tests; \
+	else \
+		python3 -m pyflakes scripts/*.py tests/*.py; \
+	fi
 
 test: ## run tests
 	cd $(SKILL_DIR) && python3 -m pytest tests/ -v

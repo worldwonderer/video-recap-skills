@@ -8,13 +8,15 @@ from common import log, run_cmd, get_video_duration
 
 def detect_scenes(video_path, work_dir, threshold=None):
     """使用 ffmpeg scdet 滤镜检测场景切换"""
-    threshold = threshold or CONFIG["scene_threshold"]
+    threshold = CONFIG["scene_threshold"] if threshold is None else threshold
     scdet_threshold = int(threshold * 100)
 
     cmd = ["ffmpeg", "-i", str(video_path),
            "-vf", f"scdet=threshold={scdet_threshold}",
            "-f", "null", "-"]
     result = run_cmd(cmd)
+    if result.returncode != 0:
+        raise RuntimeError(f"场景检测失败: {result.stderr}")
 
     # 解析 lavfi.scd.time 和 lavfi.scd.score
     times = []
@@ -203,4 +205,3 @@ def identify_narration_zones(silence_periods, scenes_analysis, video_duration):
         sc_ids = [str(s["scene_id"]+1) for s in z["scenes"]]
         log(f"  解说区{i+1}: {z['start']:.1f}s-{z['end']:.1f}s ({z['duration']:.1f}s, 场景{','.join(sc_ids)})")
     return zones
-

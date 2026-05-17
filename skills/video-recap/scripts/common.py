@@ -4,8 +4,10 @@ import subprocess
 import time
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
-from config import CONFIG, PROMPTS_DIR
+from config import CONFIG, PROMPTS_DIR, normalize_api_url
 
 # ── 工具函数 ──────────────────────────────────────────────────────────
 
@@ -26,7 +28,27 @@ def get_video_duration(video_path):
     result = run_cmd(cmd)
     if result.returncode != 0:
         return 0.0
-    return float(result.stdout.strip())
+    try:
+        return float(result.stdout.strip())
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _retry_after_seconds(value, fallback):
+    """Parse Retry-After seconds or HTTP-date; return fallback on malformed input."""
+    if not value:
+        return fallback
+    try:
+        return max(fallback, max(0, int(value)))
+    except (TypeError, ValueError):
+        pass
+    try:
+        retry_at = parsedate_to_datetime(value)
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(fallback, max(0, int((retry_at - datetime.now(timezone.utc)).total_seconds())))
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return fallback
 
 
 def api_call(payload, max_retries=5):
@@ -40,7 +62,7 @@ def api_call(payload, max_retries=5):
 
     for attempt in range(max_retries):
         try:
-            req = urllib.request.Request(CONFIG["api_url"], data=data, headers=headers)
+            req = urllib.request.Request(normalize_api_url(CONFIG["api_url"]), data=data, headers=headers)
             with urllib.request.urlopen(req, timeout=300) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
                 return result
@@ -49,8 +71,7 @@ def api_call(payload, max_retries=5):
             wait = 2 ** attempt
             if e.code == 429:
                 retry_after = e.headers.get("Retry-After")
-                if retry_after:
-                    wait = max(wait, int(retry_after))
+                wait = _retry_after_seconds(retry_after, wait)
                 log(f"API 速率限制 (尝试 {attempt+1}/{max_retries}), 等待 {wait}s")
             elif e.code == 401:
                 raise RuntimeError("API 认证失败 (401)。请检查 OPENAI_API_KEY 是否正确。")
@@ -134,4 +155,3 @@ def _parse_narration_json(text):
 
     log(f"警告: 无法解析 LLM JSON 输出 ({len(text)} 字符)")
     return []
-

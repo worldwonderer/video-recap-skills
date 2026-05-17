@@ -49,7 +49,7 @@ def generate_narration_zones(zones, asr_result, work_dir, style="纪录片"):
                     role = info.get("role", "")
                     details.append(f"  - {name}({role}): {rels}")
                 if details:
-                    parts.append(f"角色关系:\n" + "\n".join(details))
+                    parts.append("角色关系:\n" + "\n".join(details))
             if research.get("plot_arcs"):
                 arcs = "\n".join(f"  - {a.get('name','?')}: {a.get('description','')} ({a.get('status','')})"
                                  for a in research["plot_arcs"] if isinstance(a, dict))
@@ -315,7 +315,7 @@ def generate_narration(scenes_analysis, asr_result, work_dir, style="纪录片",
                 continue
             break
         except (KeyError, IndexError):
-            raise RuntimeError(f"LLM 返回异常: 响应缺少 choices[0].message (HTTP 200)")
+            raise RuntimeError("LLM 返回异常: 响应缺少 choices[0].message (HTTP 200)")
 
     if not narration_text:
         raise RuntimeError("LLM 多次返回空 content，请检查模型或 API 配置")
@@ -1384,4 +1384,3 @@ def _align_narration_to_quiet(narration, scenes_analysis, silence_periods):
                 n["narration"] = ""
 
     return narration
-

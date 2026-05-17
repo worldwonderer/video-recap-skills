@@ -1,6 +1,7 @@
 import os
 import re
 import shutil
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import CONFIG
@@ -99,12 +100,7 @@ def _synthesize_segment(i, seg, narration, tts_dir, engine):
     else:
         rate, pitch = "+0%", "+0Hz"
 
-    if engine == "indextts2":
-        _tts_indextts2(text, output_wav, rate=rate, pitch=pitch)
-    elif engine == "edge-tts":
-        _tts_edge(text, output_wav, rate=rate, pitch=pitch)
-    else:
-        _tts_say(text, output_wav, rate=rate, pitch=pitch)
+    _run_tts_engine(engine, text, output_wav, rate=rate, pitch=pitch)
 
     dur = _get_audio_duration(output_wav)
     seg_slot = seg["end"] - seg["start"]
@@ -117,12 +113,7 @@ def _synthesize_segment(i, seg, narration, tts_dir, engine):
         truncated = _truncate_at_sentence(text, target_chars)
         if truncated and len(truncated) >= 5 and truncated != text:
             text = truncated
-            if engine == "indextts2":
-                _tts_indextts2(text, output_wav, rate=rate, pitch=pitch)
-            elif engine == "edge-tts":
-                _tts_edge(text, output_wav, rate=rate, pitch=pitch)
-            else:
-                _tts_say(text, output_wav, rate=rate, pitch=pitch)
+            _run_tts_engine(engine, text, output_wav, rate=rate, pitch=pitch)
             dur = _get_audio_duration(output_wav)
 
     return {
@@ -148,9 +139,12 @@ def synthesize_tts(narration, work_dir):
         engine = _detect_tts_engine()
 
     log(f"TTS 引擎: {engine}")
+    if not narration:
+        return [], engine
 
     segments = []
-    max_workers = CONFIG.get("tts_workers", 4)
+    failures = []
+    max_workers = max(1, min(len(narration), CONFIG.get("tts_workers", 4)))
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -161,28 +155,82 @@ def synthesize_tts(narration, work_dir):
             try:
                 result = future.result()
             except Exception as e:
-                log(f"  TTS 段失败: {e}")
+                i = futures[future]
+                failures.append((i, str(e)))
+                log(f"  TTS 段 {i+1} 失败: {e}")
                 continue
             if result:
                 segments.append(result)
                 log(f"  段 {result['index']+1}: {result['audio_duration']:.1f}s - {result['narration'][:25]}...")
 
     segments.sort(key=lambda x: x["index"])
+    if failures and not CONFIG.get("allow_partial_tts", False):
+        sample = "; ".join(f"段 {i+1}: {msg}" for i, msg in failures[:3])
+        raise RuntimeError(
+            f"TTS 失败 {len(failures)}/{len(narration)} 段，已中止以避免生成缺解说的视频。"
+            f"示例: {sample}。如确需继续，可设置 ALLOW_PARTIAL_TTS=1 或 --allow-partial-tts。"
+        )
+    if failures:
+        log(f"警告: TTS 部分失败 {len(failures)}/{len(narration)} 段，继续生成部分解说")
     return segments, engine
+
+
+def _run_tts_engine(engine, text, output_wav, rate="+0%", pitch="+0Hz"):
+    """Run one TTS engine with retry and remove partial files after failures."""
+    retries = max(1, CONFIG.get("tts_retries", 3))
+    last_error = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            _cleanup_partial_tts_outputs(output_wav)
+            if engine == "indextts2":
+                _tts_indextts2(text, output_wav, rate=rate, pitch=pitch)
+            elif engine == "edge-tts":
+                _tts_edge(text, output_wav, rate=rate, pitch=pitch)
+            else:
+                _tts_say(text, output_wav, rate=rate, pitch=pitch)
+
+            dur = _get_audio_duration(output_wav)
+            if dur <= 0:
+                raise RuntimeError(f"{engine} 输出音频时长无效")
+            return
+        except Exception as exc:
+            last_error = exc
+            _cleanup_partial_tts_outputs(output_wav)
+            if attempt < retries:
+                wait = min(2 ** (attempt - 1), 8)
+                log(f"  TTS 重试 {attempt+1}/{retries}: {exc}，等待 {wait}s")
+                time.sleep(wait)
+
+    raise RuntimeError(f"{engine} 合成失败: {last_error}") from last_error
+
+
+def _cleanup_partial_tts_outputs(output_wav):
+    """Remove stale partial media files before/after a failed TTS attempt."""
+    wav_path = str(output_wav)
+    mp3_path = wav_path.replace(".wav", ".mp3")
+    aiff_path = wav_path.replace(".wav", ".aiff")
+    for path in (wav_path, mp3_path, aiff_path):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
 
 
 def _detect_tts_engine():
     """自动检测可用的 TTS 引擎"""
-    # 优先 IndexTTS2
+    # 优先使用 edge-tts：无需 API key，默认 Yunxi 音色，跨平台更稳定。
+    if shutil.which("edge-tts"):
+        return "edge-tts"
+
+    # IndexTTS2
     try:
-        import importlib; importlib.import_module('indextts.infer_v2')
+        import importlib
+        importlib.import_module('indextts.infer_v2')
         return "indextts2"
     except ImportError:
         pass
-
-    # Edge-TTS
-    if shutil.which("edge-tts"):
-        return "edge-tts"
 
     # macOS say
     if shutil.which("say"):
@@ -197,7 +245,7 @@ def _tts_edge(text, output_path, rate="+0%", pitch="+0Hz"):
     cmd = ["edge-tts", "--voice", CONFIG["edge_tts_voice"],
            "--text", text, "--rate", rate, "--pitch", pitch,
            "--write-media", mp3_path]
-    result = run_cmd(cmd, timeout=30)
+    result = run_cmd(cmd, timeout=CONFIG.get("tts_timeout", 90))
     if result.returncode != 0:
         raise RuntimeError(f"Edge-TTS 失败: {result.stderr}")
 

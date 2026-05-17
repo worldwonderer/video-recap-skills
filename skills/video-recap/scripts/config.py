@@ -3,8 +3,39 @@ from pathlib import Path
 
 # ── 配置 ──────────────────────────────────────────────────────────────
 
+
+def normalize_api_url(raw_url):
+    """Accept either an OpenAI-compatible base URL or chat/completions endpoint."""
+    url = (raw_url or "https://api.openai.com/v1/chat/completions").rstrip("/")
+    if url.endswith("/chat/completions"):
+        return url
+    return f"{url}/chat/completions"
+
+
+def env_int(name, default, *, minimum=None):
+    """Read an integer env var; ignore malformed values instead of crashing import."""
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
+def env_bool(name, default=False):
+    """Read common boolean env var forms."""
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 CONFIG = {
-    "api_url": os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions"),
+    "api_url": normalize_api_url(os.environ.get("OPENAI_API_URL")),
     "api_key": os.environ.get("OPENAI_API_KEY", ""),
     "vlm_model": os.environ.get("OPENAI_MODEL", "gpt-4o"),
     "llm_model": os.environ.get("OPENAI_MODEL", "gpt-4o"),
@@ -53,13 +84,15 @@ CONFIG = {
     "temporal_gap_min": 8.0,        # 长场景中最小空白间隔秒数（触发追加解说）
     "context_info": "",              # 额外上下文（节目名、角色名等）
     "tts_dynamic_params": True,  # 启用动态语速调节
-    "vlm_workers": 8,            # VLM 并行分析线程数
-    "tts_workers": 4,            # TTS 并行合成线程数
-    "fill_workers": 4,           # 填充解说并行 API 线程数
+    "vlm_workers": env_int("VLM_WORKERS", 8, minimum=1),  # VLM 并行分析线程数
+    "tts_workers": env_int("TTS_WORKERS", 4, minimum=1),  # TTS 并行合成线程数
+    "fill_workers": env_int("FILL_WORKERS", 4, minimum=1),  # 填充解说并行 API 线程数
+    "tts_timeout": env_int("TTS_TIMEOUT", 90, minimum=1),  # 单段 TTS 命令超时秒数
+    "tts_retries": env_int("TTS_RETRIES", 3, minimum=1),  # 单段 TTS 失败重试次数
+    "allow_partial_tts": env_bool("ALLOW_PARTIAL_TTS", False),
     "skip_narrative_analysis": True,  # 跳过叙事结构分析（省57-130s，对质量影响极小）
     "burn_subtitles": False,  # 烧录字幕到视频（需要重编码）
 }
 
 SCRIPT_DIR = Path(__file__).parent
 PROMPTS_DIR = SCRIPT_DIR.parent / "references"
-

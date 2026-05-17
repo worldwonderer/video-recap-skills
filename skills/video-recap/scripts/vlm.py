@@ -48,6 +48,19 @@ def _parse_vlm_depth_response(raw_text):
 
 def analyze_scenes(scenes, frames, work_dir):
     """对每个场景的关键帧调用 VLM 进行视觉分析（并行）"""
+    if not scenes:
+        analyses = []
+        vlm_file = work_dir / "vlm_analysis.json"
+        vlm_file.write_text(json.dumps(analyses, ensure_ascii=False, indent=2))
+        log("VLM 分析完成: 0 个场景")
+        return analyses
+
+    if not frames:
+        raise RuntimeError("VLM 分析需要先提取至少一帧；frames 为空")
+
+    fps = CONFIG["fps"]
+    if fps <= 0:
+        raise ValueError("CONFIG['fps'] 必须大于 0；请先运行完整 pipeline 或指定 --fps")
 
     vlm_prompt = load_prompt("VLM_DEPTH_PROMPT")
     if not vlm_prompt:
@@ -58,7 +71,6 @@ def analyze_scenes(scenes, frames, work_dir):
         vlm_prompt = f"已知信息：{ctx}\n\n{vlm_prompt}"
 
     # 构建帧时间映射 (frame_NNNNN.jpg -> time in seconds)
-    fps = CONFIG["fps"]
     frame_times = {}
     for f in frames:
         parts = f.stem.split("_")
@@ -248,4 +260,3 @@ def analyze_narrative_structure(scenes_analysis, work_dir):
 
     log(f"叙事结构分析完成: {len(roles)}/{len(scenes_analysis)} 场景已标注")
     return scenes_analysis
-
