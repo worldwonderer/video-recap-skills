@@ -2,7 +2,7 @@
 
 中文说明 · [English](README.md)
 
-> 一个 Claude Code skill：把输入视频制作成中文解说 / recap 视频。自动完成场景分析、Agent 写解说词、TTS 配音、字幕与动态混音。
+> 一个 Claude Code skill：把输入视频制作成中文解说 / recap 视频。结合剧情调研、ASR+VLM 画面理解、TTS 配音、字幕与动态混音。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Claude Code Skill](https://img.shields.io/badge/Claude%20Code-Skill-purple)
@@ -18,23 +18,60 @@ https://github.com/user-attachments/assets/92698ec6-0d23-4f9f-8825-c3684ef57aff
 `video-recap` 是一个 Claude Code skill，用来把已有视频制作成中文短视频解说 / recap。
 
 ```mermaid
-flowchart LR
-    A[输入视频] --> B[场景检测]
-    B --> C[VLM / ASR 分析]
-    C --> D[Agent 写 narration.json]
-    D --> E[edge-tts 配音]
-    E --> F[字幕 + 动态压低原声]
-    F --> G[解说视频]
+flowchart TB
+    input([输入视频]) --> prep[准备分析素材]
+    context[[剧情调研 / 背景资料]] -.-> brief
+
+    subgraph understand[1. 理解视频]
+        direction LR
+        scene[场景切分]
+        asr[ASR 对白]
+        vlm[VLM 帧级事实]
+    end
+
+    subgraph write[2. 规划解说]
+        direction LR
+        brief[写稿 brief]
+        script[narration.json]
+    end
+
+    subgraph produce[3. 生成成片]
+        direction LR
+        tts[edge-tts 配音]
+        mix[字幕 + 动态压低原声]
+        output([解说视频])
+    end
+
+    prep --> scene
+    prep --> asr
+    prep --> vlm
+    scene --> brief
+    asr --> brief
+    vlm --> brief
+    brief --> script
+    script --> tts
+    script --> mix
+    tts --> mix
+    mix --> output
+
+    classDef source fill:#eef6ff,stroke:#4f86c6,stroke-width:1px,color:#1f2937;
+    classDef analysis fill:#fff7e6,stroke:#d99100,stroke-width:1px,color:#1f2937;
+    classDef scriptStyle fill:#f3ecff,stroke:#7c3aed,stroke-width:1px,color:#1f2937;
+    classDef output fill:#ecfdf3,stroke:#16a34a,stroke-width:1px,color:#1f2937;
+    class input,context,prep source;
+    class scene,asr,vlm analysis;
+    class brief,script scriptStyle;
+    class tts,mix,output output;
 ```
 
 ## 为什么用它？
 
-- **Agent 亲自写解说词**：Agent 读取画面、对白和上下文后写脚本，更像真正的解说创作。
-- **默认中文配音**：优先使用 `edge-tts`，默认音色 `zh-CN-YunxiNeural`。
-- **场景感知分析**：基于 ffmpeg 场景检测、VLM 描述和帧级事实生成分析素材。
-- **保留原声质感**：不是替换原音频，而是在解说时动态压低原声。
-- **可断点续跑**：中间结果持久化，改解说词后不用从头跑。
-- **兼容 OpenAI 格式接口**：通过 `OPENAI_API_URL` 使用兼容的 VLM 服务。
+- **剧情调研先行**：把剧情梗概、人物关系、世界观和上下文纳入 brief，避免只看画面硬猜。
+- **ASR + VLM 双通道理解**：对白转写补剧情线索，VLM 描述和帧级事实补动作、表情与场景信息。
+- **写稿前先给时间预算**：`agent_narration_brief.md` 标出安静窗口、对白重叠、场景时长和字数预算。
+- **保留原声质感**：解说出现时动态压低原声，尽量保留对白、环境声和原片节奏。
+- **改稿后低成本续跑**：直接编辑 `narration.json`，通常只重跑 TTS/组装，不必重新分析视频。
+- **默认配音不需要 key**：优先使用 `edge-tts` 和 `zh-CN-YunxiNeural`。
 
 ## 安装
 
@@ -101,7 +138,7 @@ python3 skills/video-recap/scripts/video_recap.py --doctor
 - `recap_<video>.mp4`：最终解说视频
 - `work_dir/subtitles.srt`：生成字幕
 - `work_dir/agent_narration_brief.md`：给 Agent 写解说词用的场景与时长 brief
-- `work_dir/narration.json`：Agent 写的解说词
+- `work_dir/narration.json`：解说词稿
 - `work_dir/vlm_analysis.json`：场景级视觉分析
 - `work_dir/asr_result.json`：可用时的 ASR 转写结果
 - `work_dir/tts_segments/`：分段 TTS 音频
