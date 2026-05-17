@@ -43,23 +43,28 @@ def generate_narration_zones(zones, asr_result, work_dir, style="纪录片"):
             if research.get("character_details"):
                 details = []
                 for name, info in research["character_details"].items():
+                    if not isinstance(info, dict):
+                        continue
                     rels = ", ".join(info.get("relationships", []))
                     role = info.get("role", "")
                     details.append(f"  - {name}({role}): {rels}")
-                parts.append(f"角色关系:\n" + "\n".join(details))
+                if details:
+                    parts.append(f"角色关系:\n" + "\n".join(details))
             if research.get("plot_arcs"):
-                arcs = "\n".join(f"  - {a['name']}: {a['description']} ({a.get('status','')})"
-                                 for a in research["plot_arcs"])
-                parts.append(f"剧情线索:\n{arcs}")
+                arcs = "\n".join(f"  - {a.get('name','?')}: {a.get('description','')} ({a.get('status','')})"
+                                 for a in research["plot_arcs"] if isinstance(a, dict))
+                if arcs.strip():
+                    parts.append(f"剧情线索:\n{arcs}")
             if research.get("cultural_notes"):
-                notes = "\n".join(f"  - {n['item']}: {n['explanation']}"
-                                  for n in research["cultural_notes"])
-                parts.append(f"文化背景:\n{notes}")
+                notes = "\n".join(f"  - {n.get('item','?')}: {n.get('explanation','')}"
+                                  for n in research["cultural_notes"] if isinstance(n, dict))
+                if notes.strip():
+                    parts.append(f"文化背景:\n{notes}")
             if parts:
                 system_prompt += "\n\n【背景知识（从网络调研获得）】\n" + "\n".join(parts)
                 log(f"  注入背景调研: {len(parts)} 个维度")
-        except (json.JSONDecodeError, KeyError):
-            pass
+        except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+            log("  背景调研加载失败，已跳过注入")
 
     # 组装解说区描述
     effective_rate = CONFIG["speech_rate"] * CONFIG["speech_safety_margin"]
@@ -124,8 +129,8 @@ def generate_narration_zones(zones, asr_result, work_dir, style="纪录片"):
                 narration_text = msg.get("reasoning_content", "") or ""
             if narration_text:
                 break
-        except (KeyError, IndexError):
-            pass
+        except (KeyError, IndexError) as e:
+            log(f"  LLM 响应结构异常 (attempt {attempt+1}/3): {e.__class__.__name__}")
         if attempt < 2:
             log(f"  LLM 返回空，重试 ({attempt+2}/3)...")
 
@@ -173,7 +178,8 @@ def _fallback_zone_narration(zones):
             "max_tokens": 500,
         }
         resp = api_call(payload)
-        text = resp.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        choices = resp.get("choices", [])
+        text = choices[0].get("message", {}).get("content", "").strip() if choices else ""
         if text:
             results.append({
                 "start": z["start"],
@@ -309,7 +315,7 @@ def generate_narration(scenes_analysis, asr_result, work_dir, style="纪录片",
                 continue
             break
         except (KeyError, IndexError):
-            raise RuntimeError(f"LLM 返回异常: {json.dumps(resp, ensure_ascii=False)[:300]}")
+            raise RuntimeError(f"LLM 返回异常: 响应缺少 choices[0].message (HTTP 200)")
 
     if not narration_text:
         raise RuntimeError("LLM 多次返回空 content，请检查模型或 API 配置")
@@ -331,7 +337,7 @@ def generate_narration(scenes_analysis, asr_result, work_dir, style="纪录片",
     initial_pct = len(initial_covered) / len(scenes_analysis) * 100 if scenes_analysis else 100
     log(f"初始覆盖率: {initial_pct:.0f}% ({len(initial_covered)}/{len(scenes_analysis)})")
     (work_dir / "narration_initial.json").write_text(
-        json.dumps(narration, ensure_ascii=False, indent=2))
+        json.dumps(narration, ensure_ascii=False, indent=2), encoding='utf-8')
 
     # 覆盖率检查：逐场景补充，3 轮递进 (90% → 95% → 100%)
     # 构建 per-scene ASR 对白映射（fill 和 temporal fill 共用）
@@ -485,7 +491,7 @@ def generate_narration(scenes_analysis, asr_result, work_dir, style="纪录片",
 
     # 保存
     narration_file = work_dir / "narration.json"
-    narration_file.write_text(json.dumps(narration, ensure_ascii=False, indent=2))
+    narration_file.write_text(json.dumps(narration, ensure_ascii=False, indent=2), encoding='utf-8')
 
     log(f"解说脚本生成完成: {len(narration)} 段")
     for n in narration:
@@ -509,7 +515,7 @@ def _fill_api_call(prompt, max_chars):
     for _attempt in range(2):
         try:
             resp = api_call({
-                "model": CONFIG["llm_model"],
+                "model": CONFIG.get("llm_model", CONFIG["vlm_model"]),
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
@@ -617,8 +623,12 @@ def _generate_single_fill(scene, silence_periods=None, existing_narration="", sc
 
     seg = _fill_api_call(prompt, max_chars)
     if seg:
-        seg["start"] = scene["start"]
-        seg["end"] = scene["end"]
+        llm_start = seg.get("start", 0)
+        if abs(llm_start - best_start) < 0.3:
+            seg["start"] = llm_start
+        else:
+            seg["start"] = best_start
+        seg["end"] = min(seg.get("end", scene["end"]), scene["end"])
         log(f"  补充场景{scene['scene_id']+1}: \"{seg['narration']}\"")
     return seg
 
@@ -735,7 +745,7 @@ def _validate_narration_budget(narration, scenes_analysis):
         if not segs:
             continue
 
-        total_chars = sum(len(n.get("narration", "")) for n in segs)
+        total_chars = sum(_text_char_count(n.get("narration", "")) for n in segs)
         if total_chars <= budget:
             continue
 
@@ -746,12 +756,12 @@ def _validate_narration_budget(narration, scenes_analysis):
         for n in segs:
             text = n.get("narration", "")
             seg_budget = min(per_seg_budget + 5, remaining)  # 允许微调
-            if len(text) > seg_budget and remaining > 5:
+            if _text_char_count(text) > seg_budget and remaining > 5:
                 rewrite_tasks.append((n, seg_budget, sid))
                 remaining = max(0, remaining - seg_budget)
                 log(f"  场景{sid+1} 段超预算: \"{text[:20]}...\" ({len(text)}字 > {seg_budget}字), 标记重写")
             else:
-                remaining = max(0, remaining - len(text))
+                remaining = max(0, remaining - _text_char_count(text))
 
     # 批量让 LLM 重写超预算的段
     if rewrite_tasks:
@@ -885,7 +895,7 @@ def _validate_narration_budget(narration, scenes_analysis):
 
 # 中文停用词（简化版，覆盖常见虚词/代词/量词）
 _STOP_WORDS = set("的了是在不有人我他她它们这那个一上下来去说到做会能要就和又"
-                  "也都被从把让给向与而为则若虽却已之于以及其中".split())
+                  "也都被从把让给向与而为则若虽却已之于以及其中")
 _STOP_WORDS.update(["什么", "怎么", "这个", "那个", "一个", "自己", "已经",
                      "可以", "因为", "所以", "但是", "如果", "虽然", "而且"])
 
@@ -1048,7 +1058,7 @@ def _validate_and_rewrite_narration(narration, vlm_analysis, work_dir):
 
     report = {"segments": report_segments, "summary": summary}
     report_path = Path(work_dir) / "alignment_report.json"
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     log(f"对齐检测完成: {summary['pass']} PASS, {summary['warn']} WARN, {summary['warn_high']} WARN_HIGH"
         + (f", {summary['rewritten']} rewritten" if summary["rewritten"] else ""))
 
@@ -1234,7 +1244,7 @@ def _zone_coverage_fill(narration, scenes_analysis, asr_result, silence_periods,
                 parts.append(research["episode_context"])
             if parts:
                 research_ctx = "【背景】" + "; ".join(parts)
-        except (json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
             pass
 
     fill_workers = min(len(uncovered), CONFIG.get("fill_workers", 4))
@@ -1365,10 +1375,10 @@ def _align_narration_to_quiet(narration, scenes_analysis, silence_periods):
             continue
         max_chars = max(5, int((dur - breath_sec) * effective_rate))
         text = n.get("narration", "")
-        chars = len(re.sub(r'[，。！？、…\s]', '', text))
+        chars = _text_char_count(text)
         if chars > max_chars:
             truncated = _truncate_at_sentence(text, max_chars)
-            if truncated and len(re.sub(r'[，。！？、…\s]', '', truncated)) >= 5:
+            if truncated and _text_char_count(truncated) >= 5:
                 n["narration"] = truncated
             else:
                 n["narration"] = ""
