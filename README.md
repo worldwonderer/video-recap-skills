@@ -143,7 +143,7 @@ python3 skills/video-recap/scripts/video_recap.py /path/to/video.mp4 \
   --burn-subtitles
 ```
 
-The CLI still exports `subtitles.srt` as a sidecar file. Burn-in uses an internal `subtitles.ass` renderer with readable bottom subtitles and re-encodes the video. Your `ffmpeg` build must include the `subtitles`/libass filter.
+Subtitle support is for the agent-written voiceover, not the original dialogue transcript. The CLI exports `subtitles.srt` from the final `narration.json` / TTS placement, and burn-in uses an internal `subtitles.ass` renderer with readable bottom subtitles. ASR results stay in `asr_result.json` as context for writing the recap; they are not exported or burned as source-dialogue subtitles. Burn-in re-encodes the video, so your `ffmpeg` build must include the `subtitles`/libass filter.
 
 ### Doctor check
 
@@ -158,15 +158,15 @@ Use `--doctor-tts-smoke` when you also want a short `edge-tts` synthesis check.
 Typical outputs:
 
 - `recap_<video>.mp4` — final recap video
-- `work_dir/subtitles.srt` — generated subtitles
-- `work_dir/subtitles.ass` — internal burn-in subtitle file when `--burn-subtitles` is used
+- `work_dir/subtitles.srt` — voiceover/narration subtitles generated from final TTS placement
+- `work_dir/subtitles.ass` — internal narration subtitle file used for burn-in when `--burn-subtitles` is enabled
 - `work_dir/agent_narration_brief.md` — timing and scene brief for the agent
 - `work_dir/narration.json` — recap narration script
 - `work_dir/clip_plan.json` — source ranges to keep when `--edit-mode cut` is used
 - `work_dir/edited_source.mp4` — concatenated short source video in cut mode
 - `work_dir/narration_mapped.json` — narration mapped from source time to edited-output time
 - `work_dir/vlm_analysis.json` — scene-level visual analysis
-- `work_dir/asr_result.json` — ASR result when available
+- `work_dir/asr_result.json` — ASR result when available; used as recap context, not as the subtitle source
 - `work_dir/tts_segments/` — generated TTS audio segments
 
 ## Useful references
