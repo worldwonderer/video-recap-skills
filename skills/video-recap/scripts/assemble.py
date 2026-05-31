@@ -56,6 +56,21 @@ def assembly_settings_fingerprint():
         "version": SUBTITLE_RENDER_VERSION,
         "burn_subtitles": bool(CONFIG.get("burn_subtitles", False)),
         "force_video_reencode": bool(CONFIG.get("force_video_reencode", False)),
+        "narration_timing": {
+            "delay_seconds": CONFIG.get("narration_delay_seconds", 1.5),
+            "tail_pad_seconds": CONFIG.get("narration_tail_pad_seconds", 0.1),
+            "fade_ms": CONFIG.get("fade_ms", 300),
+        },
+        "audio_mix": {
+            "ducking_mode": CONFIG.get("ducking_mode", "fixed"),
+            "ducking_narr_weight": CONFIG.get("ducking_narr_weight", 1.5),
+            "ducking_orig_volume": CONFIG.get("ducking_orig_volume", 0.5),
+            "quiet_ducking_volume": CONFIG.get("quiet_ducking_volume", 0.7),
+            "speech_ducking_volume": CONFIG.get("speech_ducking_volume", 0.2),
+            "narration_mode": CONFIG.get("narration_mode", "zone"),
+            "zone_ducking_volume": CONFIG.get("zone_ducking_volume", 0.12),
+            "zone_fade_seconds": CONFIG.get("zone_fade_seconds", 0.5),
+        },
     }
     if fingerprint["burn_subtitles"]:
         fingerprint["subtitle_renderer"] = "ass"
@@ -457,7 +472,11 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         tts_rate_offset = seg.get("tts_rate_offset", 0.0)
         tts_dur = seg.get("audio_duration", 0)
 
-        narration_delay = CONFIG.get("narration_delay_seconds", 2.0)
+        configured_delay = max(0.0, float(CONFIG.get("narration_delay_seconds", 2.0) or 0.0))
+        tail_pad = max(0.0, float(CONFIG.get("narration_tail_pad_seconds", 0.1) or 0.0))
+        slot_duration = max(0.0, float(seg["end"]) - float(seg["start"]))
+        max_delay = max(0.0, slot_duration - float(tts_dur or 0.0) - tail_pad)
+        narration_delay = min(configured_delay, max_delay)
         start_sample = int((seg["start"] + narration_delay) * sample_rate)
         end_boundary = int(min(seg["end"], video_duration) * sample_rate)
 
