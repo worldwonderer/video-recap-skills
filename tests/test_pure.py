@@ -1,4 +1,5 @@
 """Pure function unit tests for video-recap modules."""
+import json
 import sys
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -7,8 +8,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'skills' / 'video-recap' / 'scripts'))
 
-from common import _retry_after_seconds, get_video_duration
-from config import CONFIG, env_bool, env_float, env_int, normalize_api_url
+from common import _api_headers, _prepare_api_payload, _provider_uses_mimo, _retry_after_seconds, get_video_duration
+from config import CONFIG, default_mimo_api_url, env_bool, env_float, env_int, normalize_api_url
 from detect import detect_scenes
 from extract import extract_frames
 from pipeline import (
@@ -16,6 +17,9 @@ from pipeline import (
     _assemble_settings_current,
     _command_available,
     _ffmpeg_has_filter,
+    _load_run_settings,
+    _mimo_video_overview_current,
+    _tts_meta_current,
     run_pipeline,
 )
 from edit import (
@@ -25,9 +29,20 @@ from edit import (
     parse_duration_seconds,
     source_time_to_output_time,
 )
-from narration import _text_char_count, lint_narration
-from tts import _build_tts_segment_result, _detect_tts_engine, _parse_rate_offset, synthesize_tts
+from narration import _align_narration_to_quiet, _text_char_count, build_agent_brief, lint_narration
+from tts import (
+    _build_tts_segment_result,
+    _detect_tts_engine,
+    _parse_rate_offset,
+    _run_tts_engine,
+    _tts_mimo,
+    resolve_tts_engine,
+    synthesize_tts,
+    tts_settings_fingerprint,
+)
+from video_recap import _apply_api_provider
 from assemble import (
+    _build_timed_narration,
     _escape_ass_text,
     _generate_ass,
     _generate_srt,
@@ -37,7 +52,7 @@ from assemble import (
     assembly_settings_fingerprint,
     assemble_video,
 )
-from vlm import analyze_scenes
+from vlm import _mimo_video_chunks, _video_data_url, analyze_scenes, analyze_video_overview
 
 
 def test_text_char_count():
@@ -95,6 +110,35 @@ def test_generate_ass_escapes_text_and_writes_style(tmp_path):
     assert "Dialogue: 0,0:00:01.25,0:00:03.50" in ass
     assert r"第一行\{重点\}\\路径\N第二行" in ass
     assert _escape_ass_text("{x}\\y") == r"\{x\}\\y"
+
+
+def test_build_timed_narration_clamps_delay_to_slot(monkeypatch, tmp_path):
+    import wave
+
+    wav = tmp_path / "narr.wav"
+    sample_rate = 44100
+    sample_count = int(sample_rate * 0.8)
+    with wave.open(str(wav), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(b"\0\0" * sample_count)
+
+    segment = {
+        "index": 0,
+        "start": 0.0,
+        "end": 1.0,
+        "narration": "短槽位解说。",
+        "audio_path": str(wav),
+        "audio_duration": 0.8,
+    }
+    monkeypatch.setitem(CONFIG, "narration_delay_seconds", 1.5)
+    monkeypatch.setitem(CONFIG, "narration_tail_pad_seconds", 0.1)
+
+    _build_timed_narration([segment], tmp_path / "out.wav", 2.0, tmp_path)
+
+    assert segment["actual_place_start"] == pytest.approx(0.1, abs=0.02)
+    assert segment["actual_place_end"] == pytest.approx(0.9, abs=0.02)
 
 
 def test_subtitle_burn_filter_escapes_path():
@@ -219,6 +263,27 @@ def test_lint_narration_cut_mode_requires_clip_membership():
     assert any(issue["code"] == "outside_clip_plan" for issue in report["errors"])
 
 
+def test_lint_narration_warns_when_segment_spans_too_many_visual_beats(monkeypatch):
+    monkeypatch.setitem(CONFIG, "visual_beat_max_seconds", 10.0)
+    monkeypatch.setitem(CONFIG, "visual_beat_max_facts", 2)
+    report = lint_narration([
+        {"start": 0.0, "end": 20.0, "narration": "这段长解说跨过太多画面锚点，应该拆开。"},
+    ], [{
+        "scene_id": 0,
+        "start": 0.0,
+        "end": 25.0,
+        "frame_facts": {
+            "1.0": ["人物走入房间"],
+            "6.0": ["人物坐下"],
+            "12.0": ["人物起身争执"],
+            "18.0": ["镜头切到门外"],
+        },
+    }])
+
+    codes = {issue["code"] for issue in report["warnings"]}
+    assert "visual_beat_too_broad" in codes
+
+
 def test_get_video_duration_returns_zero_for_unparseable_output(monkeypatch):
     def fake_run_cmd(cmd):
         return CompletedProcess(cmd, 0, stdout="N/A\n", stderr="")
@@ -235,6 +300,13 @@ def test_normalize_api_url_accepts_base_or_full_endpoint():
     assert normalize_api_url("https://example.com/v1") == "https://example.com/v1/chat/completions"
     assert normalize_api_url("https://example.com/v1/") == "https://example.com/v1/chat/completions"
     assert normalize_api_url("https://example.com/v1/chat/completions") == "https://example.com/v1/chat/completions"
+
+
+def test_mimo_token_plan_key_defaults_to_token_plan_cn_base():
+    assert default_mimo_api_url("tp-example") == "https://token-plan-cn.xiaomimimo.com/v1"
+    assert default_mimo_api_url("tp-example", cluster="sgp") == "https://token-plan-sgp.xiaomimimo.com/v1"
+    assert default_mimo_api_url("tp-example", cluster="unknown") == "https://token-plan-cn.xiaomimimo.com/v1"
+    assert default_mimo_api_url("sk-example") == "https://api.xiaomimimo.com/v1"
 
 
 def test_env_int_bool_and_float_helpers_tolerate_bad_values(monkeypatch):
@@ -375,6 +447,25 @@ def test_annotate_cut_narration_overlap_preserves_source_times():
     assert result[1]["overlaps_speech"] is True
 
 
+def test_align_narration_to_quiet_requires_enough_overlap_and_limits_shift(monkeypatch):
+    scenes = [{"scene_id": 0, "start": 0.0, "end": 12.0}]
+    monkeypatch.setitem(CONFIG, "quiet_overlap_min_ratio", 0.8)
+    monkeypatch.setitem(CONFIG, "max_quiet_shift_seconds", 3.0)
+
+    near = _align_narration_to_quiet([
+        {"start": 0.0, "end": 4.0, "narration": "可以贴近稍后的安静画面。"},
+    ], scenes, [{"start": 2.0, "end": 6.0, "duration": 4.0, "has_speech": False}])
+    assert near[0]["start"] == 2.0
+    assert near[0]["end"] == 6.0
+    assert near[0]["overlaps_speech"] is False
+
+    far = _align_narration_to_quiet([
+        {"start": 0.0, "end": 4.0, "narration": "不要漂远画面。"},
+    ], scenes, [{"start": 5.0, "end": 9.0, "duration": 4.0, "has_speech": False}])
+    assert far[0]["start"] == 0.0
+    assert far[0]["overlaps_speech"] is True
+
+
 def test_build_tts_segment_result_preserves_source_trace(tmp_path):
     result = _build_tts_segment_result(0, {
         "start": 1.0,
@@ -391,11 +482,11 @@ def test_build_tts_segment_result_preserves_source_trace(tmp_path):
 
 
 def test_synthesize_tts_handles_empty_narration(monkeypatch, tmp_path):
-    monkeypatch.setitem(__import__("config").CONFIG, "tts_engine", "say")
+    monkeypatch.setitem(__import__("config").CONFIG, "tts_engine", "edge-tts")
     segments, engine = synthesize_tts([], tmp_path)
 
     assert segments == []
-    assert engine == "say"
+    assert engine == "edge-tts"
 
 
 def test_synthesize_tts_raises_on_failed_segment_by_default(monkeypatch, tmp_path):
@@ -416,7 +507,7 @@ def test_synthesize_tts_raises_on_failed_segment_by_default(monkeypatch, tmp_pat
             "audio_duration": 0.5,
         }
 
-    monkeypatch.setitem(CONFIG, "tts_engine", "say")
+    monkeypatch.setitem(CONFIG, "tts_engine", "edge-tts")
     monkeypatch.setitem(CONFIG, "tts_workers", 2)
     monkeypatch.setitem(CONFIG, "allow_partial_tts", False)
     monkeypatch.setattr("tts._synthesize_segment", fake_synthesize_segment)
@@ -443,14 +534,14 @@ def test_synthesize_tts_allows_partial_when_configured(monkeypatch, tmp_path):
             "audio_duration": 0.5,
         }
 
-    monkeypatch.setitem(CONFIG, "tts_engine", "say")
+    monkeypatch.setitem(CONFIG, "tts_engine", "edge-tts")
     monkeypatch.setitem(CONFIG, "tts_workers", 2)
     monkeypatch.setitem(CONFIG, "allow_partial_tts", True)
     monkeypatch.setattr("tts._synthesize_segment", fake_synthesize_segment)
 
     segments, engine = synthesize_tts(narration, tmp_path)
 
-    assert engine == "say"
+    assert engine == "edge-tts"
     assert [s["index"] for s in segments] == [0]
 
 
@@ -458,6 +549,106 @@ def test_detect_tts_engine_prefers_edge_tts(monkeypatch):
     monkeypatch.setattr("tts.shutil.which", lambda cmd: "/usr/bin/edge-tts" if cmd == "edge-tts" else None)
 
     assert _detect_tts_engine() == "edge-tts"
+
+
+def test_resolve_tts_engine_prefers_mimo_in_auto_and_allows_explicit_edge(monkeypatch):
+    monkeypatch.setitem(CONFIG, "tts_engine", "auto")
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "mimo-secret")
+    monkeypatch.setattr("tts.shutil.which", lambda cmd: "/usr/bin/edge-tts" if cmd == "edge-tts" else None)
+
+    assert resolve_tts_engine() == "mimo-tts"
+
+    monkeypatch.setitem(CONFIG, "tts_engine", "edge-tts")
+    assert resolve_tts_engine() == "edge-tts"
+
+
+def test_tts_meta_current_rejects_edge_cache_when_mimo_is_now_preferred(monkeypatch, tmp_path):
+    narration = tmp_path / "narration.json"
+    narration.write_text('[{"start":0,"end":2,"narration":"测试。"}]', encoding="utf-8")
+    meta = tmp_path / "tts_meta.json"
+    meta.write_text('{"segments":[],"engine":"edge-tts"}', encoding="utf-8")
+
+    monkeypatch.setitem(CONFIG, "tts_engine", "auto")
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "mimo-secret")
+    monkeypatch.setattr("tts.shutil.which", lambda cmd: "/usr/bin/edge-tts" if cmd == "edge-tts" else None)
+
+    assert _tts_meta_current(meta, narration) is False
+
+    monkeypatch.setitem(CONFIG, "tts_engine", "edge-tts")
+    assert _tts_meta_current(meta, narration) is True
+
+
+def test_tts_meta_current_rejects_mimo_setting_changes(monkeypatch, tmp_path):
+    narration = tmp_path / "narration.json"
+    narration.write_text('[{"start":0,"end":2,"narration":"测试。"}]', encoding="utf-8")
+    meta = tmp_path / "tts_meta.json"
+
+    monkeypatch.setitem(CONFIG, "tts_engine", "auto")
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "mimo-secret")
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_url", "https://token-plan-cn.xiaomimimo.com/v1/chat/completions")
+    monkeypatch.setitem(CONFIG, "mimo_tts_model", "mimo-v2.5-tts")
+    monkeypatch.setitem(CONFIG, "mimo_tts_voice", "冰糖")
+    monkeypatch.setitem(CONFIG, "mimo_tts_style", "自然中文解说")
+    meta.write_text(
+        json.dumps({
+            "segments": [],
+            "engine": "mimo-tts",
+            "settings": tts_settings_fingerprint("mimo-tts"),
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    assert _tts_meta_current(meta, narration) is True
+
+    monkeypatch.setitem(CONFIG, "mimo_tts_voice", "茉莉")
+    assert _tts_meta_current(meta, narration) is False
+
+
+def test_tts_meta_current_rejects_unsupported_cached_engine_when_no_engine(monkeypatch, tmp_path):
+    narration = tmp_path / "narration.json"
+    narration.write_text('[{"start":0,"end":2,"narration":"测试。"}]', encoding="utf-8")
+    meta = tmp_path / "tts_meta.json"
+    meta.write_text('{"segments":[],"engine":"say"}', encoding="utf-8")
+
+    monkeypatch.setitem(CONFIG, "tts_engine", "auto")
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "")
+    monkeypatch.setattr("tts.shutil.which", lambda cmd: None)
+
+    assert _tts_meta_current(meta, narration) is False
+
+
+def test_detect_tts_engine_does_not_fallback_to_removed_say(monkeypatch):
+    monkeypatch.setitem(CONFIG, "api_provider", "openai")
+    monkeypatch.setitem(CONFIG, "api_url", "https://api.openai.com/v1/chat/completions")
+    monkeypatch.setitem(CONFIG, "api_key", "")
+    monkeypatch.setattr("tts.shutil.which", lambda cmd: "/usr/bin/say" if cmd == "say" else None)
+
+    with pytest.raises(RuntimeError, match="edge-tts|MiMo"):
+        _detect_tts_engine()
+
+
+def test_run_tts_engine_supports_mimo_branch(monkeypatch, tmp_path):
+    import base64
+
+    def fake_api_call(payload):
+        return {"choices": [{"message": {"audio": {"data": base64.b64encode(b"wav").decode("ascii")}}}]}
+
+    output = tmp_path / "out.wav"
+    monkeypatch.setitem(CONFIG, "tts_retries", 1)
+    monkeypatch.setattr("tts.mimo_tts_api_call", fake_api_call)
+    monkeypatch.setattr("tts._get_audio_duration", lambda path: 1.0)
+
+    _run_tts_engine("mimo-tts", "这是小米 MiMo 配音。", output)
+
+    assert output.read_bytes() == b"wav"
+
+
+def test_run_tts_engine_rejects_removed_engines(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "tts_retries", 1)
+    monkeypatch.setattr("tts._get_audio_duration", lambda path: 0.0)
+
+    with pytest.raises(RuntimeError, match="不支持的 TTS 引擎"):
+        _run_tts_engine("say", "测试。", tmp_path / "out.wav")
 
 
 def test_command_available_checks_path_and_executable_name(tmp_path, monkeypatch):
@@ -502,11 +693,11 @@ def test_step_tts_runs_from_cached_narration_without_api(monkeypatch, tmp_path):
         "narration": narration[0]["narration"],
         "audio_path": str(wd / "narr_000.wav"),
         "audio_duration": 1.0,
-    }], "say"))
+    }], "edge-tts"))
 
     result = run_pipeline(video, step="tts", resume_dir=work_dir)
 
-    assert result["engine"] == "say"
+    assert result["engine"] == "edge-tts"
     assert len(result["segments"]) == 1
     assert (work_dir / ".step_tts.done").exists()
     assert (work_dir / "tts_meta.json").exists()
@@ -576,12 +767,12 @@ def test_resume_validates_existing_agent_narration_without_api(monkeypatch, tmp_
         "narration": narration[0]["narration"],
         "audio_path": str(wd / "narr_000.wav"),
         "audio_duration": 1.0,
-    }], "say"))
+    }], "edge-tts"))
     monkeypatch.setattr("pipeline.assemble_video", lambda video_path, tts_segments, wd, output_path: output_path.write_bytes(b"mp4"))
 
     result = run_pipeline(video, resume_dir=work_dir)
 
-    assert result["tts_engine"] == "say"
+    assert result["tts_engine"] == "edge-tts"
     assert (work_dir / ".step_script.done").exists()
     assert (work_dir / "output.mp4").exists()
 
@@ -650,6 +841,43 @@ def test_run_settings_persist_and_restore_cut_mode(monkeypatch, tmp_path):
     pipeline._load_run_settings(tmp_path)
     pipeline._ensure_cut_tail_artifacts(video, tmp_path)
     assert (tmp_path / "narration_mapped.json").exists()
+
+
+def test_run_settings_do_not_override_explicit_runtime_options(monkeypatch, tmp_path):
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "run_settings.json").write_text(json.dumps({
+        "api_provider": "openai",
+        "api_url": "https://old.example/v1/chat/completions",
+        "vlm_model": "old-model",
+        "mimo_tts_voice": "旧音色",
+        "mimo_tts_style": "旧风格",
+        "mimo_video_overview": False,
+        "edit_mode": "cut",
+    }), encoding="utf-8")
+
+    monkeypatch.setitem(CONFIG, "api_provider", "mimo")
+    monkeypatch.setitem(CONFIG, "api_provider_source", "cli")
+    monkeypatch.setitem(CONFIG, "api_url", "https://api.xiaomimimo.com/v1/chat/completions")
+    monkeypatch.setitem(CONFIG, "api_url_source", "cli")
+    monkeypatch.setitem(CONFIG, "vlm_model", "mimo-v2.5")
+    monkeypatch.setitem(CONFIG, "vlm_model_source", "cli")
+    monkeypatch.setitem(CONFIG, "mimo_tts_voice", "冰糖")
+    monkeypatch.setitem(CONFIG, "mimo_tts_voice_source", "cli")
+    monkeypatch.setitem(CONFIG, "mimo_tts_style", "新风格")
+    monkeypatch.setitem(CONFIG, "mimo_tts_style_source", "env")
+    monkeypatch.setitem(CONFIG, "mimo_video_overview", True)
+    monkeypatch.setitem(CONFIG, "mimo_video_overview_source", "cli")
+
+    _load_run_settings(work_dir)
+
+    assert CONFIG["api_provider"] == "mimo"
+    assert CONFIG["api_url"] == "https://api.xiaomimimo.com/v1/chat/completions"
+    assert CONFIG["vlm_model"] == "mimo-v2.5"
+    assert CONFIG["mimo_tts_voice"] == "冰糖"
+    assert CONFIG["mimo_tts_style"] == "新风格"
+    assert CONFIG["mimo_video_overview"] is True
+    assert CONFIG["edit_mode"] == "cut"
 
 
 def test_full_pipeline_cut_mode_pauses_for_clip_plan_and_narration(monkeypatch, tmp_path):
@@ -880,7 +1108,7 @@ def test_resume_cut_mode_maps_narration_and_assembles_edited_source(monkeypatch,
         "narration": narration[0]["narration"],
         "audio_path": str(wd / "narr_000.wav"),
         "audio_duration": 1.0,
-    }], "say"))
+    }], "edge-tts"))
     monkeypatch.setattr("pipeline.assemble_video", fake_assemble)
 
     result = run_pipeline(video, resume_dir=work_dir)
@@ -924,7 +1152,7 @@ def test_step_assemble_rebuilds_stale_tts_after_mapped_narration_changes(monkeyp
     monkeypatch.setattr("pipeline.get_video_duration", lambda path: 2.0)
     monkeypatch.setattr("pipeline.build_edited_source_video", lambda video_path, plan, wd, output_path=None: Path(output_path or wd / "edited_source.mp4").write_bytes(b"edited") or Path(output_path or wd / "edited_source.mp4"))
     calls = []
-    monkeypatch.setattr("pipeline.synthesize_tts", lambda narration, wd: calls.append(narration) or ([{"index":0,"start":0,"end":2,"narration":narration[0]["narration"],"audio_path":str(wd / "n.wav"),"audio_duration":1}], "say"))
+    monkeypatch.setattr("pipeline.synthesize_tts", lambda narration, wd: calls.append(narration) or ([{"index":0,"start":0,"end":2,"narration":narration[0]["narration"],"audio_path":str(wd / "n.wav"),"audio_duration":1}], "edge-tts"))
     monkeypatch.setattr("pipeline.assemble_video", lambda video_path, tts_segments, wd, output_path: output_path.write_bytes(b"mp4"))
 
     run_pipeline(video, resume_dir=work_dir, step="assemble")
@@ -943,7 +1171,7 @@ def test_step_assemble_rebuilds_when_assemble_settings_change(monkeypatch, tmp_p
     output.write_bytes(b"old")
     (work_dir / ".step_assemble.done").write_text("ok")
     tts_meta = work_dir / "tts_meta.json"
-    tts_meta.write_text('{"segments":[{"start":0,"end":2,"narration":"旧设置。","audio_path":"n.wav","audio_duration":1}],"engine":"say"}')
+    tts_meta.write_text('{"segments":[{"start":0,"end":2,"narration":"旧设置。","audio_path":"n.wav","audio_duration":1}],"engine":"edge-tts"}')
 
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
     pipeline._write_assemble_meta(work_dir, video)
@@ -974,7 +1202,7 @@ def test_full_pipeline_reassembles_when_burn_setting_changes(monkeypatch, tmp_pa
     (work_dir / "silence_periods.json").write_text('[{"start":0.0,"end":3.0,"duration":3.0,"has_speech":false}]')
     (work_dir / "vlm_analysis.json").write_text('[{"scene_id":0,"start":0.0,"end":3.0,"description":"测试"}]')
     (work_dir / "narration.json").write_text('[{"start":0.0,"end":2.0,"narration":"测试。"}]')
-    (work_dir / "tts_meta.json").write_text('{"segments":[{"start":0,"end":2,"narration":"测试。","audio_path":"n.wav","audio_duration":1}],"engine":"say"}')
+    (work_dir / "tts_meta.json").write_text('{"segments":[{"start":0,"end":2,"narration":"测试。","audio_path":"n.wav","audio_duration":1}],"engine":"edge-tts"}')
     output = work_dir / "output.mp4"
     output.write_bytes(b"old")
 
@@ -1021,3 +1249,220 @@ def test_build_edited_source_video_uses_ffmpeg_concat(monkeypatch, tmp_path):
     ffmpeg_cmd = [cmd for cmd in commands if cmd[0] == "ffmpeg"][0]
     assert "trim=start=0.000:end=1.000" in " ".join(ffmpeg_cmd)
     assert "concat=n=2" in " ".join(ffmpeg_cmd)
+
+
+def test_mimo_api_headers_and_payload_mapping(monkeypatch):
+    monkeypatch.setitem(CONFIG, "api_provider", "mimo")
+    monkeypatch.setitem(CONFIG, "api_url", "https://api.xiaomimimo.com/v1/chat/completions")
+    monkeypatch.setitem(CONFIG, "api_key", "secret")
+
+    assert _provider_uses_mimo() is True
+    headers = _api_headers()
+    assert headers["api-key"] == "secret"
+    assert "Authorization" not in headers
+    payload = _prepare_api_payload({"model": "mimo-v2.5", "max_tokens": 7})
+    assert payload["max_completion_tokens"] == 7
+    assert payload["thinking"] == {"type": "disabled"}
+    assert "max_tokens" not in payload
+
+    tts_payload = _prepare_api_payload({"model": "mimo-v2.5-tts", "max_tokens": 7})
+    assert tts_payload["max_completion_tokens"] == 7
+    assert "thinking" not in tts_payload
+
+    monkeypatch.setitem(CONFIG, "api_provider", "openai")
+    monkeypatch.setitem(CONFIG, "api_url", "https://api.openai.com/v1/chat/completions")
+    headers = _api_headers()
+    assert headers["Authorization"] == "Bearer secret"
+    assert "api-key" not in headers
+    assert _prepare_api_payload({"max_tokens": 7})["max_tokens"] == 7
+
+
+def test_cli_api_provider_mimo_uses_mimo_key_with_openai_config(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.setenv("OPENAI_API_URL", "https://openai.example/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "openai-model")
+    monkeypatch.setitem(CONFIG, "api_key", "openai-secret")
+    monkeypatch.setitem(CONFIG, "api_key_source", "OPENAI_API_KEY")
+    monkeypatch.setitem(CONFIG, "api_url", "https://openai.example/v1/chat/completions")
+    monkeypatch.setitem(CONFIG, "api_provider", "openai")
+    monkeypatch.setitem(CONFIG, "mimo_api_key", "mimo-secret")
+    monkeypatch.setitem(CONFIG, "mimo_api_key_source", "MIMO_API_KEY")
+    monkeypatch.setitem(CONFIG, "mimo_api_url", "https://api.xiaomimimo.com/v1/chat/completions")
+    monkeypatch.setitem(CONFIG, "mimo_model", "mimo-v2.5")
+
+    _apply_api_provider("mimo")
+
+    assert CONFIG["api_provider"] == "mimo"
+    assert CONFIG["api_key"] == "mimo-secret"
+    assert CONFIG["api_key_source"] == "MIMO_API_KEY"
+    assert CONFIG["api_url"] == "https://api.xiaomimimo.com/v1/chat/completions"
+    assert CONFIG["vlm_model"] == "mimo-v2.5"
+
+    _apply_api_provider("openai")
+
+    assert CONFIG["api_provider"] == "openai"
+    assert CONFIG["api_key"] == "openai-secret"
+    assert CONFIG["api_url"] == "https://openai.example/v1/chat/completions"
+    assert CONFIG["vlm_model"] == "openai-model"
+
+
+def test_mimo_tts_writes_decoded_audio(monkeypatch, tmp_path):
+    import base64
+
+    seen_payloads = []
+
+    def fake_api_call(payload):
+        seen_payloads.append(payload)
+        return {"choices": [{"message": {"audio": {"data": base64.b64encode(b"wav-bytes").decode("ascii")}}}]}
+
+    monkeypatch.setitem(CONFIG, "mimo_tts_model", "mimo-v2.5-tts")
+    monkeypatch.setitem(CONFIG, "mimo_tts_voice", "冰糖")
+    monkeypatch.setattr("tts.mimo_tts_api_call", fake_api_call)
+
+    output = tmp_path / "out.wav"
+    _tts_mimo("这是小米 MiMo 配音。", output, rate="-5%", pitch="+0Hz")
+
+    assert output.read_bytes() == b"wav-bytes"
+    payload = seen_payloads[0]
+    assert payload["model"] == "mimo-v2.5-tts"
+    assert payload["audio"] == {"format": "wav", "voice": "冰糖"}
+    assert payload["messages"][1] == {"role": "assistant", "content": "这是小米 MiMo 配音。"}
+    assert "语速略慢" in payload["messages"][0]["content"]
+
+
+def test_detect_tts_engine_prefers_mimo_when_provider_configured(monkeypatch):
+    monkeypatch.setitem(CONFIG, "api_provider", "openai")
+    monkeypatch.setitem(CONFIG, "api_url", "https://example.com/v1/chat/completions")
+    monkeypatch.setitem(CONFIG, "api_key", "doubao-secret")
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "mimo-secret")
+    monkeypatch.setattr("tts.shutil.which", lambda cmd: "/usr/bin/edge-tts" if cmd == "edge-tts" else None)
+
+    assert _detect_tts_engine() == "mimo-tts"
+
+
+def test_mimo_video_overview_uses_scene_chunks(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake-video")
+    seen_payloads = []
+
+    def fake_api_call(payload):
+        seen_payloads.append(payload)
+        return {
+            "model": "mimo-v2.5",
+            "choices": [{"message": {"content": "分片概览", "reasoning_content": "推理内容"}}],
+            "usage": {"prompt_tokens_details": {"video_tokens": 12}},
+        }
+
+    def fake_extract(video_path, chunk, output_path):
+        output_path.write_bytes(b"tiny-chunk")
+        return output_path
+
+    monkeypatch.setitem(CONFIG, "api_provider", "openai")
+    monkeypatch.setitem(CONFIG, "vlm_model", "doubao-seed-2-0-lite-260428")
+    monkeypatch.setitem(CONFIG, "mimo_video_api_key", "mimo-secret")
+    monkeypatch.setitem(CONFIG, "mimo_video_model", "mimo-v2.5")
+    monkeypatch.setitem(CONFIG, "mimo_video_overview", True)
+    monkeypatch.setitem(CONFIG, "mimo_video_fps", 2)
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_max_seconds", 2)
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_min_seconds", 0.5)
+    monkeypatch.setitem(CONFIG, "mimo_media_resolution", "max")
+    monkeypatch.setattr("vlm._extract_video_chunk", fake_extract)
+    monkeypatch.setattr("vlm.mimo_video_api_call", fake_api_call)
+
+    overview = analyze_video_overview(video, tmp_path, [{"scene_id": 7, "start": 0.0, "end": 5.0}])
+
+    assert overview["input"] == "scene_chunks"
+    assert overview["chunk_count"] == 3
+    assert overview["model"] == "mimo-v2.5"
+    assert len(seen_payloads) == 3
+    for payload in seen_payloads:
+        video_part = payload["messages"][0]["content"][0]
+        assert payload["model"] == "mimo-v2.5"
+        assert payload["max_tokens"] == 1200
+        assert video_part["type"] == "video_url"
+        assert video_part["video_url"]["url"].startswith("data:video/mp4;base64,")
+        assert video_part["fps"] == 2
+        assert video_part["media_resolution"] == "max"
+    assert "分片概览" in overview["content"]
+    assert overview["settings"]["mimo_video_chunk_max_seconds"] == 2
+    assert all(not Path(item["clip_path"]).is_absolute() for item in overview["chunks"])
+    assert all(item["clip_path"].startswith("mimo_video_chunks/") for item in overview["chunks"])
+    assert (tmp_path / "mimo_video_overview.json").exists()
+
+
+def test_mimo_video_chunks_split_on_scene_boundaries(monkeypatch):
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_max_seconds", 2)
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_min_seconds", 0.5)
+
+    chunks = _mimo_video_chunks([{"scene_id": 3, "start": 0.0, "end": 5.0}])
+
+    assert [(c["scene_id"], c["start"], c["end"]) for c in chunks] == [
+        (3, 0.0, 2.0),
+        (3, 2.0, 4.0),
+        (3, 4.0, 5.0),
+    ]
+
+
+def test_mimo_video_overview_current_rejects_old_artifacts(tmp_path):
+    (tmp_path / ".step_mimo_video_overview.done").write_text("ok")
+    (tmp_path / "mimo_video_overview.json").write_text('{"input":"base64","content":"old"}', encoding="utf-8")
+    assert _mimo_video_overview_current(tmp_path) is False
+
+    (tmp_path / "mimo_video_overview.json").write_text(
+        json.dumps({
+            "input": "scene_chunks",
+            "chunks": [{"chunk_id": 0}],
+            "settings": {
+                "model": CONFIG.get("mimo_video_model") or CONFIG.get("mimo_model") or CONFIG.get("vlm_model"),
+                "mimo_video_fps": CONFIG.get("mimo_video_fps", 2.0),
+                "mimo_media_resolution": CONFIG.get("mimo_media_resolution", "default"),
+                "mimo_video_chunk_max_seconds": CONFIG.get("mimo_video_chunk_max_seconds", 20.0),
+                "mimo_video_chunk_min_seconds": CONFIG.get("mimo_video_chunk_min_seconds", 1.0),
+                "mimo_video_base64_max_mb": CONFIG.get("mimo_video_base64_max_mb", 45.0),
+                "mimo_video_prompt": CONFIG.get("mimo_video_prompt", ""),
+                "mimo_disable_thinking": CONFIG.get("mimo_disable_thinking", True),
+            },
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    assert _mimo_video_overview_current(tmp_path) is True
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setitem(CONFIG, "mimo_video_chunk_max_seconds", 99)
+        assert _mimo_video_overview_current(tmp_path) is False
+    finally:
+        monkeypatch.undo()
+
+
+def test_mimo_video_overview_embeds_small_local_chunk(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"tiny")
+    monkeypatch.setitem(CONFIG, "mimo_video_base64_max_mb", 1)
+
+    data_url = _video_data_url(video)
+
+    assert data_url.startswith("data:video/mp4;base64,")
+
+
+def test_agent_brief_includes_mimo_video_overview(monkeypatch, tmp_path):
+    (tmp_path / "mimo_video_overview.json").write_text(
+        '{"input":"scene_chunks","content":"这是 MiMo 对分片汇总的故事线概览。","reasoning_content":"内部推理"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(CONFIG, "edit_mode", "full")
+    monkeypatch.setitem(CONFIG, "target_duration", "")
+    monkeypatch.setitem(CONFIG, "context_info", "")
+
+    brief = build_agent_brief(
+        [{"scene_id": 0, "start": 0.0, "end": 3.0, "description": "场景"}],
+        [],
+        [],
+        3.0,
+        tmp_path,
+    )
+
+    text = brief.read_text(encoding="utf-8")
+    assert "MiMo scene-chunk video overview" in text
+    assert "这是 MiMo 对分片汇总的故事线概览。" in text
+    assert "内部推理" not in text

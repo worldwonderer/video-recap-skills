@@ -1,10 +1,11 @@
 import base64
 import json
+import mimetypes
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import CONFIG
-from common import log, api_call, load_prompt
+from common import log, api_call, load_prompt, mimo_video_api_call, run_cmd
 
 # ── Step 4: VLM 视觉分析 ─────────────────────────────────────────────
 
@@ -191,6 +192,193 @@ def analyze_scenes(scenes, frames, work_dir):
 
     log(f"VLM 分析完成: {len(analyses)} 个场景")
     return analyses
+
+
+def _video_data_url(video_path):
+    """Return a MiMo-compatible data URL for a local video chunk, or None when too large."""
+    max_bytes = int(float(CONFIG.get("mimo_video_base64_max_mb", 45.0)) * 1024 * 1024)
+    encoded_size = int(video_path.stat().st_size * 4 / 3) + 128
+    if encoded_size > max_bytes:
+        log(
+            "MiMo 视频分片超过 base64 上限: "
+            f"编码后约 {encoded_size / 1024 / 1024:.1f}MB，超过限制 {max_bytes / 1024 / 1024:.1f}MB；"
+            "请降低 MIMO_VIDEO_CHUNK_MAX_SECONDS 或 MIMO_VIDEO_FPS"
+        )
+        return None
+    mime_type = mimetypes.guess_type(str(video_path))[0] or "video/mp4"
+    encoded = base64.b64encode(video_path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _mimo_video_chunks(scenes):
+    """Build local MiMo video-understanding chunks from ffmpeg scene boundaries."""
+    if not scenes:
+        raise RuntimeError("MiMo 视频分片理解需要 scenes；请先运行 ffmpeg scene/scdet 场景检测")
+
+    max_seconds = float(CONFIG.get("mimo_video_chunk_max_seconds", 20.0) or 20.0)
+    min_seconds = float(CONFIG.get("mimo_video_chunk_min_seconds", 1.0) or 1.0)
+    chunks = []
+    for scene_index, scene in enumerate(scenes):
+        try:
+            start = float(scene.get("start", 0.0))
+            end = float(scene.get("end", start))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if end <= start:
+            continue
+        scene_id = scene.get("scene_id", scene_index) if isinstance(scene, dict) else scene_index
+        cursor = start
+        while cursor < end:
+            chunk_end = min(end, cursor + max_seconds)
+            if end - chunk_end < min_seconds and chunk_end < end:
+                chunk_end = end
+            if chunk_end > cursor:
+                chunks.append({
+                    "chunk_id": len(chunks),
+                    "scene_id": scene_id,
+                    "start": round(cursor, 3),
+                    "end": round(chunk_end, 3),
+                })
+            cursor = chunk_end
+    if not chunks:
+        raise RuntimeError("MiMo 视频分片理解没有可用分片；请检查 scenes.json")
+    return chunks
+
+
+def _extract_video_chunk(video_path, chunk, output_path):
+    """Cut one scene-based chunk into a compact local MP4 for MiMo video_url data URL."""
+    start = float(chunk["start"])
+    duration = max(0.1, float(chunk["end"]) - start)
+    fps = float(CONFIG.get("mimo_video_fps", 2.0) or 2.0)
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", f"{start:.3f}",
+        "-t", f"{duration:.3f}",
+        "-i", str(video_path),
+        "-map", "0:v:0",
+        "-an",
+        "-vf", f"fps={fps:g}",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "30",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    result = run_cmd(cmd, timeout=CONFIG.get("mimo_video_chunk_timeout", 180))
+    if result.returncode != 0:
+        raise RuntimeError(f"MiMo 视频分片裁剪失败: {result.stderr[-500:]}")
+    return output_path
+
+
+def _mimo_chunk_prompt(chunk):
+    return (
+        f"这是原视频 {chunk['start']:.1f}s-{chunk['end']:.1f}s 的场景分片，"
+        f"scene_id={chunk['scene_id']}。"
+        f"{CONFIG.get('mimo_video_prompt', '请用中文概括这个视频分片。')}"
+    )
+
+
+def mimo_video_settings_fingerprint():
+    """Return non-secret MiMo video-overview settings that affect generated content."""
+    return {
+        "model": CONFIG.get("mimo_video_model") or CONFIG.get("mimo_model") or CONFIG.get("vlm_model"),
+        "mimo_video_fps": CONFIG.get("mimo_video_fps", 2.0),
+        "mimo_media_resolution": CONFIG.get("mimo_media_resolution", "default"),
+        "mimo_video_chunk_max_seconds": CONFIG.get("mimo_video_chunk_max_seconds", 20.0),
+        "mimo_video_chunk_min_seconds": CONFIG.get("mimo_video_chunk_min_seconds", 1.0),
+        "mimo_video_base64_max_mb": CONFIG.get("mimo_video_base64_max_mb", 45.0),
+        "mimo_video_prompt": CONFIG.get("mimo_video_prompt", ""),
+        "mimo_disable_thinking": CONFIG.get("mimo_disable_thinking", True),
+    }
+
+
+def _analyze_mimo_video_chunk(chunk_path, chunk):
+    video_url = _video_data_url(chunk_path)
+    if not video_url:
+        raise RuntimeError(f"MiMo 视频分片 {chunk['chunk_id'] + 1} 超过 data URL 上限")
+
+    content_parts = [
+        {
+            "type": "video_url",
+            "video_url": {"url": video_url},
+            "fps": CONFIG.get("mimo_video_fps", 2.0),
+            "media_resolution": CONFIG.get("mimo_media_resolution", "default"),
+        },
+        {"type": "text", "text": _mimo_chunk_prompt(chunk)},
+    ]
+    model = CONFIG.get("mimo_video_model") or CONFIG.get("mimo_model") or CONFIG["vlm_model"]
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": content_parts}],
+        "max_tokens": 1200,
+    }
+    resp = mimo_video_api_call(payload)
+    try:
+        msg = resp["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("MiMo 视频分片理解响应缺少 choices[0].message") from exc
+    return {
+        "chunk_id": chunk["chunk_id"],
+        "scene_id": chunk["scene_id"],
+        "start": chunk["start"],
+        "end": chunk["end"],
+        "model": resp.get("model", model),
+        "content": msg.get("content", ""),
+        "reasoning_content": msg.get("reasoning_content", ""),
+        "usage": resp.get("usage", {}),
+        "clip_path": f"mimo_video_chunks/{chunk_path.name}",
+    }
+
+
+def analyze_video_overview(video_path, work_dir, scenes=None):
+    """Use MiMo video understanding over local ffmpeg scene chunks."""
+    if not CONFIG.get("mimo_video_overview", False):
+        return None
+    if not CONFIG.get("mimo_video_api_key"):
+        log("MiMo 视频概览已启用，但未设置 MIMO_VIDEO_API_KEY/MIMO_API_KEY，跳过")
+        return None
+
+    chunks = _mimo_video_chunks(scenes)
+    chunks_dir = work_dir / "mimo_video_chunks"
+    chunks_dir.mkdir(exist_ok=True)
+
+    log(f"MiMo 视频理解：按 ffmpeg scene 分片分析 {len(chunks)} 段...")
+    chunk_results = []
+    for chunk in chunks:
+        chunk_path = chunks_dir / (
+            f"chunk_{chunk['chunk_id']:03d}_scene_{chunk['scene_id']}_"
+            f"{chunk['start']:.2f}-{chunk['end']:.2f}.mp4"
+        )
+        _extract_video_chunk(video_path, chunk, chunk_path)
+        log(
+            f"  MiMo 分片 {chunk['chunk_id'] + 1}/{len(chunks)}: "
+            f"{chunk['start']:.1f}-{chunk['end']:.1f}s"
+        )
+        chunk_results.append(_analyze_mimo_video_chunk(chunk_path, chunk))
+
+    content = "\n\n".join(
+        f"### 分片 {item['chunk_id'] + 1} "
+        f"(scene {item['scene_id']}, {item['start']:.1f}-{item['end']:.1f}s)\n"
+        f"{item.get('content', '').strip() or '(MiMo 未返回内容)'}"
+        for item in chunk_results
+    )
+
+    overview = {
+        "model": CONFIG.get("mimo_video_model") or CONFIG.get("mimo_model") or CONFIG["vlm_model"],
+        "content": content,
+        "chunks": chunk_results,
+        "chunk_count": len(chunk_results),
+        "fps": CONFIG.get("mimo_video_fps", 2.0),
+        "media_resolution": CONFIG.get("mimo_media_resolution", "default"),
+        "input": "scene_chunks",
+        "chunk_max_seconds": CONFIG.get("mimo_video_chunk_max_seconds", 20.0),
+        "settings": mimo_video_settings_fingerprint(),
+    }
+    overview_path = work_dir / "mimo_video_overview.json"
+    overview_path.write_text(json.dumps(overview, ensure_ascii=False, indent=2), encoding="utf-8")
+    log(f"MiMo 分片视频概览完成: {overview_path}")
+    return overview
 
 
 

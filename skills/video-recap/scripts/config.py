@@ -3,13 +3,43 @@ from pathlib import Path
 
 # ── 配置 ──────────────────────────────────────────────────────────────
 
+DEFAULT_OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
+DEFAULT_MIMO_API_URL = "https://api.xiaomimimo.com/v1"
+DEFAULT_MIMO_TOKEN_PLAN_CLUSTER = "cn"
+MIMO_TOKEN_PLAN_API_URLS = {
+    "cn": "https://token-plan-cn.xiaomimimo.com/v1",
+    "sgp": "https://token-plan-sgp.xiaomimimo.com/v1",
+    "ams": "https://token-plan-ams.xiaomimimo.com/v1",
+}
+DEFAULT_VLM_MODEL = "doubao-seed-2-0-lite-260428"
+DEFAULT_MIMO_MODEL = "mimo-v2.5"
+
 
 def normalize_api_url(raw_url):
     """Accept either an OpenAI-compatible base URL or chat/completions endpoint."""
-    url = (raw_url or "https://api.openai.com/v1/chat/completions").rstrip("/")
+    url = (raw_url or DEFAULT_OPENAI_CHAT_URL).rstrip("/")
     if url.endswith("/chat/completions"):
         return url
     return f"{url}/chat/completions"
+
+
+def is_mimo_token_plan_key(api_key):
+    """Return True for Xiaomi MiMo Token Plan keys, which use token-plan base URLs."""
+    return str(api_key or "").strip().startswith("tp-")
+
+
+def default_mimo_api_url(api_key="", cluster=None):
+    """Pick the correct MiMo base URL for pay-as-you-go vs Token Plan keys.
+
+    MiMo uses independent credentials for pay-as-you-go (`sk-*`) and Token Plan
+    (`tp-*`). Token Plan keys must be sent to the Token Plan cluster base URL,
+    not the pay-as-you-go `api.xiaomimimo.com` endpoint.
+    """
+    if is_mimo_token_plan_key(api_key):
+        cluster_name = (cluster or os.environ.get("MIMO_TOKEN_PLAN_CLUSTER") or DEFAULT_MIMO_TOKEN_PLAN_CLUSTER)
+        cluster_name = str(cluster_name).strip().lower()
+        return MIMO_TOKEN_PLAN_API_URLS.get(cluster_name, MIMO_TOKEN_PLAN_API_URLS[DEFAULT_MIMO_TOKEN_PLAN_CLUSTER])
+    return DEFAULT_MIMO_API_URL
 
 
 def env_int(name, default, *, minimum=None):
@@ -48,15 +78,111 @@ def env_float(name, default, *, minimum=None):
     return value
 
 
+_api_provider = os.environ.get("API_PROVIDER", "").strip().lower()
+_mimo_api_key = os.environ.get("MIMO_API_KEY", "")
+_mimo_video_api_key = os.environ.get("MIMO_VIDEO_API_KEY", "") or _mimo_api_key
+_mimo_tts_api_key = os.environ.get("MIMO_TTS_API_KEY", "") or _mimo_api_key
+_openai_api_key = os.environ.get("OPENAI_API_KEY", "")
+_main_api_provider = _api_provider or ("mimo" if _mimo_api_key and not _openai_api_key else "openai")
+_configured_api_key = (_mimo_api_key or _openai_api_key) if _main_api_provider == "mimo" else _openai_api_key
+_using_mimo_env = _main_api_provider == "mimo"
+_mimo_key_for_defaults = _mimo_api_key or _mimo_video_api_key or _mimo_tts_api_key or (
+    _openai_api_key if _using_mimo_env else ""
+)
+_raw_mimo_api_url = os.environ.get("MIMO_API_URL") or default_mimo_api_url(_mimo_key_for_defaults)
+_raw_mimo_video_api_url = (
+    os.environ.get("MIMO_VIDEO_API_URL")
+    or os.environ.get("MIMO_API_URL")
+    or default_mimo_api_url(_mimo_video_api_key or _mimo_key_for_defaults)
+)
+_raw_mimo_tts_api_url = (
+    os.environ.get("MIMO_TTS_API_URL")
+    or os.environ.get("MIMO_API_URL")
+    or default_mimo_api_url(_mimo_tts_api_key or _mimo_key_for_defaults)
+)
+if _using_mimo_env:
+    _openai_api_url_for_mimo = os.environ.get("OPENAI_API_URL", "")
+    if "xiaomimimo.com" not in _openai_api_url_for_mimo:
+        _openai_api_url_for_mimo = ""
+    _raw_api_url = (
+        _raw_mimo_api_url
+        or _openai_api_url_for_mimo
+        or default_mimo_api_url(_configured_api_key)
+    )
+else:
+    _raw_api_url = os.environ.get("OPENAI_API_URL")
+
 CONFIG = {
-    "api_url": normalize_api_url(os.environ.get("OPENAI_API_URL")),
-    "api_key": os.environ.get("OPENAI_API_KEY", ""),
-    "vlm_model": os.environ.get("OPENAI_MODEL", "doubao-seed-2-0-lite-260428"),
+    "api_provider": _main_api_provider,
+    "api_provider_source": "env" if _api_provider else "default",
+    "api_url": normalize_api_url(_raw_api_url),
+    "api_url_source": "env" if os.environ.get("OPENAI_API_URL") else "default",
+    "api_key": _configured_api_key,
+    "api_key_source": "MIMO_API_KEY" if _using_mimo_env and _mimo_api_key else "OPENAI_API_KEY",
+    "mimo_api_url": normalize_api_url(_raw_mimo_api_url),
+    "mimo_api_url_source": "env" if os.environ.get("MIMO_API_URL") else "default",
+    "mimo_api_key": _mimo_api_key or (_openai_api_key if _using_mimo_env else ""),
+    "mimo_api_key_source": "MIMO_API_KEY" if _mimo_api_key else ("OPENAI_API_KEY" if _using_mimo_env else "MIMO_API_KEY"),
+    "mimo_video_api_url": normalize_api_url(_raw_mimo_video_api_url),
+    "mimo_video_api_url_source": "env" if (
+        os.environ.get("MIMO_VIDEO_API_URL") or os.environ.get("MIMO_API_URL")
+    ) else "default",
+    "mimo_video_api_key": _mimo_video_api_key or (_openai_api_key if _using_mimo_env else ""),
+    "mimo_video_api_key_source": "MIMO_VIDEO_API_KEY" if os.environ.get("MIMO_VIDEO_API_KEY") else (
+        "MIMO_API_KEY" if _mimo_api_key else ("OPENAI_API_KEY" if _using_mimo_env else "MIMO_VIDEO_API_KEY")
+    ),
+    "mimo_tts_api_url": normalize_api_url(_raw_mimo_tts_api_url),
+    "mimo_tts_api_url_source": "env" if (
+        os.environ.get("MIMO_TTS_API_URL") or os.environ.get("MIMO_API_URL")
+    ) else "default",
+    "mimo_tts_api_key": _mimo_tts_api_key or (_openai_api_key if _using_mimo_env else ""),
+    "mimo_tts_api_key_source": "MIMO_TTS_API_KEY" if os.environ.get("MIMO_TTS_API_KEY") else (
+        "MIMO_API_KEY" if _mimo_api_key else ("OPENAI_API_KEY" if _using_mimo_env else "MIMO_TTS_API_KEY")
+    ),
+    "mimo_model": os.environ.get("MIMO_MODEL", DEFAULT_MIMO_MODEL),
+    "mimo_model_source": "env" if os.environ.get("MIMO_MODEL") else "default",
+    "mimo_video_model": os.environ.get("MIMO_VIDEO_MODEL") or os.environ.get("MIMO_MODEL", DEFAULT_MIMO_MODEL),
+    "mimo_video_model_source": "env" if (
+        os.environ.get("MIMO_VIDEO_MODEL") or os.environ.get("MIMO_MODEL")
+    ) else "default",
+    "vlm_model": (os.environ.get("MIMO_MODEL") if _using_mimo_env else None) or os.environ.get("OPENAI_MODEL") or (
+        DEFAULT_MIMO_MODEL if _using_mimo_env else DEFAULT_VLM_MODEL
+    ),
+    "vlm_model_source": "env" if (
+        os.environ.get("OPENAI_MODEL") or (_using_mimo_env and os.environ.get("MIMO_MODEL"))
+    ) else "default",
     "asr_bin": os.environ.get("ASR_BIN", "local_transcribe"),
     "asr_model_dir": os.environ.get("ASR_MODEL_DIR", ""),
     "scene_threshold": 0.1,
-    "tts_engine": "auto",  # auto | indextts2 | edge-tts | say
+    "tts_engine": os.environ.get("TTS_ENGINE", "auto"),  # auto | edge-tts | mimo-tts
+    "tts_engine_source": "env" if os.environ.get("TTS_ENGINE") else "default",
     "edge_tts_voice": "zh-CN-YunxiNeural",
+    "mimo_tts_model": os.environ.get("MIMO_TTS_MODEL", "mimo-v2.5-tts"),
+    "mimo_tts_model_source": "env" if os.environ.get("MIMO_TTS_MODEL") else "default",
+    "mimo_tts_voice": os.environ.get("MIMO_TTS_VOICE", "冰糖"),
+    "mimo_tts_voice_source": "env" if os.environ.get("MIMO_TTS_VOICE") else "default",
+    "mimo_tts_style": os.environ.get(
+        "MIMO_TTS_STYLE",
+        "自然、清晰、适合中文视频解说；语速中等，情绪克制但有故事感。",
+    ),
+    "mimo_tts_style_source": "env" if os.environ.get("MIMO_TTS_STYLE") else "default",
+    "mimo_media_resolution": os.environ.get("MIMO_MEDIA_RESOLUTION", "default"),
+    "mimo_media_resolution_source": "env" if os.environ.get("MIMO_MEDIA_RESOLUTION") else "default",
+    "mimo_video_overview": env_bool("MIMO_VIDEO_OVERVIEW", False),
+    "mimo_video_overview_source": "env" if os.environ.get("MIMO_VIDEO_OVERVIEW") else "default",
+    "mimo_video_fps": env_float("MIMO_VIDEO_FPS", 2.0, minimum=0.1),
+    "mimo_video_fps_source": "env" if os.environ.get("MIMO_VIDEO_FPS") else "default",
+    "mimo_video_chunk_max_seconds": env_float("MIMO_VIDEO_CHUNK_MAX_SECONDS", 20.0, minimum=1.0),
+    "mimo_video_chunk_min_seconds": env_float("MIMO_VIDEO_CHUNK_MIN_SECONDS", 1.0, minimum=0.2),
+    "mimo_video_chunk_timeout": env_int("MIMO_VIDEO_CHUNK_TIMEOUT", 180, minimum=1),
+    "mimo_video_base64_max_mb": env_float("MIMO_VIDEO_BASE64_MAX_MB", 45.0, minimum=1.0),
+    "mimo_video_prompt": os.environ.get(
+        "MIMO_VIDEO_PROMPT",
+        "请用中文分析这个视频分片的主要人物、场景变化、关键动作、情绪走向和剧情冲突，"
+        "重点提取适合写短视频解说的故事线索。不要泛泛复述画面，要标出对后续写稿有用的信息。",
+    ),
+    "mimo_disable_thinking": env_bool("MIMO_DISABLE_THINKING", True),
+    "mimo_disable_thinking_source": "env" if os.environ.get("MIMO_DISABLE_THINKING") else "default",
     "style_voices": {
         "短剧": "zh-CN-YunxiNeural",
         "电视剧": "zh-CN-XiaoxiaoNeural",
@@ -64,7 +190,6 @@ CONFIG = {
         "纪录片": "zh-CN-YunyangNeural",
         "科普视频": "zh-CN-XiaoyiNeural",
     },
-    "say_voice": "Tingting",
     "fps": 0,  # 0 = 自动（≤60s→2fps, ≤5min→1.5fps, >5min→1fps）
     # TTS 语速（字符/秒），由校准得出。edge-tts YunxiNeural 约 3.5 字/秒
     # 生成解说时使用 speech_rate * safety_margin 作为约束
@@ -87,6 +212,11 @@ CONFIG = {
     "zone_ducking_volume": 0.12,    # 解说区原声音量（大幅压低）
     "zone_fade_seconds": 0.5,      # 解说/原声切换的淡入淡出时长(秒)
     "narration_delay_seconds": 1.5,  # 解说延迟放置秒数，让画面先出现再解说
+    "narration_tail_pad_seconds": 0.1,  # 解说尾部最少留白；短 slot 会自动压低 delay 避免截断
+    "max_quiet_shift_seconds": 3.0,  # 自动贴近安静窗口时允许的最大位移，避免解说脱离画面动作
+    "quiet_overlap_min_ratio": 0.8,  # 解说段至少多少比例落在安静窗口内才标记为非对白重叠
+    "visual_beat_max_seconds": 18.0,  # 单段解说超过该时长且跨多个帧锚点时给 lint 提醒
+    "visual_beat_max_facts": 3,  # 单段解说最多建议覆盖的 frame_facts 锚点数量
     "quiet_ducking_volume": 0.7,     # 解说在安静窗口时原声音量(scene模式)
     "speech_ducking_volume": 0.2,    # 解说与对白重叠时原声音量(scene模式)
     "silence_noise_threshold": "-25dB",  # ffmpeg silencedetect 噪声阈值

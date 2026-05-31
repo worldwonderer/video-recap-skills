@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from config import CONFIG, normalize_api_url
+from config import CONFIG
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -102,12 +102,14 @@ def _asr_status() -> dict[str, object]:
 
 
 def build_report(*, tts_smoke: bool = False) -> dict[str, object]:
-    api_url = normalize_api_url(CONFIG.get("api_url"))
     filters = _ffmpeg_filters()
     ffmpeg_path = _command_path("ffmpeg") or ""
     ffprobe_path = _command_path("ffprobe") or ""
     edge_tts_path = _command_path("edge-tts") or ""
     edge_tts_module = importlib.util.find_spec("edge_tts") is not None
+    api_url = str(CONFIG.get("api_url") or "")
+    mimo_video_configured = bool(CONFIG.get("mimo_video_api_key"))
+    mimo_tts_configured = bool(CONFIG.get("mimo_tts_api_key"))
     subtitle_filter = "subtitles" in filters
     ass_filter = "ass" in filters
     checks: dict[str, object] = {
@@ -124,16 +126,37 @@ def build_report(*, tts_smoke: bool = False) -> dict[str, object]:
             "edge_tts_command": bool(edge_tts_path),
             "edge_tts_path": edge_tts_path,
             "edge_tts_module": edge_tts_module,
+            "mimo_tts_configured": mimo_tts_configured,
+            "mimo_tts_api_url": CONFIG.get("mimo_tts_api_url"),
+            "mimo_tts_api_url_source": CONFIG.get("mimo_tts_api_url_source", "default"),
+            "mimo_tts_voice": CONFIG.get("mimo_tts_voice"),
+            "mimo_tts_voice_source": CONFIG.get("mimo_tts_voice_source", "default"),
             "default_engine": CONFIG.get("tts_engine", "auto"),
+            "default_engine_source": CONFIG.get("tts_engine_source", "default"),
             "default_voice": CONFIG.get("edge_tts_voice"),
-            "available": bool(edge_tts_path or edge_tts_module or _command_path("say")),
+            "available": bool(edge_tts_path or edge_tts_module or mimo_tts_configured),
         },
         "asr": _asr_status(),
         "api_config": {
-            "openai_api_url": api_url,
-            "openai_api_key_set": bool(CONFIG.get("api_key")),
-            "openai_model": CONFIG.get("vlm_model"),
+            "api_provider": CONFIG.get("api_provider", "openai"),
+            "api_provider_source": CONFIG.get("api_provider_source", "default"),
+            "api_url": api_url,
+            "api_url_source": CONFIG.get("api_url_source", "default"),
+            "api_key_source": CONFIG.get("api_key_source", "OPENAI_API_KEY"),
+            "api_key_set": bool(CONFIG.get("api_key")),
+            "vlm_model": CONFIG.get("vlm_model"),
+            "vlm_model_source": CONFIG.get("vlm_model_source", "default"),
             "vlm_workers": CONFIG.get("vlm_workers"),
+            "mimo_video_configured": mimo_video_configured,
+            "mimo_video_api_url": CONFIG.get("mimo_video_api_url"),
+            "mimo_video_api_url_source": CONFIG.get("mimo_video_api_url_source", "default"),
+            "mimo_video_model": CONFIG.get("mimo_video_model"),
+            "mimo_video_model_source": CONFIG.get("mimo_video_model_source", "default"),
+            "mimo_tts_configured": mimo_tts_configured,
+            "mimo_tts_api_url": CONFIG.get("mimo_tts_api_url"),
+            "mimo_tts_api_url_source": CONFIG.get("mimo_tts_api_url_source", "default"),
+            "mimo_tts_model": CONFIG.get("mimo_tts_model"),
+            "mimo_tts_model_source": CONFIG.get("mimo_tts_model_source", "default"),
         },
         "python": {
             "executable": sys.executable,
@@ -153,14 +176,15 @@ def build_report(*, tts_smoke: bool = False) -> dict[str, object]:
         warnings.append("ffmpeg lacks subtitles/libass filter; --burn-subtitles will fail")
     tts = checks["tts"]  # type: ignore[index]
     if not tts.get("available"):  # type: ignore[union-attr]
-        failures.append("Missing TTS engine; install edge-tts or use macOS say")
+        failures.append("Missing TTS engine; install edge-tts or configure MiMo TTS")
     if tts_smoke and not checks.get("tts_smoke", {}).get("ok"):  # type: ignore[union-attr]
         failures.append("edge-tts smoke test failed")
     asr = checks["asr"]  # type: ignore[index]
     if not asr.get("available"):  # type: ignore[union-attr]
         warnings.append("ASR is not fully configured; pipeline can run with --skip-asr or continue without ASR on failure")
-    if not checks["api_config"].get("openai_api_key_set"):  # type: ignore[union-attr]
-        warnings.append("OPENAI_API_KEY is not set; VLM analysis will fail until configured")
+    if not checks["api_config"].get("api_key_set"):  # type: ignore[union-attr]
+        source = checks["api_config"].get("api_key_source")  # type: ignore[union-attr]
+        warnings.append(f"{source} is not set; VLM analysis will fail until configured")
     return {
         "ok": not failures,
         "repo_root": str(SCRIPT_DIR.parents[2]),
@@ -193,10 +217,16 @@ def _print_human(report: dict[str, object]) -> None:
 
     tts = checks["tts"]  # type: ignore[index]
     print("\n[tts]")
-    print(f"{_status_icon(bool(tts.get('available')))} available engine: {tts.get('default_engine')}")
+    print(
+        f"{_status_icon(bool(tts.get('available')))} available engine: "
+        f"{tts.get('default_engine')} (source: {tts.get('default_engine_source')})"
+    )
     print(f"{_status_icon(bool(tts.get('edge_tts_command')), warning=True)} edge-tts command: {tts.get('edge_tts_path') or 'not found'}")
     print(f"{_status_icon(bool(tts.get('edge_tts_module')), warning=True)} edge-tts module: {tts.get('edge_tts_module')}")
+    print(f"{_status_icon(bool(tts.get('mimo_tts_configured')), warning=True)} mimo-tts: {'configured' if tts.get('mimo_tts_configured') else 'not configured'}")
     print(f"✓ default voice: {tts.get('default_voice')}")
+    print(f"✓ MiMo TTS voice: {tts.get('mimo_tts_voice')} (source: {tts.get('mimo_tts_voice_source')})")
+    print(f"✓ MiMo TTS API URL: {tts.get('mimo_tts_api_url')} (source: {tts.get('mimo_tts_api_url_source')})")
 
     asr = checks["asr"]  # type: ignore[index]
     print("\n[asr]")
@@ -207,10 +237,21 @@ def _print_human(report: dict[str, object]) -> None:
 
     api = checks["api_config"]  # type: ignore[index]
     print("\n[api]")
-    print(f"✓ OPENAI_API_URL: {api.get('openai_api_url')}")
-    print(f"{_status_icon(bool(api.get('openai_api_key_set')), warning=True)} OPENAI_API_KEY: {'set' if api.get('openai_api_key_set') else 'not set'}")
-    print(f"✓ OPENAI_MODEL: {api.get('openai_model')}")
+    print(f"✓ API provider: {api.get('api_provider')} (source: {api.get('api_provider_source')})")
+    print(f"✓ API URL: {api.get('api_url')} (source: {api.get('api_url_source')})")
+    print(
+        f"{_status_icon(bool(api.get('api_key_set')), warning=True)} "
+        f"{api.get('api_key_source')}: {'set' if api.get('api_key_set') else 'not set'}"
+    )
+    print(f"✓ VLM model: {api.get('vlm_model')} (source: {api.get('vlm_model_source')})")
     print(f"✓ VLM_WORKERS: {api.get('vlm_workers')}")
+    print(
+        f"{_status_icon(bool(api.get('mimo_video_configured')), warning=True)} "
+        f"MiMo video: {'configured' if api.get('mimo_video_configured') else 'not configured'}"
+    )
+    print(f"✓ MiMo video API URL: {api.get('mimo_video_api_url')} (source: {api.get('mimo_video_api_url_source')})")
+    print(f"✓ MiMo video model: {api.get('mimo_video_model')} (source: {api.get('mimo_video_model_source')})")
+    print(f"✓ MiMo TTS model: {api.get('mimo_tts_model')} (source: {api.get('mimo_tts_model_source')})")
 
     if "tts_smoke" in checks:
         smoke = checks["tts_smoke"]  # type: ignore[index]
