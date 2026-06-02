@@ -23,9 +23,6 @@ def main():
     parser.add_argument("--output", "-o", help="输出目录 (默认: 视频所在目录/output)")
     parser.add_argument("--step", choices=["extract", "detect", "asr", "analyze", "script", "tts", "assemble"],
                         help="仅执行某步骤；script 只验证 Agent 写好的 narration.json")
-    parser.add_argument("--style", default="纪录片",
-                        choices=["短剧", "电视剧", "电影", "纪录片", "科普视频"],
-                        help="解说风格 (默认: 纪录片)")
     parser.add_argument("--scene-threshold", type=float, default=0.1,
                         help="场景检测阈值 0.0-1.0 (默认: 0.1, 对应 scdet=10)")
     parser.add_argument("--skip-asr", action="store_true",
@@ -126,7 +123,6 @@ def main():
             video_path=args.video,
             output_dir=args.output,
             step=args.step,
-            style=args.style,
             scene_threshold=args.scene_threshold,
             skip_asr=args.skip_asr,
             resume_dir=args.resume,

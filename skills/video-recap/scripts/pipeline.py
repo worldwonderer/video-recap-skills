@@ -11,12 +11,11 @@ from common import log, api_call, get_video_duration, run_cmd
 from extract import extract_frames
 from detect import detect_scenes, detect_silence_periods
 from asr import transcribe_audio
-from vlm import analyze_scenes, analyze_narrative_structure
+from vlm import analyze_scenes
 from narration import (
     build_agent_brief,
     validate_narration_or_raise,
     _validate_narration_budget,
-    _align_narration_to_quiet,
 )
 from tts import synthesize_tts
 from assemble import assemble_video, assembly_settings_fingerprint
@@ -318,7 +317,7 @@ def _tail_video_path(video_path, work_dir):
     return video_path
 
 
-def _run_cached_tail_step(video_path, work_dir, step, style, output_dir):
+def _run_cached_tail_step(video_path, work_dir, step, output_dir):
     """Run tts/assemble from existing artifacts without VLM/API prerequisites."""
     if step not in ("tts", "assemble"):
         return None
@@ -373,7 +372,7 @@ def _run_cached_tail_step(video_path, work_dir, step, style, output_dir):
 
 # ── Main Pipeline ─────────────────────────────────────────────────────
 
-def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
+def run_pipeline(video_path, output_dir=None, step=None,
                  scene_threshold=None, skip_asr=False, resume_dir=None):
     """执行完整的视频解说 pipeline"""
     pipeline_start = time.time()
@@ -428,7 +427,7 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
             log(f"步骤 {step} 完成")
             return result
         if step in ("tts", "assemble"):
-            cached_result = _run_cached_tail_step(video_path, work_dir, step, style, output_dir)
+            cached_result = _run_cached_tail_step(video_path, work_dir, step, output_dir)
             if cached_result is not None:
                 return cached_result
         elif step == "script":
@@ -522,18 +521,6 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
         _step_done(work_dir, "vlm")
         log(f"[{time.time()-t0:.1f}s] VLM 分析完成")
 
-    # Step 4.5: 叙事结构分析
-    if CONFIG.get("skip_narrative_analysis", False):
-        log("跳过叙事结构分析（skip_narrative_analysis=True）")
-    elif _is_step_done(work_dir, "narrative"):
-        vlm_analysis = json.loads((work_dir / "narrative_structure.json").read_text())
-        log("跳过叙事结构分析（已存在）")
-    else:
-        t0 = time.time()
-        vlm_analysis = analyze_narrative_structure(vlm_analysis, work_dir)
-        _step_done(work_dir, "narrative")
-        log(f"[{time.time()-t0:.1f}s] 叙事结构分析完成")
-
     # Step 5: Agent-authored narration script and optional clip plan
     narration_path = work_dir / "narration.json"
     clip_plan_path = work_dir / "clip_plan.json"
@@ -572,9 +559,6 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
             mode=CONFIG.get("edit_mode", "full"), work_dir=work_dir,
         )
         source_narration = _validate_narration_budget(source_narration, vlm_analysis)
-        if not cut_mode:
-            source_narration = _align_narration_to_quiet(source_narration, vlm_analysis, silence_periods)
-            narration_path.write_text(json.dumps(source_narration, ensure_ascii=False, indent=2), encoding="utf-8")
         _step_done(work_dir, "script")
         log(f"Agent 解说词验证完成: {len(source_narration)} 段")
     if stop_after_script and source_narration is not None:
@@ -585,7 +569,7 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
             "lint": str(work_dir / "narration_lint.json"),
         }
     elif source_narration is None:
-        brief_path = build_agent_brief(vlm_analysis, asr_result, silence_periods, video_duration, work_dir, style)
+        brief_path = build_agent_brief(vlm_analysis, asr_result, silence_periods, video_duration, work_dir)
         log("=" * 50)
         log("⏸  Pipeline 在解说词步骤暂停")
         if cut_mode:

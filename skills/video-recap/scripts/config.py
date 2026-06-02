@@ -57,13 +57,6 @@ CONFIG = {
     "scene_threshold": 0.1,
     "tts_engine": "auto",  # auto | indextts2 | edge-tts | say
     "edge_tts_voice": "zh-CN-YunxiNeural",
-    "style_voices": {
-        "短剧": "zh-CN-YunxiNeural",
-        "电视剧": "zh-CN-XiaoxiaoNeural",
-        "电影": "zh-CN-YunjianNeural",
-        "纪录片": "zh-CN-YunyangNeural",
-        "科普视频": "zh-CN-XiaoyiNeural",
-    },
     "say_voice": "Tingting",
     "fps": 0,  # 0 = 自动（≤60s→2fps, ≤5min→1.5fps, >5min→1fps）
     # TTS 语速（字符/秒），由校准得出。edge-tts YunxiNeural 约 3.5 字/秒
@@ -71,7 +64,11 @@ CONFIG = {
     "speech_rate": 3.5,
     "speech_safety_margin": 0.85,  # 保守系数：TTS 实际语速有 ±20% 波动
     "fade_ms": 300,  # TTS fade-in/fade-out 时长(ms)
-    "breath_ms": 600,  # 段间呼吸空间(ms)，原值 0ms
+    "breath_ms": 250,  # 段间呼吸空间(ms)；连续原声铺底风格用短停顿保持节奏
+    # 解说密度目标（连续原声铺底的高密度 recap 风格，源自参考样片；可按片源调整）
+    "target_segments_per_minute": 9.6,   # 目标解说密度（段/分钟）
+    "min_segments_per_minute": 6.24,     # 低于此密度时 lint 警告
+    "max_narration_gap_seconds": 11.0,   # 相邻解说段最大间隔；超过则 lint 警告（保持连续铺底）
     "ducking_mode": "fixed",  # fixed | sidechaincompress | none
     "ducking_threshold": 0.15,
     "ducking_ratio": 3,
@@ -81,25 +78,19 @@ CONFIG = {
     "ducking_makeup": 1.2,
     "ducking_narr_weight": 1.5,
     "ducking_orig_volume": 0.5,
-    "narration_mode": "zone",       # "zone": 大段解说+原声交替 | "scene": 逐场景解说
-    "zone_min_duration": 6.0,        # 解说区最短秒数，短于此的安静窗口不单独成区
-    "zone_merge_gap": 3.0,          # 相邻安静窗口间隔<此值时合并为一个解说区
     "zone_ducking_volume": 0.12,    # 解说区原声音量（大幅压低）
     "zone_fade_seconds": 0.5,      # 解说/原声切换的淡入淡出时长(秒)
     "narration_delay_seconds": 1.5,  # 解说延迟放置秒数，让画面先出现再解说
-    "quiet_ducking_volume": 0.7,     # 解说在安静窗口时原声音量(scene模式)
-    "speech_ducking_volume": 0.2,    # 解说与对白重叠时原声音量(scene模式)
+    "speech_ducking_volume": 0.2,    # 解说与对白重叠时原声音量
     "silence_noise_threshold": "-25dB",  # ffmpeg silencedetect 噪声阈值
     "silence_min_duration": 0.3,     # 静音最短持续秒数
     "quiet_window_min": 1.0,         # 可放解说的安静窗口最短秒数
     "silence_merge_gap": 0.5,        # 相邻静音段间隔<此值时合并
     "scene_merge_min": 4.0,         # 场景合并最短时长，<此值的场景合并到相邻场景
-    "temporal_gap_min": 8.0,        # 长场景中最小空白间隔秒数（触发追加解说）
     "context_info": "",              # 额外上下文（节目名、角色名等）
     "tts_dynamic_params": True,  # 启用动态语速调节
     "vlm_workers": env_int("VLM_WORKERS", 8, minimum=1),  # VLM 并行分析线程数
     "tts_workers": env_int("TTS_WORKERS", 4, minimum=1),  # TTS 并行合成线程数
-    "fill_workers": env_int("FILL_WORKERS", 4, minimum=1),  # 填充解说并行 API 线程数
     "tts_timeout": env_int("TTS_TIMEOUT", 90, minimum=1),  # 单段 TTS 命令超时秒数
     "tts_retries": env_int("TTS_RETRIES", 3, minimum=1),  # 单段 TTS 失败重试次数
     "allow_partial_tts": env_bool("ALLOW_PARTIAL_TTS", False),
@@ -107,9 +98,13 @@ CONFIG = {
     "target_duration": os.environ.get("TARGET_DURATION", ""),  # cut 模式目标成片时长，如 10m
     "clip_padding": env_float("CLIP_PADDING", 0.0, minimum=0.0),  # cut 模式片段两端扩展秒数
     "allow_clip_overlap": env_bool("ALLOW_CLIP_OVERLAP", False),  # cut 模式是否允许重复/重叠使用原片
-    "skip_narrative_analysis": True,  # 跳过叙事结构分析（省57-130s，对质量影响极小）
     "burn_subtitles": False,  # 烧录字幕到视频（需要重编码）
     "force_video_reencode": env_bool("FORCE_VIDEO_REENCODE", False),  # 组装时重编码视频，修复部分容器时间戳问题
+    # 成片末端整体响度归一（默认混音偏轻，归一后更接近常见短视频响度；样片约 -11.9，默认取更安全的 -14）
+    "final_loudnorm": env_bool("FINAL_LOUDNORM", True),  # 组装末端做一次整体响度归一
+    "target_lufs": env_float("TARGET_LUFS", -14.0),       # 目标综合响度 (LUFS)
+    "target_true_peak": env_float("TARGET_TRUE_PEAK", -1.0),  # 目标真峰值 (dBTP)
+    "target_lra": env_float("TARGET_LRA", 11.0),          # 目标响度范围 (LU)
     "subtitle_font_name": os.environ.get("SUBTITLE_FONT_NAME", "Arial"),
     "subtitle_font_size": env_int("SUBTITLE_FONT_SIZE", 42, minimum=8),
     "subtitle_primary_color": os.environ.get("SUBTITLE_PRIMARY_COLOR", "&H00FFFFFF"),

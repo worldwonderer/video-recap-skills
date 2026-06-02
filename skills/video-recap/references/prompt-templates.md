@@ -1,13 +1,12 @@
 # Prompt 模板
 
-> 本文件被 `load_prompt()` 按 `### NAME` 切片读取。当前 CLI 只读取 VLM / 叙事分析相关模板；解说词由 Agent 根据 `agent_narration_brief.md` 撰写。
+> 本文件被 `load_prompt()` 按 `### NAME` 切片读取。当前 CLI 只读取 VLM 分析模板；解说词由 Agent 根据 `agent_narration_brief.md` 撰写。
 
 ## 目录
 
 | 模板名 | 用途 | 使用阶段 |
 |--------|------|----------|
 | VLM_DEPTH_PROMPT | 场景画面深度分析 | VLM 分析 |
-| NARRATIVE_ANALYSIS_PROMPT | 叙事结构分析（默认跳过） | 叙事分析 |
 
 ### VLM_DEPTH_PROMPT
 仔细观察这些视频帧，分析这个场景。分三部分输出：
@@ -34,30 +33,3 @@
 - 不要用"象征""隐喻"等文学词汇
 - 用口语化表达："他明显是在试探她的反应"
 - 如果画面信息不足，直接说"信息不足"
-
-### NARRATIVE_ANALYSIS_PROMPT
-你是一个视频叙事结构分析师。根据每个场景的画面描述，分析整个视频的叙事结构。
-
-对于每个场景，你需要标注：
-1. **narrative_role**：该场景在叙事中的角色
-   - hook: 开场引入，抓住注意力
-   - setup: 铺垫背景、建立情境
-   - escalation: 递进发展，信息量增加
-   - climax: 高潮/转折/冲突爆发
-   - resolution: 收束/解决/结尾
-   - transition: 过渡连接两个重要场景
-
-2. **info_weight**：信息密度权重 (1-5)
-   - 1: 过渡性画面，信息量低
-   - 3: 正常叙事，标准信息量
-   - 5: 关键剧情/高潮/重要转折
-
-判断依据：
-- 情绪强度变化大的场景 → escalation 或 climax
-- 有冲突/反转/意外发现的场景 → climax
-- 首次出现关键人物/物品的场景 → setup
-- 重复或铺垫性的画面 → transition
-- 结尾总结/回归常态 → resolution
-
-输出严格按 JSON 数组格式：
-[{"scene_id": 0, "narrative_role": "hook", "info_weight": 4}]

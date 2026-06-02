@@ -6,7 +6,6 @@
 |------|------|------|----------|
 | `video` | 输入视频文件路径 | (必填，`--doctor` 除外) | — |
 | `--tts` | TTS 引擎: auto / indextts2 / edge-tts / say | auto（优先 edge-tts） | 常规推荐 `edge-tts`；无网络时用 macOS `say` |
-| `--style` | 解说风格: 短剧 / 电视剧 / 电影 / 纪录片 / 科普视频 | 纪录片 | 按内容类型选择 |
 | `--context` | 额外上下文（节目名、角色名等） | "" | 有已知角色名时填写 |
 | `--model` | 覆盖 VLM 模型名 | `$OPENAI_MODEL` 或 `doubao-seed-2-0-lite-260428` | 换 VLM 模型时使用 |
 | `--vlm-model` | 单独覆盖 VLM 模型名（优先级高于 `--model`） | `$OPENAI_MODEL` | 临时指定视觉分析模型 |

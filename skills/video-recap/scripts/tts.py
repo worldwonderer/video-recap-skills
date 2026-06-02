@@ -97,7 +97,7 @@ def _synthesize_segment(i, seg, narration, tts_dir, engine):
 
     dur = _get_audio_duration(output_wav)
     seg_slot = seg["end"] - seg["start"]
-    seg_pause = seg.get("pause_after_ms", CONFIG.get("breath_ms", 600)) / 1000
+    seg_pause = seg.get("pause_after_ms", CONFIG.get("breath_ms", 250)) / 1000
     available = max(0.5, seg_slot - seg_pause)
     atempo_max = 1.2
     if dur > available * atempo_max and len(text) > 5:
@@ -121,8 +121,8 @@ def _build_tts_segment_result(index, seg, text, output_wav, duration, rate_offse
         "audio_path": str(output_wav),
         "audio_duration": duration,
         "tts_rate_offset": rate_offset,
-        "pause_after_ms": seg.get("pause_after_ms", CONFIG.get("breath_ms", 600)),
-        "overlaps_speech": seg.get("overlaps_speech", False),
+        "pause_after_ms": seg.get("pause_after_ms", CONFIG.get("breath_ms", 250)),
+        "overlaps_speech": seg.get("overlaps_speech", True),
     }
     for optional_key in ("source_start", "source_end", "source_clip_id"):
         if optional_key in seg:

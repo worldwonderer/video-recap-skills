@@ -219,6 +219,58 @@ def test_lint_narration_cut_mode_requires_clip_membership():
     assert any(issue["code"] == "outside_clip_plan" for issue in report["errors"])
 
 
+def test_lint_narration_density_metrics_and_warnings(monkeypatch):
+    monkeypatch.setitem(CONFIG, "target_segments_per_minute", 9.6)
+    monkeypatch.setitem(CONFIG, "min_segments_per_minute", 6.24)
+    monkeypatch.setitem(CONFIG, "max_narration_gap_seconds", 11.0)
+
+    # Sparse + a long gap → should warn low_density and long_gap, and emit metrics.
+    sparse = lint_narration([
+        {"start": 0.0, "end": 4.0, "narration": "第一句。", "pause_after_ms": 250},
+        {"start": 40.0, "end": 44.0, "narration": "很久之后的第二句。", "pause_after_ms": 250},
+    ], mode="full")
+    sparse_codes = {issue["code"] for issue in sparse["warnings"]}
+    assert "low_density" in sparse_codes
+    assert "long_gap" in sparse_codes
+    assert sparse["metrics"]["segment_count"] == 2
+    assert sparse["metrics"]["max_gap_seconds"] == 36.0
+
+    # Dense, continuous → no density warnings.
+    dense = []
+    t = 0.0
+    for _ in range(10):
+        dense.append({"start": round(t, 2), "end": round(t + 4.5, 2),
+                      "narration": "一句紧凑的解说。", "pause_after_ms": 250})
+        t += 6.0
+    dense_report = lint_narration(dense, mode="full")
+    dense_codes = {issue["code"] for issue in dense_report["warnings"]}
+    assert "low_density" not in dense_codes
+    assert "long_gap" not in dense_codes
+    assert dense_report["metrics"]["segments_per_minute"] >= CONFIG["min_segments_per_minute"]
+
+    # Cut mode measures density on the mapped timeline elsewhere → no density metrics here.
+    cut_report = lint_narration(sparse, mode="cut")
+    assert cut_report["metrics"] == {}
+
+
+def test_final_loudnorm_filter_and_fingerprint(monkeypatch):
+    from assemble import assembly_settings_fingerprint, final_loudnorm_filter
+
+    monkeypatch.setitem(CONFIG, "final_loudnorm", True)
+    monkeypatch.setitem(CONFIG, "target_lufs", -14.0)
+    monkeypatch.setitem(CONFIG, "target_true_peak", -1.0)
+    monkeypatch.setitem(CONFIG, "target_lra", 11.0)
+    assert final_loudnorm_filter() == "loudnorm=I=-14.0:TP=-1.0:LRA=11.0"
+    assert assembly_settings_fingerprint()["final_loudnorm"] == "loudnorm=I=-14.0:TP=-1.0:LRA=11.0"
+
+    monkeypatch.setitem(CONFIG, "target_lufs", -11.9)
+    assert final_loudnorm_filter() == "loudnorm=I=-11.9:TP=-1.0:LRA=11.0"
+
+    monkeypatch.setitem(CONFIG, "final_loudnorm", False)
+    assert final_loudnorm_filter() is None
+    assert assembly_settings_fingerprint()["final_loudnorm"] == "off"
+
+
 def test_get_video_duration_returns_zero_for_unparseable_output(monkeypatch):
     def fake_run_cmd(cmd):
         return CompletedProcess(cmd, 0, stdout="N/A\n", stderr="")
@@ -520,7 +572,6 @@ def test_full_pipeline_pauses_for_agent_brief_without_script_api(monkeypatch, tm
     monkeypatch.setitem(CONFIG, "api_key", "test-key")
     monkeypatch.setitem(CONFIG, "fps", 1)
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
-    monkeypatch.setitem(CONFIG, "skip_narrative_analysis", True)
     monkeypatch.setattr("pipeline.check_prerequisites", lambda skip_asr=False: True)
     monkeypatch.setattr("pipeline.get_video_duration", lambda path: 8.0)
     monkeypatch.setattr("pipeline.api_call", lambda payload: {"choices": [{"message": {"content": "ok"}}]})
@@ -565,7 +616,6 @@ def test_resume_validates_existing_agent_narration_without_api(monkeypatch, tmp_
     monkeypatch.setitem(CONFIG, "api_key", "")
     monkeypatch.setitem(CONFIG, "fps", 1)
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
-    monkeypatch.setitem(CONFIG, "skip_narrative_analysis", True)
     monkeypatch.setattr("pipeline.check_prerequisites", lambda skip_asr=False: True)
     monkeypatch.setattr("pipeline.get_video_duration", lambda path: 6.0)
     monkeypatch.setattr("pipeline.api_call", lambda payload: (_ for _ in ()).throw(AssertionError("API should not be called")))
@@ -660,7 +710,6 @@ def test_full_pipeline_cut_mode_pauses_for_clip_plan_and_narration(monkeypatch, 
     monkeypatch.setitem(CONFIG, "api_key", "test-key")
     monkeypatch.setitem(CONFIG, "fps", 1)
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
-    monkeypatch.setitem(CONFIG, "skip_narrative_analysis", True)
     monkeypatch.setitem(CONFIG, "edit_mode", "cut")
     monkeypatch.setitem(CONFIG, "target_duration", "4s")
     monkeypatch.setattr("pipeline.check_prerequisites", lambda skip_asr=False: True)
@@ -696,7 +745,6 @@ def test_pause_resume_command_preserves_burn_subtitles(monkeypatch, tmp_path):
     monkeypatch.setitem(CONFIG, "fps", 1)
     monkeypatch.setitem(CONFIG, "edit_mode", "full")
     monkeypatch.setitem(CONFIG, "burn_subtitles", True)
-    monkeypatch.setitem(CONFIG, "skip_narrative_analysis", True)
     monkeypatch.setattr("pipeline.check_prerequisites", lambda skip_asr=False: True)
     monkeypatch.setattr("pipeline._ffmpeg_has_filter", lambda filter_name: True)
     monkeypatch.setattr("pipeline.get_video_duration", lambda path: 4.0)
@@ -788,7 +836,6 @@ def test_step_script_writes_narration_lint_and_stops_before_tts(monkeypatch, tmp
     monkeypatch.setitem(CONFIG, "api_key", "")
     monkeypatch.setitem(CONFIG, "edit_mode", "full")
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
-    monkeypatch.setitem(CONFIG, "skip_narrative_analysis", True)
     monkeypatch.setattr("pipeline.check_prerequisites", lambda skip_asr=False: True)
     monkeypatch.setattr("pipeline.get_video_duration", lambda path: 6.0)
     monkeypatch.setattr("pipeline.synthesize_tts", lambda narration, wd: (_ for _ in ()).throw(AssertionError("TTS should not run for --step script")))
@@ -817,7 +864,6 @@ def test_step_script_fails_on_lint_errors(monkeypatch, tmp_path):
     monkeypatch.setitem(CONFIG, "api_key", "")
     monkeypatch.setitem(CONFIG, "edit_mode", "full")
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
-    monkeypatch.setitem(CONFIG, "skip_narrative_analysis", True)
     monkeypatch.setattr("pipeline.check_prerequisites", lambda skip_asr=False: True)
     monkeypatch.setattr("pipeline.get_video_duration", lambda path: 6.0)
 
@@ -845,14 +891,12 @@ def test_resume_cut_mode_maps_narration_and_assembles_edited_source(monkeypatch,
     monkeypatch.setitem(CONFIG, "api_key", "")
     monkeypatch.setitem(CONFIG, "fps", 1)
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
-    monkeypatch.setitem(CONFIG, "skip_narrative_analysis", True)
     monkeypatch.setitem(CONFIG, "edit_mode", "cut")
     monkeypatch.setitem(CONFIG, "target_duration", "4s")
     monkeypatch.setitem(CONFIG, "clip_padding", 0.0)
     monkeypatch.setitem(CONFIG, "allow_clip_overlap", False)
     monkeypatch.setattr("pipeline.check_prerequisites", lambda skip_asr=False: True)
     monkeypatch.setattr("pipeline.get_video_duration", lambda path: 10.0 if Path(path) == video else 4.0)
-    monkeypatch.setattr("pipeline._align_narration_to_quiet", lambda narration, scenes, silence: narration)
     monkeypatch.setattr("pipeline.api_call", lambda payload: (_ for _ in ()).throw(AssertionError("API should not be called")))
 
     edited_source_calls = []
@@ -980,7 +1024,6 @@ def test_full_pipeline_reassembles_when_burn_setting_changes(monkeypatch, tmp_pa
 
     monkeypatch.setitem(CONFIG, "api_key", "")
     monkeypatch.setitem(CONFIG, "edit_mode", "full")
-    monkeypatch.setitem(CONFIG, "skip_narrative_analysis", True)
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
     pipeline._write_assemble_meta(work_dir, video)
     monkeypatch.setitem(CONFIG, "burn_subtitles", True)
