@@ -31,26 +31,9 @@ export OPENAI_MODEL=doubao-seed-2-0-lite-260428
 # 可选：OPENAI_API_URL
 ```
 
-MiMo 可选配置（不要把 key 写入仓库文件）。简单模式下：OPENAI_* 负责帧级 VLM，MIMO_API_KEY 同时负责 MiMo 分片视频理解和 TTS；只有需要拆网关时才设置 MIMO_VIDEO_* / MIMO_TTS_*。
+MiMo 可选（勿把 key 写入仓库）：`OPENAI_*` 负责帧级 VLM，`MIMO_API_KEY`（+`MIMO_MODEL`）同时负责 MiMo 分片视频理解和 TTS；需要拆网关时再设 `MIMO_VIDEO_*` / `MIMO_TTS_*`。`tp-*` Token Plan key 默认走 cn 集群，可用 `MIMO_TOKEN_PLAN_CLUSTER=sgp|ams` 或 `MIMO_API_URL` 覆盖。
 
-```bash
-export OPENAI_API_KEY=***
-export OPENAI_API_URL=https://your-vlm-api-url/v1
-export OPENAI_MODEL=doubao-seed-2-0-lite-260428
-
-export MIMO_API_KEY=***
-export MIMO_MODEL=mimo-v2.5
-# tp-* Token Plan key 默认走 https://token-plan-cn.xiaomimimo.com/v1
-# 其他集群：export MIMO_TOKEN_PLAN_CLUSTER=sgp 或 ams
-# 也可直接指定：export MIMO_API_URL=https://token-plan-cn.xiaomimimo.com/v1
-```
-
-推荐安装方式：
-
-```bash
-git clone <repo> /tmp/video-recap-repo
-ln -s /tmp/video-recap-repo/skills/video-recap ~/.claude/skills/video-recap
-```
+推荐安装：`git clone <repo> /tmp/video-recap-repo && ln -s /tmp/video-recap-repo/skills/video-recap ~/.claude/skills/video-recap`
 
 ## 使用流程
 
@@ -60,14 +43,7 @@ ln -s /tmp/video-recap-repo/skills/video-recap ~/.claude/skills/video-recap
 python3 scripts/video_recap.py <video> --context "背景"
 ```
 
-Doubao 帧级 VLM + MiMo 分片视频理解 + MiMo TTS（有 MIMO_API_KEY 时 TTS 默认 auto 选 MiMo）：
-
-```bash
-python3 scripts/video_recap.py <video> \
-  --vlm-model doubao-seed-2-0-lite-260428 \
-  --mimo-video-overview \
-  --mimo-tts-voice 冰糖
-```
+开启 MiMo 分片视频理解 + 指定 TTS 音色：`--mimo-video-overview --mimo-tts-voice 冰糖`（有 `MIMO_API_KEY` 时 TTS 默认选 MiMo）。
 
 剪辑式解说（长视频剪短）加：
 
