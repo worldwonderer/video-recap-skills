@@ -153,6 +153,10 @@ CONFIG = {
     ) else "default",
     "asr_bin": os.environ.get("ASR_BIN", "local_transcribe"),
     "asr_model_dir": os.environ.get("ASR_MODEL_DIR", ""),
+    # ASR 分段窗口秒数。越小 → 长视频的对白时间戳越精细（默认 30s）。旧值 180s 会把 >3min
+    # 视频的对白塌缩成一个时间戳，既让 brief 无法定位对白，又触发 detect.py 的粗粒度跳过，
+    # 使 overlaps_speech/安静窗口判断失真。代价是更多 ASR 调用；ASR 慢时可调大。
+    "asr_segment_seconds": env_float("ASR_SEGMENT_SECONDS", 30.0, minimum=5.0),
     "scene_threshold": 0.1,
     "tts_engine": os.environ.get("TTS_ENGINE", "auto"),  # auto | edge-tts | mimo-tts
     "tts_engine_source": "env" if os.environ.get("TTS_ENGINE") else "default",

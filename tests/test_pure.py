@@ -29,7 +29,15 @@ from edit import (
     parse_duration_seconds,
     source_time_to_output_time,
 )
-from narration import _align_narration_to_quiet, _text_char_count, build_agent_brief, lint_narration
+from narration import (
+    _align_narration_to_quiet,
+    _post_dedup_narration,
+    _text_char_count,
+    assess_understanding_substrate,
+    build_agent_brief,
+    lint_narration,
+)
+import asr as asr_module
 from tts import (
     _build_tts_segment_result,
     _detect_tts_engine,
@@ -495,23 +503,49 @@ def test_annotate_cut_narration_overlap_preserves_source_times():
     assert result[1]["overlaps_speech"] is True
 
 
-def test_align_narration_to_quiet_requires_enough_overlap_and_limits_shift(monkeypatch):
+def test_align_narration_to_quiet_sets_overlap_flag_without_moving_beats(monkeypatch):
+    """New contract: keep the agent's timing; only (re)compute overlaps_speech."""
     scenes = [{"scene_id": 0, "start": 0.0, "end": 12.0}]
     monkeypatch.setitem(CONFIG, "quiet_overlap_min_ratio", 0.8)
-    monkeypatch.setitem(CONFIG, "max_quiet_shift_seconds", 3.0)
 
-    near = _align_narration_to_quiet([
-        {"start": 0.0, "end": 4.0, "narration": "可以贴近稍后的安静画面。"},
+    # Beat fully inside a quiet window -> overlaps_speech False, timing untouched.
+    inside = _align_narration_to_quiet([
+        {"start": 2.5, "end": 5.5, "narration": "完全落在安静窗口里。"},
     ], scenes, [{"start": 2.0, "end": 6.0, "duration": 4.0, "has_speech": False}])
-    assert near[0]["start"] == 2.0
-    assert near[0]["end"] == 6.0
-    assert near[0]["overlaps_speech"] is False
+    assert inside[0]["start"] == 2.5
+    assert inside[0]["end"] == 5.5
+    assert inside[0]["overlaps_speech"] is False
 
-    far = _align_narration_to_quiet([
-        {"start": 0.0, "end": 4.0, "narration": "不要漂远画面。"},
-    ], scenes, [{"start": 5.0, "end": 9.0, "duration": 4.0, "has_speech": False}])
-    assert far[0]["start"] == 0.0
-    assert far[0]["overlaps_speech"] is True
+    # Beat mostly outside the quiet window -> overlaps_speech True, timing untouched
+    # (the old code would have shifted it; we no longer move it off the picture).
+    outside = _align_narration_to_quiet([
+        {"start": 0.0, "end": 4.0, "narration": "大部分都在对白区。"},
+    ], scenes, [{"start": 3.0, "end": 6.0, "duration": 3.0, "has_speech": False}])
+    assert outside[0]["start"] == 0.0
+    assert outside[0]["end"] == 4.0
+    assert outside[0]["overlaps_speech"] is True
+
+
+def test_align_narration_to_quiet_never_blanks_agent_text(monkeypatch):
+    """Regression: the old gap-cascade could blank a squeezed segment to '' and drop it."""
+    scenes = [{"scene_id": 0, "start": 0.0, "end": 12.0}]
+    monkeypatch.setitem(CONFIG, "quiet_overlap_min_ratio", 0.8)
+    result = _align_narration_to_quiet([
+        {"start": 0.0, "end": 5.0, "narration": "他终于回来了。"},
+        {"start": 5.3, "end": 9.5, "narration": "屋里气氛骤然变冷。"},
+    ], scenes, [{"start": 0.5, "end": 2.0, "duration": 1.5, "has_speech": False}])
+    assert len(result) == 2
+    assert all(seg["narration"].strip() for seg in result)
+
+
+def test_post_dedup_keeps_distinct_short_beats(monkeypatch):
+    """Parallel short beats sharing common chars must not be merged (threshold raised to >0.6)."""
+    narration = [
+        {"start": 0.0, "end": 4.0, "narration": "他不再试探。", "overlaps_speech": True},
+        {"start": 4.3, "end": 8.0, "narration": "他直接赌上全力。", "overlaps_speech": True},
+    ]
+    result = _post_dedup_narration([dict(n) for n in narration])
+    assert len(result) == 2
 
 
 def test_build_tts_segment_result_preserves_source_trace(tmp_path):
@@ -1514,3 +1548,70 @@ def test_agent_brief_includes_mimo_video_overview(monkeypatch, tmp_path):
     assert "MiMo scene-chunk video overview" in text
     assert "这是 MiMo 对分片汇总的故事线概览。" in text
     assert "内部推理" not in text
+
+
+def test_build_agent_brief_injects_background_research(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "edit_mode", "full")
+    monkeypatch.setitem(CONFIG, "target_duration", "")
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    (tmp_path / "background_research.json").write_text(
+        json.dumps({
+            "synopsis": "少年范闲深夜查案。",
+            "characters": {"范闲": "主角", "五竹": "范闲的护卫"},
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    brief = build_agent_brief(
+        [{"scene_id": 0, "start": 0.0, "end": 3.0, "description": "夜路", "frame_facts": {"1.0": ["走路"]}}],
+        [{"start": 0.0, "end": 3.0, "text": "你终于来了"}],
+        [],
+        3.0,
+        tmp_path,
+    )
+    text = brief.read_text(encoding="utf-8")
+    assert "Story context" in text
+    assert "五竹" in text
+    assert "范闲的护卫" in text
+
+
+def test_build_agent_brief_warns_on_empty_substrate(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "edit_mode", "full")
+    monkeypatch.setitem(CONFIG, "target_duration", "")
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    brief = build_agent_brief(
+        [{"scene_id": 0, "start": 0.0, "end": 3.0, "description": "场景"}],
+        [],
+        [],
+        3.0,
+        tmp_path,
+    )
+    text = brief.read_text(encoding="utf-8")
+    assert "SUBSTRATE IS EMPTY" in text
+
+
+def test_assess_understanding_substrate_levels():
+    empty = assess_understanding_substrate(
+        [{"scene_id": 0, "start": 0.0, "end": 3.0, "description": "短"}], []
+    )
+    assert empty["level"] == "empty"
+    rich = assess_understanding_substrate(
+        [
+            {"scene_id": i, "start": float(i), "end": float(i + 1),
+             "description": "画面描述" * 6, "frame_facts": {"1.0": ["动作"]}}
+            for i in range(4)
+        ],
+        [{"start": 0.0, "end": 3.0, "text": "对白" * 60}],
+    )
+    assert rich["level"] == "rich"
+
+
+def test_segment_and_transcribe_uses_configured_window(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "asr_segment_seconds", 30.0)
+    monkeypatch.setattr(asr_module, "run_cmd",
+                        lambda *a, **k: CompletedProcess(a[0] if a else [], 0, "", ""))
+    monkeypatch.setattr(asr_module, "_run_asr", lambda wav: "对白")
+    segs = asr_module._segment_and_transcribe(tmp_path / "audio.wav", tmp_path, 100.0)
+    assert len(segs) == 4  # 30s windows over 100s: 0-30,30-60,60-90,90-100
+    assert segs[0]["start"] == 0 and segs[0]["end"] == 30
+    assert segs[-1]["end"] == 100
+    assert all(s["text"] == "对白" for s in segs)

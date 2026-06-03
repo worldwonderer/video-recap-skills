@@ -17,6 +17,7 @@ from narration import (
     validate_narration_or_raise,
     _validate_narration_budget,
     _align_narration_to_quiet,
+    assess_understanding_substrate,
 )
 from tts import SUPPORTED_TTS_ENGINES, resolve_tts_engine, synthesize_tts, tts_settings_fingerprint
 from assemble import assemble_video, assembly_settings_fingerprint
@@ -686,8 +687,11 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
             source_narration, vlm_analysis, clip_plan=clip_plan_for_lint,
             mode=CONFIG.get("edit_mode", "full"), work_dir=work_dir,
         )
-        source_narration = _validate_narration_budget(source_narration, vlm_analysis)
-        if not cut_mode:
+        if cut_mode:
+            source_narration = _validate_narration_budget(source_narration, vlm_analysis)
+        else:
+            # _align_narration_to_quiet ends with _validate_narration_budget, so the
+            # budget+dedup pass runs exactly once here (previously it ran twice).
             source_narration = _align_narration_to_quiet(source_narration, vlm_analysis, silence_periods)
             narration_path.write_text(json.dumps(source_narration, ensure_ascii=False, indent=2), encoding="utf-8")
         _step_done(work_dir, "script")
@@ -700,6 +704,14 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
             "lint": str(work_dir / "narration_lint.json"),
         }
     elif source_narration is None:
+        substrate = assess_understanding_substrate(vlm_analysis, asr_result)
+        if substrate["level"] != "rich":
+            log("=" * 50)
+            banner = "理解素材为空" if substrate["level"] == "empty" else "理解素材偏薄"
+            log(f"⚠️  {banner}：ASR {substrate['asr_chars']} 字 | 场景 {substrate['scene_count']} | "
+                f"带 frame_facts 的场景 {substrate['scenes_with_frame_facts']} | 平均画面描述 {substrate['avg_description_len']} 字")
+            log("    解说很可能流于泛泛的“看图说话”。建议先做背景调研写 background_research.json，"
+                "并确认 ASR / VLM 是否正常产出；详见 brief 顶部提示。")
         brief_path = build_agent_brief(vlm_analysis, asr_result, silence_periods, video_duration, work_dir, style)
         log("=" * 50)
         log("⏸  Pipeline 在解说词步骤暂停")
@@ -720,6 +732,7 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
             "brief": str(brief_path),
             "next_step": next_step,
             "edit_mode": CONFIG.get("edit_mode", "full"),
+            "substrate": substrate["level"],
             "resume_command": _resume_command(cli_path, video_path, work_dir),
         }
 

@@ -24,13 +24,14 @@ def transcribe_audio(video_path, work_dir):
     segments_dir = work_dir / "audio_segments"
     segments_dir.mkdir(exist_ok=True)
 
-    if duration <= 180:
+    segment_length = max(5, int(CONFIG.get("asr_segment_seconds", 30) or 30))
+    if duration <= segment_length:
         # 短音频，整段转录
         text = _run_asr(audio_wav)
         asr_result = [{"start": 0.0, "end": round(duration, 2), "text": text}]
     else:
-        # 长音频，分段转录
-        asr_result = _segment_and_transcribe(audio_wav, segments_dir, duration)
+        # 长音频，分段转录（更细的窗口 → 更精细的对白时间戳）
+        asr_result = _segment_and_transcribe(audio_wav, segments_dir, duration, segment_length)
 
     # 保存
     asr_file = work_dir / "asr_result.json"
@@ -60,9 +61,10 @@ def _run_asr(wav_path):
     return text
 
 
-def _segment_and_transcribe(audio_wav, segments_dir, total_duration):
+def _segment_and_transcribe(audio_wav, segments_dir, total_duration, segment_length=None):
     """分段转录长音频"""
-    segment_length = 180  # 3 分钟
+    if segment_length is None:
+        segment_length = max(5, int(CONFIG.get("asr_segment_seconds", 30) or 30))
     results = []
 
     for i, start in enumerate(range(0, int(total_duration), segment_length)):

@@ -131,7 +131,9 @@ def detect_silence_periods(video_path, work_dir, asr_result=None):
     # 跳过条件：ASR 段太粗（无法精确判断语音位置）
     # 1. 段数少(<=5)且覆盖>80%视频时长 → 时间戳不可靠
     # 2. 覆盖率>150% → 时间戳明显异常
-    # 3. 平均段长>30s → 粒度太粗，无法判断哪些窗口有语音
+    # 3. 平均段长过大 → 粒度太粗，无法判断哪些窗口有语音
+    #    阈值 45s 给默认 ASR 窗口(asr_segment_seconds=30s)留出余量，使交叉验证重新生效；
+    #    粗粒度(如 180s 旧窗口)仍会被正确跳过。
     if asr_result:
         video_dur = get_video_duration(str(audio_path))
         asr_coverage = sum(seg.get("end", 0) - seg.get("start", 0) for seg in asr_result)
@@ -139,7 +141,7 @@ def detect_silence_periods(video_path, work_dir, asr_result=None):
         skip_cross_check = (
             (len(asr_result) <= 5 and asr_coverage > video_dur * 0.8) or
             asr_coverage > video_dur * 1.5 or
-            avg_seg_dur > 30
+            avg_seg_dur > 45
         )
         if not skip_cross_check:
             for qp in periods:

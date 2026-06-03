@@ -53,7 +53,7 @@ def _char_bigrams(text):
 
 
 def _post_dedup_narration(narration):
-    """去除相邻相似解说段（bigram Jaccard >40% 则合并）。"""
+    """去除相邻相似解说段（bigram 重叠 >60% 则合并）。"""
     if len(narration) < 2:
         return narration
     result = [narration[0]]
@@ -67,7 +67,10 @@ def _post_dedup_narration(narration):
             result.append(seg)
             continue
         overlap = len(set_a & set_b) / min(len(set_a), len(set_b))
-        if overlap > 0.4:
+        # Only merge near-identical adjacent beats. Short Chinese beats share many
+        # bigrams by chance, so a low threshold collapses intentional parallel beats
+        # ("他不再试探" / "他直接赌上全力") and silently drops density below target.
+        if overlap > 0.6:
             if len(seg["narration"]) > len(prev["narration"]):
                 prev["narration"] = seg["narration"]
             prev["end"] = seg["end"]
@@ -442,7 +445,15 @@ def _clean_narration_punctuation(text):
 
 
 def _align_narration_to_quiet(narration, scenes_analysis, silence_periods):
-    """将解说段移到同场景内的安静窗口，标记是否与语音重叠。"""
+    """Recompute overlaps_speech from real quiet windows; keep the agent's timing.
+
+    The dense continuous-bed design places narration ON the pictured beat over a
+    ducked original bed, so we no longer relocate segments into silence gaps. The
+    old shift moved voiceover up to 3s off the moment it was written for and could
+    silently blank a squeezed segment; both fought the design intent. We now only
+    correct the overlaps_speech flag that the ducking stage consumes, leaving the
+    agent's start/end (and text) intact.
+    """
     if not silence_periods:
         for n in narration:
             n["overlaps_speech"] = True
@@ -450,73 +461,12 @@ def _align_narration_to_quiet(narration, scenes_analysis, silence_periods):
 
     quiet_windows = [qp for qp in silence_periods if not qp.get("has_speech", False)]
     quiet_ratio_min = float(CONFIG.get("quiet_overlap_min_ratio", 0.8) or 0.8)
-    max_shift = float(CONFIG.get("max_quiet_shift_seconds", 3.0) or 3.0)
 
-    for n in narration:
-        seg_start = n["start"]
-        seg_end = n["end"]
-        seg_dur = seg_end - seg_start
-        if seg_dur <= 0:
-            n["overlaps_speech"] = True
-            continue
-
-        current_quiet_overlap = _quiet_overlap_seconds(seg_start, seg_end, quiet_windows)
-        if current_quiet_overlap >= seg_dur * quiet_ratio_min:
-            n["overlaps_speech"] = False
-            continue
-
-        parent_scene = _find_scene_for_midpoint(scenes_analysis, seg_start, seg_end)
-        scene_start = float(parent_scene["start"]) if parent_scene else 0.0
-        scene_end = float(parent_scene["end"]) if parent_scene else float("inf")
-        best_candidate = None
-        best_score = None
-
-        for qw in quiet_windows:
-            try:
-                window_start = max(float(qw["start"]), scene_start)
-                window_end = min(float(qw["end"]), scene_end)
-            except (KeyError, TypeError, ValueError):
-                continue
-            if window_end - window_start < seg_dur:
-                continue
-            candidate_start = min(max(seg_start, window_start), window_end - seg_dur)
-            shift = abs(candidate_start - seg_start)
-            if shift > max_shift:
-                continue
-            candidate_end = candidate_start + seg_dur
-            candidate_overlap = _quiet_overlap_seconds(candidate_start, candidate_end, [qw])
-            if candidate_overlap < seg_dur * quiet_ratio_min:
-                continue
-            score = (shift, -candidate_overlap)
-            if best_score is None or score < best_score:
-                best_score = score
-                best_candidate = candidate_start
-
-        if best_candidate is not None:
-            new_start = round(max(0.0, best_candidate), 2)
-            n["start"] = new_start
-            n["end"] = round(new_start + seg_dur, 2)
-            n["overlaps_speech"] = False
-        else:
-            n["overlaps_speech"] = True
-
-    narration.sort(key=lambda x: x["start"])
-    for i in range(1, len(narration)):
-        prev = narration[i - 1]
-        curr = narration[i]
-        min_gap = 0.3
-        min_start = prev["end"] + min_gap
-        if curr["start"] < min_start:
-            seg_dur = curr["end"] - curr["start"]
-            curr["start"] = round(min_start, 2)
-            curr["end"] = round(min_start + seg_dur, 2)
-            parent_scene = _find_scene_for_midpoint(scenes_analysis, curr["start"], curr["end"])
-            if parent_scene and curr["end"] > parent_scene["end"]:
-                curr["end"] = round(parent_scene["end"], 2)
-            if curr["end"] - curr["start"] < 1.5:
-                curr["narration"] = ""
-
-    for n in narration:
+    # Run budget/dedup FIRST, then set the flag on the final (possibly merged) spans,
+    # so a dedup-merged beat's overlaps_speech reflects its extended timing, not its
+    # original shorter span (which the ducking stage in assemble.py would mis-duck).
+    aligned = _validate_narration_budget(narration, scenes_analysis)
+    for n in aligned:
         try:
             seg_start = float(n["start"])
             seg_end = float(n["end"])
@@ -527,7 +477,7 @@ def _align_narration_to_quiet(narration, scenes_analysis, silence_periods):
         quiet_overlap = _quiet_overlap_seconds(seg_start, seg_end, quiet_windows)
         n["overlaps_speech"] = quiet_overlap < max(0.3, seg_dur * quiet_ratio_min)
 
-    return _validate_narration_budget(narration, scenes_analysis)
+    return aligned
 
 
 def _scene_asr_lines(asr_result, scene):
@@ -570,6 +520,142 @@ def _quiet_overlap_seconds(start, end, quiet_windows):
     return overlap_seconds
 
 
+def _load_background_research(work_dir):
+    """Load the agent-authored background_research.json if present.
+
+    This file is the single highest-leverage quality input (character names,
+    relationships, plot context). It used to be documented but never read by
+    any code, so researched story knowledge never reached the writing brief.
+    """
+    path = Path(work_dir) / "background_research.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        log(f"警告: background_research.json 读取失败，忽略: {exc}")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _format_background_research(research):
+    """Render background_research.json into a compact Story-context brief section."""
+    if not research:
+        return []
+    lines = ["## Story context (from background_research.json)", ""]
+    synopsis = str(research.get("synopsis", "")).strip()
+    if synopsis:
+        lines.append(f"- Synopsis: {synopsis}")
+    world = str(research.get("worldbuilding", "")).strip()
+    if world:
+        lines.append(f"- Worldbuilding: {world}")
+    episode = str(research.get("episode_context", "")).strip()
+    if episode:
+        lines.append(f"- Episode context: {episode}")
+
+    characters = research.get("characters")
+    if isinstance(characters, dict) and characters:
+        lines.append("- Characters:")
+        for name, desc in characters.items():
+            lines.append(f"    - {name}: {str(desc).strip()}")
+
+    details = research.get("character_details")
+    if isinstance(details, dict) and details:
+        lines.append("- Character details:")
+        for name, info in details.items():
+            if not isinstance(info, dict):
+                continue
+            bits = []
+            aliases = info.get("aliases")
+            if isinstance(aliases, list) and aliases:
+                bits.append("别名 " + "/".join(str(a) for a in aliases))
+            if info.get("role"):
+                bits.append(str(info["role"]))
+            rels = info.get("relationships")
+            if isinstance(rels, list) and rels:
+                bits.append("；".join(str(r) for r in rels))
+            lines.append(f"    - {name}: {', '.join(bits)}" if bits else f"    - {name}")
+
+    arcs = research.get("plot_arcs")
+    if isinstance(arcs, list) and arcs:
+        lines.append("- Plot arcs:")
+        for arc in arcs:
+            if isinstance(arc, dict):
+                name = str(arc.get("name", "")).strip()
+                desc = str(arc.get("description", "")).strip()
+                status = str(arc.get("status", "")).strip()
+                tail = f" [{status}]" if status else ""
+                lines.append(f"    - {name}: {desc}{tail}".rstrip())
+
+    notes = research.get("cultural_notes")
+    if isinstance(notes, list) and notes:
+        lines.append("- Cultural notes:")
+        for note in notes:
+            if isinstance(note, dict):
+                item = str(note.get("item", "")).strip()
+                expl = str(note.get("explanation", "")).strip()
+                if item and expl:
+                    lines.append(f"    - {item}: {expl}")
+                elif item or expl:
+                    lines.append(f"    - {item or expl}")
+
+    lines.extend([
+        "",
+        "Use these names, relationships, and stakes in the narration instead of generic labels like \"男子\"/\"白发女子\".",
+        "",
+    ])
+    return lines
+
+
+def assess_understanding_substrate(scenes_analysis, asr_result):
+    """Measure how much real signal the writing agent has to work with.
+
+    Recap quality collapses to generic 看图说话 when ASR is empty and the VLM
+    emitted no frame_facts (proven by the demo-vs-qyn artifact comparison), yet
+    the pipeline otherwise produces a brief and runs to completion silently.
+    """
+    scenes = scenes_analysis or []
+    asr_chars = sum(len(str(seg.get("text", "")).strip()) for seg in (asr_result or []))
+    scenes_with_facts = sum(1 for s in scenes if isinstance(s, dict) and s.get("frame_facts"))
+    desc_lens = [len(str(s.get("description", "")).strip()) for s in scenes if isinstance(s, dict)]
+    avg_desc = sum(desc_lens) // len(desc_lens) if desc_lens else 0
+
+    has_asr = asr_chars >= 20
+    has_facts = scenes_with_facts > 0
+    if not has_asr and not has_facts and avg_desc < 25:
+        level = "empty"
+    elif (has_asr or has_facts) and (scenes_with_facts >= max(1, len(scenes) // 2) or asr_chars >= 200):
+        level = "rich"
+    else:
+        level = "thin"
+    return {
+        "level": level,
+        "asr_chars": asr_chars,
+        "scene_count": len(scenes),
+        "scenes_with_frame_facts": scenes_with_facts,
+        "avg_description_len": avg_desc,
+    }
+
+
+def _format_substrate_warning(assessment):
+    """Render a loud brief banner when the understanding substrate is weak."""
+    if not assessment or assessment.get("level") == "rich":
+        return []
+    if assessment["level"] == "empty":
+        head = "⚠️ UNDERSTANDING SUBSTRATE IS EMPTY — narration will be generic guesswork unless you fix this first."
+    else:
+        head = "⚠️ Understanding substrate is THIN — narration risks generic \"看图说话\" without more grounding."
+    return [
+        head,
+        f"  ASR chars: {assessment['asr_chars']} | scenes: {assessment['scene_count']} | "
+        f"scenes with frame_facts: {assessment['scenes_with_frame_facts']} | avg description: {assessment['avg_description_len']} chars",
+        "  Before writing: do background research (write background_research.json with names/relationships/plot),",
+        "  lean on any --context provided, and use ASR dialogue + frame_facts as the factual spine.",
+        "  Do NOT invent plot. If you truly have nothing, keep beats sparse and factual rather than fabricating drama.",
+        "",
+    ]
+
+
 def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_duration, work_dir, style="纪录片"):
     """Write a compact brief that tells the agent exactly how to author recap artifacts."""
     effective_rate = CONFIG["speech_rate"] * CONFIG["speech_safety_margin"]
@@ -599,6 +685,10 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         f"- Context: {CONFIG.get('context_info') or '(none)'}",
         "",
     ]
+
+    substrate = assess_understanding_substrate(scenes_analysis, asr_result)
+    lines.extend(_format_substrate_warning(substrate))
+    lines.extend(_format_background_research(_load_background_research(work_dir)))
 
     if mimo_overview_path.exists():
         try:
@@ -663,6 +753,16 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         "6. Keep timing visually local: if one line spans many frame-fact timestamps, split it or tighten start/end around the pictured beat.",
         "7. In cut mode, select clips for plot causality, key dialogue, reveals, and emotional turns; avoid filler and repeated shots.",
         "8. After writing, run: `python3 skills/video-recap/scripts/video_recap.py <video> --resume <work_dir>`.",
+        "",
+        "## Recap craft (what separates a real recap from captions)",
+        "",
+        "- Hook: the first 1-2 beats must create a question or stakes, not set the scene. Make the viewer need the next line.",
+        "- Through-line: pick ONE spine (a goal, a relationship, a mystery) and let every beat advance it; don't reset each scene.",
+        "- Escalation: raise the stakes or reveal new information as you go; later beats should land harder than earlier ones.",
+        "- Curiosity gaps: tease consequences before they happen (\"他还不知道，这一步会要命\") and pay them off later.",
+        "- Payoff: the final 1-2 beats must resolve or twist the spine, leaving an aftertaste — never trail off on a generic line.",
+        "- Information, not narration of pixels: every beat should add something the picture alone can't tell (who, why, what's at stake).",
+        "- Voice: concrete nouns and verbs, specific names; cut adjectives and vague grandeur (\"危机四伏\"/\"震撼人心\" are filler).",
         "",
         "## Scene timing guide",
         "",
