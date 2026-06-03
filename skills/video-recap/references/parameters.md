@@ -65,6 +65,7 @@
 | `MIMO_DISABLE_THINKING` | MiMo 非 TTS 请求默认关闭 thinking | true | 保证 VLM 返回可见 content，而不是只消耗在 reasoning_content |
 | `ASR_BIN` | ASR 二进制路径 | local_transcribe (PATH 搜索) | 用自定义 ASR 时指定路径 |
 | `ASR_MODEL_DIR` | ASR 模型目录 | (空) | 本地 ASR 需要指定模型目录时设置 |
+| `ASR_SEGMENT_SECONDS` | ASR 分段窗口秒数 | 30 | 越小对白时间戳越精细；ASR 很慢时可调大以减少调用次数 |
 | `VLM_WORKERS` | VLM 并行线程数 | 8 | 代理/WAF 对并发敏感时设为 1 |
 | `TTS_WORKERS` | TTS 并行线程数 | 4 | MiMo/edge-tts 超时或限流时调低 |
 | `TTS_TIMEOUT` | 单段 TTS 命令超时秒数 | 90 | 网络慢时调高 |

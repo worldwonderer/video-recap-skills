@@ -80,7 +80,6 @@ def main():
                         help="MiMo TTS 音色，如 冰糖/茉莉/苏打/白桦/mimo_default")
     parser.add_argument("--mimo-tts-style", type=str, default=None,
                         help="MiMo TTS 自然语言播报风格指令")
-    parser.add_argument("--agent-mode", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--doctor", action="store_true",
                         help="检查 ffmpeg / edge-tts / API 配置后退出")
     parser.add_argument("--doctor-tts-smoke", action="store_true",

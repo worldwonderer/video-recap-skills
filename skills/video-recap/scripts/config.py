@@ -207,17 +207,14 @@ CONFIG = {
     "ducking_makeup": 1.2,
     "ducking_narr_weight": 1.5,
     "ducking_orig_volume": 0.5,
-    "narration_mode": "zone",       # "zone": 大段解说+原声交替 | "scene": 逐场景解说
-    "zone_ducking_volume": 0.12,    # 解说区原声音量（大幅压低）
+    "zone_ducking_volume": 0.12,    # 解说时原声压低到的音量
     "zone_fade_seconds": 0.5,      # 解说/原声切换的淡入淡出时长(秒)
     "narration_delay_seconds": 1.5,  # 解说延迟放置秒数，让画面先出现再解说
     "narration_tail_pad_seconds": 0.1,  # 解说尾部最少留白；短 slot 会自动压低 delay 避免截断
-    "max_quiet_shift_seconds": 3.0,  # 自动贴近安静窗口时允许的最大位移，避免解说脱离画面动作
     "quiet_overlap_min_ratio": 0.8,  # 解说段至少多少比例落在安静窗口内才标记为非对白重叠
     "visual_beat_max_seconds": 18.0,  # 单段解说超过该时长且跨多个帧锚点时给 lint 提醒
     "visual_beat_max_facts": 3,  # 单段解说最多建议覆盖的 frame_facts 锚点数量
-    "quiet_ducking_volume": 0.7,     # 解说在安静窗口时原声音量(scene模式)
-    "speech_ducking_volume": 0.2,    # 解说与对白重叠时原声音量(scene模式)
+    "speech_ducking_volume": 0.2,    # 解说与对白重叠时原声音量
     "silence_noise_threshold": "-25dB",  # ffmpeg silencedetect 噪声阈值
     "silence_min_duration": 0.3,     # 静音最短持续秒数
     "quiet_window_min": 1.0,         # 可放解说的安静窗口最短秒数
@@ -234,7 +231,6 @@ CONFIG = {
     "target_duration": os.environ.get("TARGET_DURATION", ""),  # cut 模式目标成片时长，如 10m
     "clip_padding": env_float("CLIP_PADDING", 0.0, minimum=0.0),  # cut 模式片段两端扩展秒数
     "allow_clip_overlap": env_bool("ALLOW_CLIP_OVERLAP", False),  # cut 模式是否允许重复/重叠使用原片
-    "skip_narrative_analysis": True,  # 跳过叙事结构分析（省57-130s，对质量影响极小）
     "burn_subtitles": False,  # 烧录字幕到视频（需要重编码）
     "force_video_reencode": env_bool("FORCE_VIDEO_REENCODE", False),  # 组装时重编码视频，修复部分容器时间戳问题
     # 成片末端整体响度归一（默认混音偏轻，归一后更接近常见短视频响度；样片约 -11.9，默认取更安全的 -14）

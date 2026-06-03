@@ -50,6 +50,7 @@ from tts import (
 )
 from video_recap import _apply_api_provider
 from assemble import (
+    _build_audio_filter_complex,
     _build_timed_narration,
     _escape_ass_text,
     _generate_ass,
@@ -225,6 +226,54 @@ def test_assemble_video_without_burn_keeps_video_copy(monkeypatch, tmp_path):
     assert not (tmp_path / "subtitles.ass").exists()
     assert "-vf" not in ffmpeg_cmd
     assert ffmpeg_cmd[ffmpeg_cmd.index("-c:v") + 1] == "copy"
+
+
+def test_build_audio_filter_complex_dynamic_envelope_default(monkeypatch):
+    monkeypatch.setitem(CONFIG, "ducking_mode", "fixed")
+    monkeypatch.setitem(CONFIG, "ducking_orig_volume", 0.5)
+    monkeypatch.setitem(CONFIG, "speech_ducking_volume", 0.2)
+    monkeypatch.setitem(CONFIG, "zone_ducking_volume", 0.12)
+    fc = _build_audio_filter_complex([
+        {"actual_place_start": 0.0, "actual_place_end": 2.0, "overlaps_speech": True},
+        {"actual_place_start": 5.0, "actual_place_end": 7.0, "overlaps_speech": False},
+    ])
+    assert "volume='max(0,min(1," in fc  # per-segment envelope
+    assert "eval=frame" in fc
+    assert "between(t,0.00,2.00)" in fc
+    assert "between(t,5.00,7.00)" in fc
+    assert fc.endswith("[aout]")
+
+
+def test_build_audio_filter_complex_fixed_when_all_overlap(monkeypatch):
+    monkeypatch.setitem(CONFIG, "ducking_mode", "fixed")
+    monkeypatch.setitem(CONFIG, "ducking_orig_volume", 0.5)
+    fc = _build_audio_filter_complex([
+        {"actual_place_start": 0.0, "actual_place_end": 2.0, "overlaps_speech": True},
+    ])
+    assert "volume=0.5,aresample=48000[orig]" in fc  # constant, not an envelope
+    assert "eval=frame" not in fc
+    assert fc.endswith("[aout]")
+
+
+def test_build_audio_filter_complex_trapezoid_when_all_quiet(monkeypatch):
+    monkeypatch.setitem(CONFIG, "ducking_mode", "fixed")
+    monkeypatch.setitem(CONFIG, "zone_ducking_volume", 0.12)
+    monkeypatch.setitem(CONFIG, "zone_fade_seconds", 0.5)
+    fc = _build_audio_filter_complex([
+        {"actual_place_start": 1.0, "actual_place_end": 4.0, "overlaps_speech": False},
+    ])
+    assert "min(t-1.00,4.00-t)/0.5" in fc  # smooth trapezoid fade
+    assert "eval=frame" in fc
+
+
+def test_build_audio_filter_complex_explicit_modes(monkeypatch):
+    segs = [{"actual_place_start": 0.0, "actual_place_end": 2.0, "overlaps_speech": True}]
+    monkeypatch.setitem(CONFIG, "ducking_mode", "none")
+    none_fc = _build_audio_filter_complex(segs)
+    assert "sidechaincompress" not in none_fc
+    assert "volume='" not in none_fc  # no envelope in 'none' mode
+    monkeypatch.setitem(CONFIG, "ducking_mode", "sidechaincompress")
+    assert "sidechaincompress" in _build_audio_filter_complex(segs)
 
 
 def test_assembly_settings_fingerprint_tracks_burn_style(monkeypatch):
@@ -793,7 +842,6 @@ def test_full_pipeline_pauses_for_agent_brief_without_script_api(monkeypatch, tm
     monkeypatch.setitem(CONFIG, "api_key", "test-key")
     monkeypatch.setitem(CONFIG, "fps", 1)
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
-    monkeypatch.setitem(CONFIG, "skip_narrative_analysis", True)
     monkeypatch.setattr("pipeline.check_prerequisites", lambda skip_asr=False: True)
     monkeypatch.setattr("pipeline.get_video_duration", lambda path: 8.0)
     monkeypatch.setattr("pipeline.api_call", lambda payload: {"choices": [{"message": {"content": "ok"}}]})
@@ -838,7 +886,6 @@ def test_resume_validates_existing_agent_narration_without_api(monkeypatch, tmp_
     monkeypatch.setitem(CONFIG, "api_key", "")
     monkeypatch.setitem(CONFIG, "fps", 1)
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
-    monkeypatch.setitem(CONFIG, "skip_narrative_analysis", True)
     monkeypatch.setattr("pipeline.check_prerequisites", lambda skip_asr=False: True)
     monkeypatch.setattr("pipeline.get_video_duration", lambda path: 6.0)
     monkeypatch.setattr("pipeline.api_call", lambda payload: (_ for _ in ()).throw(AssertionError("API should not be called")))
@@ -970,7 +1017,6 @@ def test_full_pipeline_cut_mode_pauses_for_clip_plan_and_narration(monkeypatch, 
     monkeypatch.setitem(CONFIG, "api_key", "test-key")
     monkeypatch.setitem(CONFIG, "fps", 1)
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
-    monkeypatch.setitem(CONFIG, "skip_narrative_analysis", True)
     monkeypatch.setitem(CONFIG, "edit_mode", "cut")
     monkeypatch.setitem(CONFIG, "target_duration", "4s")
     monkeypatch.setattr("pipeline.check_prerequisites", lambda skip_asr=False: True)
@@ -1006,7 +1052,6 @@ def test_pause_resume_command_preserves_burn_subtitles(monkeypatch, tmp_path):
     monkeypatch.setitem(CONFIG, "fps", 1)
     monkeypatch.setitem(CONFIG, "edit_mode", "full")
     monkeypatch.setitem(CONFIG, "burn_subtitles", True)
-    monkeypatch.setitem(CONFIG, "skip_narrative_analysis", True)
     monkeypatch.setattr("pipeline.check_prerequisites", lambda skip_asr=False: True)
     monkeypatch.setattr("pipeline._ffmpeg_has_filter", lambda filter_name: True)
     monkeypatch.setattr("pipeline.get_video_duration", lambda path: 4.0)
@@ -1098,7 +1143,6 @@ def test_step_script_writes_narration_lint_and_stops_before_tts(monkeypatch, tmp
     monkeypatch.setitem(CONFIG, "api_key", "")
     monkeypatch.setitem(CONFIG, "edit_mode", "full")
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
-    monkeypatch.setitem(CONFIG, "skip_narrative_analysis", True)
     monkeypatch.setattr("pipeline.check_prerequisites", lambda skip_asr=False: True)
     monkeypatch.setattr("pipeline.get_video_duration", lambda path: 6.0)
     monkeypatch.setattr("pipeline.synthesize_tts", lambda narration, wd: (_ for _ in ()).throw(AssertionError("TTS should not run for --step script")))
@@ -1127,7 +1171,6 @@ def test_step_script_fails_on_lint_errors(monkeypatch, tmp_path):
     monkeypatch.setitem(CONFIG, "api_key", "")
     monkeypatch.setitem(CONFIG, "edit_mode", "full")
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
-    monkeypatch.setitem(CONFIG, "skip_narrative_analysis", True)
     monkeypatch.setattr("pipeline.check_prerequisites", lambda skip_asr=False: True)
     monkeypatch.setattr("pipeline.get_video_duration", lambda path: 6.0)
 
@@ -1155,7 +1198,6 @@ def test_resume_cut_mode_maps_narration_and_assembles_edited_source(monkeypatch,
     monkeypatch.setitem(CONFIG, "api_key", "")
     monkeypatch.setitem(CONFIG, "fps", 1)
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
-    monkeypatch.setitem(CONFIG, "skip_narrative_analysis", True)
     monkeypatch.setitem(CONFIG, "edit_mode", "cut")
     monkeypatch.setitem(CONFIG, "target_duration", "4s")
     monkeypatch.setitem(CONFIG, "clip_padding", 0.0)
@@ -1290,7 +1332,6 @@ def test_full_pipeline_reassembles_when_burn_setting_changes(monkeypatch, tmp_pa
 
     monkeypatch.setitem(CONFIG, "api_key", "")
     monkeypatch.setitem(CONFIG, "edit_mode", "full")
-    monkeypatch.setitem(CONFIG, "skip_narrative_analysis", True)
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
     pipeline._write_assemble_meta(work_dir, video)
     monkeypatch.setitem(CONFIG, "burn_subtitles", True)

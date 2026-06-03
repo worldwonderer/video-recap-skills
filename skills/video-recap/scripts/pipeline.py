@@ -11,7 +11,7 @@ from common import log, api_call, get_video_duration, run_cmd
 from extract import extract_frames
 from detect import detect_scenes, detect_silence_periods
 from asr import transcribe_audio
-from vlm import analyze_scenes, analyze_narrative_structure, analyze_video_overview, mimo_video_settings_fingerprint
+from vlm import analyze_scenes, analyze_video_overview, mimo_video_settings_fingerprint
 from narration import (
     build_agent_brief,
     validate_narration_or_raise,
@@ -417,7 +417,7 @@ def _tail_video_path(video_path, work_dir):
     return video_path
 
 
-def _run_cached_tail_step(video_path, work_dir, step, style, output_dir):
+def _run_cached_tail_step(video_path, work_dir, step, output_dir):
     """Run tts/assemble from existing artifacts without VLM/API prerequisites."""
     if step not in ("tts", "assemble"):
         return None
@@ -523,7 +523,7 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
             log(f"步骤 {step} 完成")
             return result
         if step in ("tts", "assemble"):
-            cached_result = _run_cached_tail_step(video_path, work_dir, step, style, output_dir)
+            cached_result = _run_cached_tail_step(video_path, work_dir, step, output_dir)
             if cached_result is not None:
                 return cached_result
         elif step == "script":
@@ -637,18 +637,6 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
             if overview is not None:
                 _step_done(work_dir, "mimo_video_overview")
                 log(f"[{time.time()-t0:.1f}s] MiMo 分片视频概览完成")
-
-    # Step 4.5: 叙事结构分析
-    if CONFIG.get("skip_narrative_analysis", False):
-        log("跳过叙事结构分析（skip_narrative_analysis=True）")
-    elif _is_step_done(work_dir, "narrative"):
-        vlm_analysis = json.loads((work_dir / "narrative_structure.json").read_text())
-        log("跳过叙事结构分析（已存在）")
-    else:
-        t0 = time.time()
-        vlm_analysis = analyze_narrative_structure(vlm_analysis, work_dir)
-        _step_done(work_dir, "narrative")
-        log(f"[{time.time()-t0:.1f}s] 叙事结构分析完成")
 
     # Step 5: Agent-authored narration script and optional clip plan
     narration_path = work_dir / "narration.json"

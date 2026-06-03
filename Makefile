@@ -4,8 +4,7 @@ VIDEO ?=
 
 recap: ## make recap VIDEO=<path>
 	@test -n "$(VIDEO)" || (echo "Usage: make recap VIDEO=<path>"; exit 1)
-	cd $(SKILL_DIR) && python3 scripts/video_recap.py $(abspath $(VIDEO)) \
-		--agent-mode
+	cd $(SKILL_DIR) && python3 scripts/video_recap.py $(abspath $(VIDEO))
 
 demo: ## run demo
 	$(MAKE) recap VIDEO=demo/demo.mp4
