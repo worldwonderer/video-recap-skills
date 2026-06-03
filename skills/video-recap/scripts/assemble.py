@@ -56,7 +56,22 @@ def assembly_settings_fingerprint():
         "version": SUBTITLE_RENDER_VERSION,
         "burn_subtitles": bool(CONFIG.get("burn_subtitles", False)),
         "force_video_reencode": bool(CONFIG.get("force_video_reencode", False)),
-        "final_loudnorm": final_loudnorm_filter() or "off",
+        "narration_timing": {
+            "delay_seconds": CONFIG.get("narration_delay_seconds", 1.5),
+            "tail_pad_seconds": CONFIG.get("narration_tail_pad_seconds", 0.1),
+            "fade_ms": CONFIG.get("fade_ms", 300),
+        },
+        "audio_mix": {
+            "ducking_mode": CONFIG.get("ducking_mode", "fixed"),
+            "ducking_narr_weight": CONFIG.get("ducking_narr_weight", 1.5),
+            "ducking_orig_volume": CONFIG.get("ducking_orig_volume", 0.5),
+            "quiet_ducking_volume": CONFIG.get("quiet_ducking_volume", 0.7),
+            "speech_ducking_volume": CONFIG.get("speech_ducking_volume", 0.2),
+            "narration_mode": CONFIG.get("narration_mode", "zone"),
+            "zone_ducking_volume": CONFIG.get("zone_ducking_volume", 0.12),
+            "zone_fade_seconds": CONFIG.get("zone_fade_seconds", 0.5),
+            "final_loudnorm": final_loudnorm_filter() or "off",
+        },
     }
     if fingerprint["burn_subtitles"]:
         fingerprint["subtitle_renderer"] = "ass"
@@ -268,7 +283,10 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
         )
     elif has_overlaps and has_quiet:
         # 动态 ducking：根据 overlaps_speech 切换原声音量
-        quiet_vol = CONFIG.get("zone_ducking_volume", 0.12)
+        if CONFIG.get("narration_mode") == "zone":
+            quiet_vol = CONFIG.get("zone_ducking_volume", 0.12)
+        else:
+            quiet_vol = CONFIG.get("quiet_ducking_volume", 0.7)
         speech_vol = CONFIG.get("speech_ducking_volume", 0.2)
         narr_vol = CONFIG.get("ducking_narr_weight", 1.5)
         # 构建 if(between(t,s,e),1,0) 指示器，逗号用 \, 转义避免 ffmpeg 解析为 filter 分隔符
@@ -305,30 +323,40 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
         )
         log(f"动态 ducking: 语音重叠段={len(overlap_exprs)}, 安静段={len(quiet_exprs)}")
     elif has_quiet and not has_overlaps:
-        # 解说时原声大幅压低，非解说时原声满音量，带平滑过渡
-        duck_vol = CONFIG.get("zone_ducking_volume", 0.12)
-        narr_vol = CONFIG.get("ducking_narr_weight", 1.5)
-        default_vol = 1.0
-        fade = CONFIG.get("zone_fade_seconds", 0.5)
+        if CONFIG.get("narration_mode") == "zone":
+            # Zone 模式：解说时原声大幅压低，非解说时原声满音量，带平滑过渡
+            duck_vol = CONFIG.get("zone_ducking_volume", 0.12)
+            narr_vol = CONFIG.get("ducking_narr_weight", 1.5)
+            default_vol = 1.0
+            fade = CONFIG.get("zone_fade_seconds", 0.5)
 
-        def _seg_ind_z(seg):
-            s = seg.get("actual_place_start", seg.get("start", 0))
-            e = seg.get("actual_place_end", seg.get("end", 0))
-            # 平滑梯形：两端 fade_sec 线性渐变，中间满值
-            return f"min(1,max(0,min(t-{s:.2f},{e:.2f}-t)/{fade:.1f}))"
+            def _seg_ind_z(seg):
+                s = seg.get("actual_place_start", seg.get("start", 0))
+                e = seg.get("actual_place_end", seg.get("end", 0))
+                # 平滑梯形：两端 fade_sec 线性渐变，中间满值
+                return f"min(1,max(0,min(t-{s:.2f},{e:.2f}-t)/{fade:.1f}))"
 
-        exprs = [_seg_ind_z(seg) for seg in tts_segments if isinstance(seg, dict)]
-        vol_expr = f"{default_vol}"
-        if exprs:
-            vol_expr += f"+{duck_vol - default_vol}*({'+'.join(exprs)})"
-        vol_expr = f"max(0,min(1,{vol_expr}))"
+            exprs = [_seg_ind_z(seg) for seg in tts_segments if isinstance(seg, dict)]
+            vol_expr = f"{default_vol}"
+            if exprs:
+                vol_expr += f"+{duck_vol - default_vol}*({'+'.join(exprs)})"
+            vol_expr = f"max(0,min(1,{vol_expr}))"
 
-        filter_complex = (
-            f"[0:a]volume='{vol_expr}':eval=frame,aresample=48000[orig];"
-            f"[1:a]volume={narr_vol},aresample=48000[narr];"
-            "[orig][narr]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
-        )
-        log(f"zone ducking: 解说时原声={duck_vol}, 非解说时原声={default_vol}")
+            filter_complex = (
+                f"[0:a]volume='{vol_expr}':eval=frame,aresample=48000[orig];"
+                f"[1:a]volume={narr_vol},aresample=48000[narr];"
+                "[orig][narr]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
+            )
+            log(f"zone ducking: 解说时原声={duck_vol}, 非解说时原声={default_vol}")
+        else:
+            orig_vol = CONFIG.get("quiet_ducking_volume", 0.7)
+            narr_vol = CONFIG.get("ducking_narr_weight", 1.5)
+            filter_complex = (
+                f"[0:a]volume={orig_vol},aresample=48000[orig];"
+                f"[1:a]volume={narr_vol},aresample=48000[narr];"
+                "[orig][narr]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
+            )
+            log(f"ducking: 全部安静窗口 (原声={orig_vol})")
     else:  # fixed (no narration overlap info)
         orig_vol = CONFIG.get("ducking_orig_volume", 0.5)
         narr_vol = CONFIG.get("ducking_narr_weight", 1.5)
@@ -338,6 +366,7 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
             "[orig][narr]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
         )
 
+    # 对于超长 volume 表达式（多段解说），使用 -filter_complex_script 避免命令行溢出
     # 末端整体响度归一：ducking 只管相对平衡，这一步统一成片绝对响度
     aout_label = "[aout]"
     final_ln = final_loudnorm_filter()
@@ -346,7 +375,6 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
         aout_label = "[aoutln]"
         log(f"成片响度归一: {final_ln}")
 
-    # 对于超长 volume 表达式（多段解说），使用 -filter_complex_script 避免命令行溢出
     filter_complex_bytes = filter_complex.encode('utf-8')
     if len(filter_complex_bytes) > 8000:
         fc_script = Path(work_dir) / ".filter_complex.txt"
@@ -442,7 +470,7 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
 
     for seg in tts_segments:
         wav_path = seg["audio_path"]
-        seg_pause_ms = seg.get("pause_after_ms", CONFIG.get("breath_ms", 250))
+        seg_pause_ms = seg.get("pause_after_ms", CONFIG.get("breath_ms", 600))
 
         if not os.path.exists(wav_path):
             prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
@@ -469,7 +497,11 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         tts_rate_offset = seg.get("tts_rate_offset", 0.0)
         tts_dur = seg.get("audio_duration", 0)
 
-        narration_delay = CONFIG["narration_delay_seconds"]
+        configured_delay = max(0.0, float(CONFIG.get("narration_delay_seconds", 2.0) or 0.0))
+        tail_pad = max(0.0, float(CONFIG.get("narration_tail_pad_seconds", 0.1) or 0.0))
+        slot_duration = max(0.0, float(seg["end"]) - float(seg["start"]))
+        max_delay = max(0.0, slot_duration - float(tts_dur or 0.0) - tail_pad)
+        narration_delay = min(configured_delay, max_delay)
         start_sample = int((seg["start"] + narration_delay) * sample_rate)
         end_boundary = int(min(seg["end"], video_duration) * sample_rate)
 

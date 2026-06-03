@@ -31,6 +31,20 @@ export OPENAI_MODEL=doubao-seed-2-0-lite-260428
 # 可选：OPENAI_API_URL
 ```
 
+MiMo 可选配置（不要把 key 写入仓库文件）。简单模式下：OPENAI_* 负责帧级 VLM，MIMO_API_KEY 同时负责 MiMo 分片视频理解和 TTS；只有需要拆网关时才设置 MIMO_VIDEO_* / MIMO_TTS_*。
+
+```bash
+export OPENAI_API_KEY=***
+export OPENAI_API_URL=https://your-vlm-api-url/v1
+export OPENAI_MODEL=doubao-seed-2-0-lite-260428
+
+export MIMO_API_KEY=***
+export MIMO_MODEL=mimo-v2.5
+# tp-* Token Plan key 默认走 https://token-plan-cn.xiaomimimo.com/v1
+# 其他集群：export MIMO_TOKEN_PLAN_CLUSTER=sgp 或 ams
+# 也可直接指定：export MIMO_API_URL=https://token-plan-cn.xiaomimimo.com/v1
+```
+
 推荐安装方式：
 
 ```bash
@@ -43,13 +57,22 @@ ln -s /tmp/video-recap-repo/skills/video-recap ~/.claude/skills/video-recap
 ### 1. 运行前置分析（自动暂停）
 
 ```bash
-python3 scripts/video_recap.py <video> --tts edge-tts --context "背景"
+python3 scripts/video_recap.py <video> --context "背景"
+```
+
+Doubao 帧级 VLM + MiMo 分片视频理解 + MiMo TTS（有 MIMO_API_KEY 时 TTS 默认 auto 选 MiMo）：
+
+```bash
+python3 scripts/video_recap.py <video> \
+  --vlm-model doubao-seed-2-0-lite-260428 \
+  --mimo-video-overview \
+  --mimo-tts-voice 冰糖
 ```
 
 剪辑式解说（长视频剪短）加：
 
 ```bash
-python3 scripts/video_recap.py <video> --edit-mode cut --target-duration 10m --tts edge-tts
+python3 scripts/video_recap.py <video> --edit-mode cut --target-duration 10m
 ```
 
 ### 2. 撰写解说词
@@ -89,6 +112,7 @@ python3 scripts/video_recap.py --doctor
 - `work_dir/agent_narration_brief.md` — 解说词写作 brief
 - `work_dir/narration.json` — Agent 写的解说词
 - `work_dir/clip_plan.json` — cut 模式下 Agent 选择的原片片段
+- `work_dir/mimo_video_overview.json` — 可选 MiMo 场景分片视频理解结果
 - `work_dir/edited_source.mp4` — cut 模式下拼出的短视频源
 - `work_dir/narration_mapped.json` — cut 模式下映射到短视频时间轴的解说词
 - `work_dir/` — 所有中间 JSON

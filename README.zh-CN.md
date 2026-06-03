@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Claude Code Skill](https://img.shields.io/badge/Claude%20Code-Skill-purple)
-![TTS](https://img.shields.io/badge/TTS-edge--tts-green)
+![TTS](https://img.shields.io/badge/TTS-MiMo--first-green)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 
 ## 效果预览
@@ -37,7 +37,7 @@ flowchart TB
 
     subgraph produce[3. 生成成片]
         direction LR
-        tts[edge-tts 配音]
+        tts[MiMo 优先 TTS 配音]
         mix[字幕 + 动态压低原声]
         output([解说视频])
     end
@@ -72,7 +72,8 @@ flowchart TB
 - **保留原声质感**：解说出现时动态压低原声，尽量保留对白、环境声和原片节奏。
 - **改稿后低成本续跑**：直接编辑 `narration.json`，通常只重跑 TTS/组装，不必重新分析视频。
 - **支持剪辑式解说**：`--edit-mode cut` 下用 `clip_plan.json` 选择原片片段，可把长视频剪成短解说。
-- **默认配音不需要 key**：优先使用 `edge-tts` 和 `zh-CN-YunxiNeural`。
+- **MiMo 优先的 TTS 支持**：`--tts` 支持 `auto`、`edge-tts`、`mimo-tts`；默认 `auto` 在 MiMo key 已配置时优先选 MiMo TTS，否则才回退 `edge-tts`。
+- **无 MiMo key 时仍可运行**：没有 MiMo 配置时使用 `edge-tts` 和 `zh-CN-YunxiNeural` 作为免 key 后备。
 
 ## 安装
 
@@ -102,13 +103,47 @@ export OPENAI_MODEL=doubao-seed-2-0-lite-260428
 export VLM_WORKERS=1
 ```
 
+### 可选：Xiaomi MiMo
+
+MiMo 可用于可选的场景分片视频理解和 MiMo TTS 配音。密钥只放环境变量，
+不要写进仓库文件、日志或文档。
+
+最简单的混合配置：OpenAI 兼容端点（如 Doubao）负责帧级 VLM，
+同一个 MiMo key 同时负责视频分片理解和 TTS。
+
+```bash
+export OPENAI_API_KEY=your-doubao-or-vlm-key
+export OPENAI_API_URL=https://your-vlm-api-url/v1
+export OPENAI_MODEL=doubao-seed-2-0-lite-260428
+
+export MIMO_API_KEY=your-mimo-key
+export MIMO_MODEL=mimo-v2.5
+
+# 按量付费 sk-* key 默认使用 https://api.xiaomimimo.com/v1。
+# Token Plan tp-* key 默认使用中国集群：
+#   https://token-plan-cn.xiaomimimo.com/v1
+# 订阅在其他集群时可覆盖：
+export MIMO_TOKEN_PLAN_CLUSTER=cn   # cn | sgp | ams
+# 或直接指定完整 base URL：
+# export MIMO_API_URL=https://token-plan-cn.xiaomimimo.com/v1
+```
+
+MiMo 视频理解只走场景分片：先用 ffmpeg `scdet` 找场景边界，再把每个本地分片裁成 MP4，
+编码为 `data:video/mp4;base64,...` 的 `video_url` 发给 MiMo。Pipeline 始终分析这些
+本地 scene chunks，不绕过分片流程。每个分片默认按 45 MB 安全上限控制（MiMo base64
+上限 50 MB）；分片过大时降低 `MIMO_VIDEO_CHUNK_MAX_SECONDS` 或 `MIMO_VIDEO_FPS`。
+
+高级拆分端点是可选的：默认 `MIMO_API_KEY` / `MIMO_API_URL` 同时用于 MiMo 视频理解和 MiMo TTS；
+只有需要不同网关时才设置 `MIMO_VIDEO_API_URL` / `MIMO_TTS_API_URL`，不同凭证才额外设置
+`MIMO_VIDEO_API_KEY` / `MIMO_TTS_API_KEY`。
+
 ## 快速开始
 
 安装 skill 后，在 Claude Code 里说：
 
 ```text
 用 video-recap 为 /path/to/video.mp4 生成中文解说视频。
-使用 edge-tts 和 Yunxi 音色。背景：<节目 / 电影 / 角色信息>。
+优先使用 MiMo TTS；如果没有 MiMo key，再用 edge-tts。背景：<节目 / 电影 / 角色信息>。
 ```
 
 Pipeline 会准备场景、ASR、VLM 分析素材，然后生成 `agent_narration_brief.md` 并暂停。Agent 读取 brief 后写 `narration.json`，CLI 再续跑 TTS 与视频组装。
@@ -117,9 +152,16 @@ Pipeline 会准备场景、ASR、VLM 分析素材，然后生成 `agent_narratio
 
 ```bash
 python3 skills/video-recap/scripts/video_recap.py /path/to/video.mp4 \
-  --tts edge-tts \
-  --voice zh-CN-YunxiNeural \
   --context "节目名、角色名、剧情背景"
+```
+
+使用 Doubao 做帧级 VLM、MiMo 做分片视频理解和 TTS 的示例：
+
+```bash
+python3 skills/video-recap/scripts/video_recap.py /path/to/video.mp4 \
+  --vlm-model doubao-seed-2-0-lite-260428 \
+  --mimo-video-overview \
+  --mimo-tts-voice 冰糖
 ```
 
 命令会在 TTS 前暂停并输出 `work_dir`。读取 `work_dir/agent_narration_brief.md`，写入 `work_dir/narration.json` 后，再执行打印出的续跑命令。
@@ -131,8 +173,7 @@ python3 skills/video-recap/scripts/video_recap.py /path/to/video.mp4 \
 ```bash
 python3 skills/video-recap/scripts/video_recap.py /path/to/video.mp4 \
   --edit-mode cut \
-  --target-duration 10m \
-  --tts edge-tts
+  --target-duration 10m
 ```
 
 cut 模式下同时写 `work_dir/clip_plan.json` 和 `work_dir/narration.json`，时间戳都用原视频时间。CLI 会生成 `edited_source.mp4`，把解说映射到 `narration_mapped.json`，再继续 TTS/组装。
@@ -153,7 +194,7 @@ CLI 会根据最终 `narration.json` 和 TTS 实际放置时间导出 `subtitles
 python3 skills/video-recap/scripts/video_recap.py --doctor
 ```
 
-如果还想测试 `edge-tts` 能否真实合成一小段音频，加 `--doctor-tts-smoke`。doctor 也会检查 ffmpeg 字幕滤镜、ASR 路径和模型目录、规范化后的 API 配置，以及默认 TTS 设置。
+如果还想测试后备 `edge-tts` 能否真实合成一小段音频，加 `--doctor-tts-smoke`。doctor 也会检查 ffmpeg 字幕滤镜、ASR 路径和模型目录、规范化后的 API 配置，以及默认 TTS 设置。
 
 ## 输出文件
 
@@ -169,6 +210,7 @@ python3 skills/video-recap/scripts/video_recap.py --doctor
 - `work_dir/edited_source.mp4`：cut 模式下拼出的短视频源
 - `work_dir/narration_mapped.json`：从原视频时间映射到短视频时间的解说稿
 - `work_dir/vlm_analysis.json`：场景级视觉分析
+- `work_dir/mimo_video_overview.json`：可选的 MiMo 场景分片视频理解结果
 - `work_dir/asr_result.json`：可用时的 ASR 转写结果；用于写解说参考
 - `work_dir/tts_segments/`：分段 TTS 音频
 

@@ -1,3 +1,4 @@
+import base64
 import os
 import re
 import shutil
@@ -5,8 +6,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import CONFIG
-from common import log, run_cmd
+from common import log, mimo_tts_api_call, run_cmd
 from narration import _truncate_at_sentence
+
+SUPPORTED_TTS_ENGINES = {"edge-tts", "mimo-tts"}
+
 
 def _parse_rate_offset(rate_str):
     """'+5%' -> 0.05, '-3%' -> -0.03, '+0%' -> 0.0"""
@@ -135,9 +139,10 @@ def synthesize_tts(narration, work_dir):
     tts_dir = work_dir / "tts_segments"
     tts_dir.mkdir(exist_ok=True)
 
-    engine = CONFIG["tts_engine"]
-    if engine == "auto":
-        engine = _detect_tts_engine()
+    engine = resolve_tts_engine()
+    if engine == "mimo-tts" and not CONFIG.get("mimo_tts_api_key"):
+        key_name = CONFIG.get("mimo_tts_api_key_source", "MIMO_API_KEY")
+        raise RuntimeError(f"请设置 {key_name} 环境变量用于 MiMo TTS")
 
     log(f"TTS 引擎: {engine}")
     if not narration:
@@ -184,12 +189,14 @@ def _run_tts_engine(engine, text, output_wav, rate="+0%", pitch="+0Hz"):
     for attempt in range(1, retries + 1):
         try:
             _cleanup_partial_tts_outputs(output_wav)
-            if engine == "indextts2":
-                _tts_indextts2(text, output_wav, rate=rate, pitch=pitch)
-            elif engine == "edge-tts":
+            if engine == "edge-tts":
                 _tts_edge(text, output_wav, rate=rate, pitch=pitch)
+            elif engine == "mimo-tts":
+                _tts_mimo(text, output_wav, rate=rate, pitch=pitch)
             else:
-                _tts_say(text, output_wav, rate=rate, pitch=pitch)
+                raise RuntimeError(
+                    f"不支持的 TTS 引擎: {engine}。当前仅支持 auto / edge-tts / mimo-tts。"
+                )
 
             dur = _get_audio_duration(output_wav)
             if dur <= 0:
@@ -210,8 +217,7 @@ def _cleanup_partial_tts_outputs(output_wav):
     """Remove stale partial media files before/after a failed TTS attempt."""
     wav_path = str(output_wav)
     mp3_path = wav_path.replace(".wav", ".mp3")
-    aiff_path = wav_path.replace(".wav", ".aiff")
-    for path in (wav_path, mp3_path, aiff_path):
+    for path in (wav_path, mp3_path):
         try:
             if os.path.exists(path):
                 os.remove(path)
@@ -221,23 +227,89 @@ def _cleanup_partial_tts_outputs(output_wav):
 
 def _detect_tts_engine():
     """自动检测可用的 TTS 引擎"""
+    if CONFIG.get("mimo_tts_api_key"):
+        return "mimo-tts"
+
     # 优先使用 edge-tts：无需 API key，默认 Yunxi 音色，跨平台更稳定。
     if shutil.which("edge-tts"):
         return "edge-tts"
 
-    # IndexTTS2
+    raise RuntimeError("没有可用的 TTS 引擎。请安装 edge-tts，或配置 MiMo 并使用 mimo-tts。")
+
+
+def resolve_tts_engine(prefer_existing=None):
+    """Resolve CONFIG["tts_engine"], preferring MiMo TTS in auto mode.
+
+    `prefer_existing` is for assemble-only cache checks: an already-generated
+    artifact may still be assembled even if no fresh TTS engine is available.
+    """
+    engine = CONFIG.get("tts_engine", "auto")
+    if engine == "auto":
+        try:
+            return _detect_tts_engine()
+        except RuntimeError:
+            if prefer_existing in SUPPORTED_TTS_ENGINES:
+                return prefer_existing
+            raise
+    if engine not in SUPPORTED_TTS_ENGINES:
+        raise RuntimeError(f"不支持的 TTS 引擎: {engine}。当前仅支持 auto / edge-tts / mimo-tts。")
+    return engine
+
+
+def tts_settings_fingerprint(engine=None):
+    """Return non-secret TTS settings that materially affect generated audio."""
+    resolved = engine or resolve_tts_engine()
+    settings = {
+        "engine": resolved,
+        "tts_dynamic_params": bool(CONFIG.get("tts_dynamic_params", True)),
+    }
+    if resolved == "mimo-tts":
+        settings.update({
+            "mimo_tts_api_url": CONFIG.get("mimo_tts_api_url"),
+            "mimo_tts_model": CONFIG.get("mimo_tts_model"),
+            "mimo_tts_voice": CONFIG.get("mimo_tts_voice"),
+            "mimo_tts_style": CONFIG.get("mimo_tts_style"),
+        })
+    elif resolved == "edge-tts":
+        settings["edge_tts_voice"] = CONFIG.get("edge_tts_voice")
+    return settings
+
+
+def _mimo_tts_style_instruction(rate="+0%", pitch="+0Hz"):
+    style = CONFIG.get("mimo_tts_style") or "自然、清晰、适合中文视频解说。"
+    rate_offset = _parse_rate_offset(rate)
+    if rate_offset >= 0.06:
+        speed = "语速略快，但吐字保持清楚。"
+    elif rate_offset <= -0.03:
+        speed = "语速略慢，适当停顿，保留收束感。"
+    else:
+        speed = "语速中等，节奏稳定。"
+    pitch_hint = "疑问句或情绪抬升处可自然微升调。" if pitch and pitch != "+0Hz" else "音调自然。"
+    return f"{style} {speed} {pitch_hint}"
+
+
+def _tts_mimo(text, output_path, rate="+0%", pitch="+0Hz"):
+    """使用 Xiaomi MiMo-V2.5-TTS 合成，返回 wav 音频。"""
+    payload = {
+        "model": CONFIG.get("mimo_tts_model", "mimo-v2.5-tts"),
+        "messages": [
+            {"role": "user", "content": _mimo_tts_style_instruction(rate, pitch)},
+            {"role": "assistant", "content": text},
+        ],
+        "audio": {
+            "format": "wav",
+            "voice": CONFIG.get("mimo_tts_voice", "mimo_default"),
+        },
+    }
+    resp = mimo_tts_api_call(payload)
     try:
-        import importlib
-        importlib.import_module('indextts.infer_v2')
-        return "indextts2"
-    except ImportError:
-        pass
-
-    # macOS say
-    if shutil.which("say"):
-        return "say"
-
-    raise RuntimeError("没有可用的 TTS 引擎。请安装 edge-tts: pip3 install edge-tts")
+        audio_data = resp["choices"][0]["message"]["audio"]["data"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("MiMo-TTS 响应缺少 audio.data") from exc
+    try:
+        output_path.write_bytes(base64.b64decode(audio_data))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("MiMo-TTS 返回的 audio.data 不是有效 base64") from exc
 
 
 def _tts_edge(text, output_path, rate="+0%", pitch="+0Hz"):
@@ -255,31 +327,6 @@ def _tts_edge(text, output_path, rate="+0%", pitch="+0Hz"):
            "-af", "highpass=f=80", "-ar", "44100", "-ac", "1", str(output_path)]
     run_cmd(cmd)
     os.remove(mp3_path)
-
-
-def _tts_indextts2(text, output_path, rate="+0%", pitch="+0Hz"):
-    """使用 IndexTTS2 合成"""
-    from indextts.infer_v2 import IndexTTS2
-    tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints")
-    tts.infer(
-        spk_audio_prompt="",
-        text=text,
-        output_path=str(output_path),
-        verbose=False,
-    )
-
-
-def _tts_say(text, output_path, rate="+0%", pitch="+0Hz"):
-    """使用 macOS say 合成"""
-    aiff_path = str(output_path).replace(".wav", ".aiff")
-    cmd = ["say", "-v", CONFIG["say_voice"], text, "-o", aiff_path]
-    run_cmd(cmd)
-
-    cmd = ["ffmpeg", "-y", "-i", aiff_path,
-           "-af", "highpass=f=80", "-ar", "44100", "-ac", "1", str(output_path)]
-    run_cmd(cmd)
-    if os.path.exists(aiff_path):
-        os.remove(aiff_path)
 
 
 def _get_audio_duration(audio_path):

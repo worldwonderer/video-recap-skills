@@ -5,10 +5,16 @@
 | 参数 | 说明 | 默认 | 何时调整 |
 |------|------|------|----------|
 | `video` | 输入视频文件路径 | (必填，`--doctor` 除外) | — |
-| `--tts` | TTS 引擎: auto / indextts2 / edge-tts / say | auto（优先 edge-tts） | 常规推荐 `edge-tts`；无网络时用 macOS `say` |
+| `--tts` | TTS 引擎: auto / edge-tts / mimo-tts | auto（配置 MiMo TTS 时优先 mimo-tts，否则 edge-tts） | 常规推荐保持 `auto`；只有明确不用 MiMo 时才选 `edge-tts` |
+| `--style` | 解说风格: 短剧 / 电视剧 / 电影 / 纪录片 / 科普视频 | 纪录片 | 按内容类型选择 |
 | `--context` | 额外上下文（节目名、角色名等） | "" | 有已知角色名时填写 |
 | `--model` | 覆盖 VLM 模型名 | `$OPENAI_MODEL` 或 `doubao-seed-2-0-lite-260428` | 换 VLM 模型时使用 |
 | `--vlm-model` | 单独覆盖 VLM 模型名（优先级高于 `--model`） | `$OPENAI_MODEL` | 临时指定视觉分析模型 |
+| `--api-provider` | 帧级 VLM API 提供方: openai / mimo | 环境推断 | 混合 Doubao+MiMo 时保持默认 `openai`；只用 MiMo 做帧级 VLM 时设为 `mimo` |
+| `--mimo-api-url` | MiMo shared base URL 或 chat/completions endpoint | 由 key 类型推断 | 简化配置下同时用于 MiMo 视频理解和 TTS；`tp-*` 默认中国 Token Plan 集群 |
+| `--mimo-video-overview` | 使用 MiMo 按 ffmpeg scene 分片生成视频概览并注入 brief | false | 想让写稿参考跨分片故事线时开启 |
+| `--mimo-tts-voice` | MiMo TTS 音色 | `冰糖` | 选择 MiMo 预置精品音色 |
+| `--mimo-tts-style` | MiMo TTS 风格指令 | 配置默认值 | 控制语速、情绪、播报风格 |
 | `--voice` | 覆盖 edge-tts 音色 | `zh-CN-YunxiNeural` | 不满意默认音色时指定 |
 | `--scene-threshold` | 场景检测阈值 0.0-1.0 | 0.1 | 场景切碎→调低；场景漏检→调高 |
 | `--resume` | 从已有工作目录继续 | - | 写好 `narration.json` 后续跑 |
@@ -36,12 +42,33 @@
 | `OPENAI_API_KEY` | API 密钥（VLM 分析必填） | - | 必须设置 |
 | `OPENAI_API_URL` | API 地址，支持 base URL 或完整 chat/completions 端点 | `https://api.openai.com/v1/chat/completions` | 用代理或自建 VLM 时设置，如 `https://example.com/v1` 会自动补全 `/chat/completions` |
 | `OPENAI_MODEL` | VLM 模型名 | `doubao-seed-2-0-lite-260428` | 换模型时设置，也可用 `--model` 覆盖 |
+| `API_PROVIDER` | 帧级 VLM API 提供方: openai / mimo | 有 `OPENAI_API_KEY` 时默认 openai；仅配置 MiMo key 时默认 mimo | 混合 Doubao+MiMo 时无需设置；只用 MiMo 做帧级 VLM 时设为 `mimo` |
+| `MIMO_API_KEY` | MiMo API key | - | 简化配置：同一个 key 同时供 MiMo 视频理解和 TTS 使用；支持按量 `sk-*` 与 Token Plan `tp-*`；不要写入仓库 |
+| `MIMO_API_URL` | MiMo shared base URL 或完整 endpoint | 由 key 类型推断 | 简化配置下同时用于 MiMo 视频理解和 TTS；`sk-*` 默认 `https://api.xiaomimimo.com/v1`，`tp-*` 默认 `https://token-plan-cn.xiaomimimo.com/v1` |
+| `MIMO_TOKEN_PLAN_CLUSTER` | Token Plan 集群: cn / sgp / ams | cn | `tp-*` key 在新加坡/欧洲集群时调整 |
+| `MIMO_MODEL` | MiMo 默认多模态模型 | `mimo-v2.5` | 同时作为视频理解默认模型；通常不用设置 |
+| `MIMO_VIDEO_API_KEY` | 高级：MiMo 视频理解 API key | `$MIMO_API_KEY` | 视频理解与 TTS 使用不同 key 时设置 |
+| `MIMO_VIDEO_API_URL` | 高级：MiMo 视频理解 base URL 或 endpoint | `$MIMO_API_URL` / key 类型推断 | 视频理解单独走网关时设置 |
+| `MIMO_VIDEO_MODEL` | MiMo 视频理解模型 | `$MIMO_MODEL` 或 `mimo-v2.5` | 与通用 MiMo 模型不同时设置 |
+| `MIMO_VIDEO_OVERVIEW` | 是否默认开启 MiMo scene 分片视频理解 | false | 等价于 `--mimo-video-overview` |
+| `MIMO_VIDEO_FPS` | MiMo 分片视频理解 fps | 2 | 降低可节省 token，提高可增加细节 |
+| `MIMO_VIDEO_CHUNK_MAX_SECONDS` | MiMo scene 分片最长秒数 | 20 | 分片过大或超时可调低 |
+| `MIMO_VIDEO_CHUNK_MIN_SECONDS` | MiMo scene 分片最短尾段秒数 | 1 | 避免生成极短尾段；通常不用改 |
+| `MIMO_VIDEO_CHUNK_TIMEOUT` | ffmpeg 裁剪单个 MiMo 分片超时秒数 | 180 | 源视频慢或机器慢时调高 |
+| `MIMO_MEDIA_RESOLUTION` | MiMo media_resolution | default | 可设 `max` |
+| `MIMO_VIDEO_BASE64_MAX_MB` | 单个本地视频分片转 base64 的安全上限 | 45 | MiMo base64 上限 50MB，默认保留余量；超限时缩短分片或降低 fps |
+| `MIMO_TTS_API_KEY` | 高级：MiMo TTS API key | `$MIMO_API_KEY` | TTS 与视频理解使用不同 key 时设置 |
+| `MIMO_TTS_API_URL` | 高级：MiMo TTS base URL 或 endpoint | `$MIMO_API_URL` / key 类型推断 | TTS 单独走网关时设置 |
+| `MIMO_TTS_MODEL` | MiMo TTS 模型 | `mimo-v2.5-tts` | MiMo TTS 变体 |
+| `MIMO_TTS_VOICE` | MiMo TTS 音色 | `冰糖` | MiMo 预置音色 |
+| `MIMO_TTS_STYLE` | MiMo TTS 风格提示 | 自然清晰中文解说 | 控制播报情绪/节奏 |
+| `MIMO_DISABLE_THINKING` | MiMo 非 TTS 请求默认关闭 thinking | true | 保证 VLM 返回可见 content，而不是只消耗在 reasoning_content |
 | `ASR_BIN` | ASR 二进制路径 | local_transcribe (PATH 搜索) | 用自定义 ASR 时指定路径 |
 | `ASR_MODEL_DIR` | ASR 模型目录 | (空) | 本地 ASR 需要指定模型目录时设置 |
 | `VLM_WORKERS` | VLM 并行线程数 | 8 | 代理/WAF 对并发敏感时设为 1 |
-| `TTS_WORKERS` | TTS 并行线程数 | 4 | edge-tts 超时或限流时调低 |
+| `TTS_WORKERS` | TTS 并行线程数 | 4 | MiMo/edge-tts 超时或限流时调低 |
 | `TTS_TIMEOUT` | 单段 TTS 命令超时秒数 | 90 | 网络慢时调高 |
-| `TTS_RETRIES` | 单段 TTS 重试次数 | 3 | edge-tts 偶发失败时调高 |
+| `TTS_RETRIES` | 单段 TTS 重试次数 | 3 | MiMo/edge-tts 偶发失败时调高 |
 | `ALLOW_PARTIAL_TTS` | 部分 TTS 失败是否继续 | false | 调试或应急产出时设为 1 |
 | `EDIT_MODE` | 默认成片模式: full / cut | full | 常用剪辑式解说时可设为 `cut` |
 | `TARGET_DURATION` | cut 模式默认目标成片时长 | - | 例如 `10m` |

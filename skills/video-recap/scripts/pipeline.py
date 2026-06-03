@@ -11,13 +11,14 @@ from common import log, api_call, get_video_duration, run_cmd
 from extract import extract_frames
 from detect import detect_scenes, detect_silence_periods
 from asr import transcribe_audio
-from vlm import analyze_scenes
+from vlm import analyze_scenes, analyze_narrative_structure, analyze_video_overview, mimo_video_settings_fingerprint
 from narration import (
     build_agent_brief,
     validate_narration_or_raise,
     _validate_narration_budget,
+    _align_narration_to_quiet,
 )
-from tts import synthesize_tts
+from tts import SUPPORTED_TTS_ENGINES, resolve_tts_engine, synthesize_tts, tts_settings_fingerprint
 from assemble import assemble_video, assembly_settings_fingerprint
 from edit import (
     build_edited_source_video,
@@ -96,11 +97,27 @@ def _run_settings_path(work_dir):
 
 def _persist_run_settings(work_dir):
     settings = {
+        "api_provider": CONFIG.get("api_provider", "openai"),
+        "api_url": CONFIG.get("api_url"),
+        "vlm_model": CONFIG.get("vlm_model"),
+        "tts_engine": CONFIG.get("tts_engine", "auto"),
         "edit_mode": CONFIG.get("edit_mode", "full"),
         "target_duration": CONFIG.get("target_duration", ""),
         "clip_padding": CONFIG.get("clip_padding", 0.0),
         "allow_clip_overlap": CONFIG.get("allow_clip_overlap", False),
         "burn_subtitles": CONFIG.get("burn_subtitles", False),
+        "mimo_api_url": CONFIG.get("mimo_api_url"),
+        "mimo_video_api_url": CONFIG.get("mimo_video_api_url"),
+        "mimo_tts_api_url": CONFIG.get("mimo_tts_api_url"),
+        "mimo_model": CONFIG.get("mimo_model"),
+        "mimo_video_model": CONFIG.get("mimo_video_model"),
+        "mimo_tts_model": CONFIG.get("mimo_tts_model"),
+        "mimo_tts_voice": CONFIG.get("mimo_tts_voice"),
+        "mimo_tts_style": CONFIG.get("mimo_tts_style"),
+        "mimo_video_overview": CONFIG.get("mimo_video_overview", False),
+        "mimo_video_fps": CONFIG.get("mimo_video_fps", 2.0),
+        "mimo_media_resolution": CONFIG.get("mimo_media_resolution", "default"),
+        "mimo_disable_thinking": CONFIG.get("mimo_disable_thinking", True),
     }
     _run_settings_path(work_dir).write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
     return settings
@@ -117,10 +134,35 @@ def _load_run_settings(work_dir):
         return {}
     if not isinstance(settings, dict):
         return {}
-    for key in ("edit_mode", "target_duration", "clip_padding", "allow_clip_overlap", "burn_subtitles"):
+    preserve_runtime_tts = CONFIG.get("tts_engine_source") in ("cli", "env")
+    for key in (
+        "api_provider", "api_url", "vlm_model", "tts_engine",
+        "edit_mode", "target_duration", "clip_padding", "allow_clip_overlap", "burn_subtitles",
+        "mimo_api_url", "mimo_video_api_url", "mimo_tts_api_url", "mimo_model", "mimo_video_model",
+        "mimo_tts_model", "mimo_tts_voice", "mimo_tts_style",
+        "mimo_video_overview", "mimo_video_fps", "mimo_media_resolution",
+        "mimo_disable_thinking",
+    ):
         if key in settings and settings[key] is not None:
+            if key == "tts_engine" and preserve_runtime_tts:
+                continue
+            if key != "tts_engine" and _has_runtime_override(key):
+                continue
             CONFIG[key] = settings[key]
+            if key == "tts_engine":
+                CONFIG["tts_engine_source"] = "run_settings"
     return settings
+
+
+
+def _has_runtime_override(key):
+    """Return True when a CLI/env value should beat persisted run settings."""
+    source = CONFIG.get(f"{key}_source")
+    if source in ("cli", "env"):
+        return True
+    if key in ("mimo_video_api_url", "mimo_tts_api_url"):
+        return CONFIG.get("mimo_api_url_source") in ("cli", "env")
+    return False
 
 
 def _merge_run_settings(work_dir):
@@ -130,11 +172,38 @@ def _merge_run_settings(work_dir):
         "allow_clip_overlap": bool(CONFIG.get("allow_clip_overlap", False)),
     }
     settings = _load_run_settings(work_dir)
+    if (
+        CONFIG.get("tts_engine_source") == "run_settings"
+        and CONFIG.get("tts_engine") == "edge-tts"
+        and CONFIG.get("mimo_tts_api_key")
+    ):
+        CONFIG["tts_engine"] = "auto"
+        CONFIG["tts_engine_source"] = "default"
+        settings["tts_engine"] = "auto"
+        log("检测到 MiMo TTS key，resume 默认优先 MiMo TTS；如需复用 edge-tts 请显式传 --tts edge-tts")
     for key, enabled in explicit_enables.items():
         if enabled:
             CONFIG[key] = True
             settings[key] = True
     return settings
+
+
+def _mimo_video_overview_current(work_dir):
+    """Return True only for the current scene-chunk MiMo overview artifact format."""
+    if not _is_step_done(work_dir, "mimo_video_overview"):
+        return False
+    path = work_dir / "mimo_video_overview.json"
+    if not path.exists():
+        return False
+    try:
+        overview = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    return (
+        overview.get("input") == "scene_chunks"
+        and bool(overview.get("chunks"))
+        and overview.get("settings") == mimo_video_settings_fingerprint()
+    )
 
 
 def _resume_command(cli_path, video_path, work_dir):
@@ -153,6 +222,8 @@ def _resume_command(cli_path, video_path, work_dir):
             parts.append("--allow-clip-overlap")
     if CONFIG.get("burn_subtitles", False):
         parts.append("--burn-subtitles")
+    if CONFIG.get("tts_engine") and CONFIG.get("tts_engine") != "auto":
+        parts.extend(["--tts", str(CONFIG["tts_engine"])])
     return " ".join(shlex.quote(part) for part in parts)
 
 
@@ -298,6 +369,34 @@ def _clear_tts_cache(work_dir):
         path.unlink(missing_ok=True)
 
 
+def _tts_meta_payload(tts_segments, engine_used):
+    return {
+        "segments": tts_segments,
+        "engine": engine_used,
+        "settings": tts_settings_fingerprint(engine_used),
+    }
+
+
+def _tts_meta_current(tts_meta, narration_artifact_path):
+    if not _artifact_current(tts_meta, [narration_artifact_path]):
+        return False
+    try:
+        tts_info = json.loads(tts_meta.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    existing_engine = tts_info.get("engine")
+    try:
+        desired_engine = resolve_tts_engine(prefer_existing=existing_engine)
+    except RuntimeError:
+        return existing_engine in SUPPORTED_TTS_ENGINES
+    if existing_engine != desired_engine:
+        return False
+    existing_settings = tts_info.get("settings")
+    if existing_settings is None:
+        return True
+    return existing_settings == tts_settings_fingerprint(desired_engine)
+
+
 def _ensure_cut_tail_artifacts(video_path, work_dir):
     if _cut_mode_enabled() and not _cut_artifacts_current(work_dir):
         narration = _load_json_file(work_dir / "narration.json", "narration.json")
@@ -317,7 +416,7 @@ def _tail_video_path(video_path, work_dir):
     return video_path
 
 
-def _run_cached_tail_step(video_path, work_dir, step, output_dir):
+def _run_cached_tail_step(video_path, work_dir, step, style, output_dir):
     """Run tts/assemble from existing artifacts without VLM/API prerequisites."""
     if step not in ("tts", "assemble"):
         return None
@@ -332,24 +431,20 @@ def _run_cached_tail_step(video_path, work_dir, step, output_dir):
         narration = _load_tail_narration(work_dir)
         tts_segments, engine_used = synthesize_tts(narration, work_dir)
         tts_meta = work_dir / "tts_meta.json"
-        tts_meta.write_text(json.dumps({
-            "segments": tts_segments, "engine": engine_used
-        }, ensure_ascii=False, indent=2))
+        tts_meta.write_text(json.dumps(_tts_meta_payload(tts_segments, engine_used), ensure_ascii=False, indent=2))
         _step_done(work_dir, "tts")
         log(f"步骤 tts 完成 ({len(tts_segments)} 段, 引擎: {engine_used})")
         return {"segments": tts_segments, "engine": engine_used}
 
     tts_meta = work_dir / "tts_meta.json"
-    if _artifact_current(tts_meta, [narration_artifact_path]):
+    if _tts_meta_current(tts_meta, narration_artifact_path):
         tts_info = _load_json_file(tts_meta, "tts_meta.json")
         tts_segments = tts_info["segments"]
     else:
         _clear_tts_cache(work_dir)
         narration = _load_tail_narration(work_dir)
         tts_segments, engine_used = synthesize_tts(narration, work_dir)
-        tts_meta.write_text(json.dumps({
-            "segments": tts_segments, "engine": engine_used
-        }, ensure_ascii=False, indent=2))
+        tts_meta.write_text(json.dumps(_tts_meta_payload(tts_segments, engine_used), ensure_ascii=False, indent=2))
         _step_done(work_dir, "tts")
 
     output_path = work_dir / "output.mp4"
@@ -372,7 +467,7 @@ def _run_cached_tail_step(video_path, work_dir, step, output_dir):
 
 # ── Main Pipeline ─────────────────────────────────────────────────────
 
-def run_pipeline(video_path, output_dir=None, step=None,
+def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
                  scene_threshold=None, skip_asr=False, resume_dir=None):
     """执行完整的视频解说 pipeline"""
     pipeline_start = time.time()
@@ -427,7 +522,7 @@ def run_pipeline(video_path, output_dir=None, step=None,
             log(f"步骤 {step} 完成")
             return result
         if step in ("tts", "assemble"):
-            cached_result = _run_cached_tail_step(video_path, work_dir, step, output_dir)
+            cached_result = _run_cached_tail_step(video_path, work_dir, step, style, output_dir)
             if cached_result is not None:
                 return cached_result
         elif step == "script":
@@ -440,13 +535,21 @@ def run_pipeline(video_path, output_dir=None, step=None,
     log("开始完整视频解说 pipeline")
     log("=" * 50)
 
-    needs_vlm_api = not _is_step_done(work_dir, "vlm")
-    if not CONFIG.get("api_key") and needs_vlm_api:
-        raise RuntimeError("请设置 OPENAI_API_KEY 环境变量")
+    needs_frame_vlm_api = not _is_step_done(work_dir, "vlm")
+    needs_mimo_video_api = (
+        CONFIG.get("mimo_video_overview", False)
+        and not _mimo_video_overview_current(work_dir)
+    )
+    if not CONFIG.get("api_key") and needs_frame_vlm_api:
+        key_name = CONFIG.get("api_key_source", "OPENAI_API_KEY")
+        raise RuntimeError(f"请设置 {key_name} 环境变量")
+    if not CONFIG.get("mimo_video_api_key") and needs_mimo_video_api:
+        key_name = CONFIG.get("mimo_video_api_key_source", "MIMO_API_KEY")
+        raise RuntimeError(f"请设置 {key_name} 环境变量用于 MiMo 视频分片理解")
 
     # API 连通性预检（避免跑完帧提取+ASR 才发现 API 不可用）
-    if needs_vlm_api:
-        log("API 连通性预检...")
+    if needs_frame_vlm_api:
+        log("VLM API 连通性预检...")
         try:
             api_call({
                 "model": CONFIG.get("vlm_model", ""),
@@ -457,6 +560,8 @@ def run_pipeline(video_path, output_dir=None, step=None,
         except RuntimeError as e:
             log(f"API 预检失败: {e}")
             raise
+    if needs_mimo_video_api:
+        log("MiMo 视频理解 API 将在分片阶段预检/调用")
 
     # 动态 FPS
     log(f"FPS: {CONFIG['fps']} (视频时长: {video_duration:.1f}s)")
@@ -521,6 +626,29 @@ def run_pipeline(video_path, output_dir=None, step=None,
         _step_done(work_dir, "vlm")
         log(f"[{time.time()-t0:.1f}s] VLM 分析完成")
 
+    # Step 4.1: Optional MiMo scene-chunk video understanding
+    if CONFIG.get("mimo_video_overview", False):
+        if _mimo_video_overview_current(work_dir):
+            log("跳过 MiMo 分片视频概览（已存在）")
+        else:
+            t0 = time.time()
+            overview = analyze_video_overview(video_path, work_dir, scenes)
+            if overview is not None:
+                _step_done(work_dir, "mimo_video_overview")
+                log(f"[{time.time()-t0:.1f}s] MiMo 分片视频概览完成")
+
+    # Step 4.5: 叙事结构分析
+    if CONFIG.get("skip_narrative_analysis", False):
+        log("跳过叙事结构分析（skip_narrative_analysis=True）")
+    elif _is_step_done(work_dir, "narrative"):
+        vlm_analysis = json.loads((work_dir / "narrative_structure.json").read_text())
+        log("跳过叙事结构分析（已存在）")
+    else:
+        t0 = time.time()
+        vlm_analysis = analyze_narrative_structure(vlm_analysis, work_dir)
+        _step_done(work_dir, "narrative")
+        log(f"[{time.time()-t0:.1f}s] 叙事结构分析完成")
+
     # Step 5: Agent-authored narration script and optional clip plan
     narration_path = work_dir / "narration.json"
     clip_plan_path = work_dir / "clip_plan.json"
@@ -559,6 +687,9 @@ def run_pipeline(video_path, output_dir=None, step=None,
             mode=CONFIG.get("edit_mode", "full"), work_dir=work_dir,
         )
         source_narration = _validate_narration_budget(source_narration, vlm_analysis)
+        if not cut_mode:
+            source_narration = _align_narration_to_quiet(source_narration, vlm_analysis, silence_periods)
+            narration_path.write_text(json.dumps(source_narration, ensure_ascii=False, indent=2), encoding="utf-8")
         _step_done(work_dir, "script")
         log(f"Agent 解说词验证完成: {len(source_narration)} 段")
     if stop_after_script and source_narration is not None:
@@ -569,7 +700,7 @@ def run_pipeline(video_path, output_dir=None, step=None,
             "lint": str(work_dir / "narration_lint.json"),
         }
     elif source_narration is None:
-        brief_path = build_agent_brief(vlm_analysis, asr_result, silence_periods, video_duration, work_dir)
+        brief_path = build_agent_brief(vlm_analysis, asr_result, silence_periods, video_duration, work_dir, style)
         log("=" * 50)
         log("⏸  Pipeline 在解说词步骤暂停")
         if cut_mode:
@@ -609,7 +740,7 @@ def run_pipeline(video_path, output_dir=None, step=None,
     # Step 6: TTS
     tts_meta = work_dir / "tts_meta.json"
     narration_artifact_path = work_dir / "narration_mapped.json" if cut_mode else narration_path
-    if _is_step_done(work_dir, "tts") and _artifact_current(tts_meta, [narration_artifact_path]):
+    if _is_step_done(work_dir, "tts") and _tts_meta_current(tts_meta, narration_artifact_path):
         tts_info = json.loads(tts_meta.read_text())
         tts_segments = tts_info["segments"]
         engine_used = tts_info["engine"]
@@ -618,9 +749,7 @@ def run_pipeline(video_path, output_dir=None, step=None,
         t0 = time.time()
         _clear_tts_cache(work_dir)
         tts_segments, engine_used = synthesize_tts(narration, work_dir)
-        tts_meta.write_text(json.dumps({
-            "segments": tts_segments, "engine": engine_used
-        }, ensure_ascii=False, indent=2))
+        tts_meta.write_text(json.dumps(_tts_meta_payload(tts_segments, engine_used), ensure_ascii=False, indent=2))
         _step_done(work_dir, "tts")
         log(f"[{time.time()-t0:.1f}s] TTS 完成 (引擎: {engine_used})")
 

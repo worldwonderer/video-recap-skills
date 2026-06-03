@@ -1,3 +1,4 @@
+import json
 import re
 from pathlib import Path
 
@@ -70,7 +71,7 @@ def _post_dedup_narration(narration):
             if len(seg["narration"]) > len(prev["narration"]):
                 prev["narration"] = seg["narration"]
             prev["end"] = seg["end"]
-            prev["pause_after_ms"] = seg.get("pause_after_ms", prev.get("pause_after_ms", CONFIG.get("breath_ms", 250)))
+            prev["pause_after_ms"] = seg.get("pause_after_ms", prev.get("pause_after_ms", 600))
             log(f"  去重合并: {prev['start']:.0f}-{prev['end']:.0f}s")
         else:
             result.append(seg)
@@ -81,8 +82,9 @@ def _post_dedup_narration(narration):
 
 
 def _scene_available_seconds(start, end, pause_after_ms=None):
-    pause = (CONFIG.get("breath_ms", 250) if pause_after_ms is None else pause_after_ms) / 1000
-    return max(0.0, float(end) - float(start) - pause)
+    del pause_after_ms  # pause_after_ms affects the next segment gap during assembly, not current speech capacity.
+    tail_pad = max(0.0, float(CONFIG.get("narration_tail_pad_seconds", 0.1) or 0.0))
+    return max(0.0, float(end) - float(start) - tail_pad)
 
 
 def _recommended_char_budget(start, end, pause_after_ms=None):
@@ -112,11 +114,11 @@ def _normalise_narration_segment(seg, scenes_analysis=None):
     text = str(seg.get("narration", "")).strip()
     if not text:
         return None
-    pause = seg.get("pause_after_ms", CONFIG.get("breath_ms", 250))
+    pause = seg.get("pause_after_ms", CONFIG.get("breath_ms", 600))
     try:
         pause = int(pause)
     except (TypeError, ValueError):
-        pause = CONFIG.get("breath_ms", 250)
+        pause = CONFIG.get("breath_ms", 600)
     item = {
         "start": round(start, 2),
         "end": round(end, 2),
@@ -148,6 +150,27 @@ def _scene_bounds_for_midpoint(scenes_analysis, start, end):
     if not scene:
         return None
     return float(scene.get("start", 0)), float(scene.get("end", 0))
+
+
+def _frame_fact_times_for_segment(scenes_analysis, start, end):
+    """Return frame-fact timestamps covered by a narration segment.
+
+    These timestamps are cheap visual anchors. A narration slot that spans too
+    many anchors is more likely to drift into "general story summary" instead
+    of staying attached to what is on screen.
+    """
+    times = []
+    scene = _find_scene_for_midpoint(scenes_analysis or [], start, end)
+    if not scene:
+        return times
+    for raw_ts in (scene.get("frame_facts") or {}).keys():
+        try:
+            ts = float(raw_ts)
+        except (TypeError, ValueError):
+            continue
+        if float(start) <= ts <= float(end):
+            times.append(ts)
+    return sorted(times)
 
 
 def _clip_matches_for_segment(seg, clip_plan):
@@ -201,11 +224,11 @@ def lint_narration(narration, scenes_analysis=None, *, clip_plan=None, mode="ful
                 errors.append(_lint_issue("error", idx, "invalid_time", "start/end must be numeric"))
                 continue
             text = str(seg.get("narration", "")).strip()
-            pause_raw = seg.get("pause_after_ms", CONFIG.get("breath_ms", 250))
+            pause_raw = seg.get("pause_after_ms", CONFIG.get("breath_ms", 600))
             try:
                 pause = int(pause_raw)
             except (TypeError, ValueError):
-                pause = CONFIG.get("breath_ms", 250)
+                pause = CONFIG.get("breath_ms", 600)
                 warnings.append(_lint_issue(
                     "warning", idx, "invalid_pause",
                     "pause_after_ms is invalid; default will be used",
@@ -263,6 +286,17 @@ def lint_narration(narration, scenes_analysis=None, *, clip_plan=None, mode="ful
                 warnings.append(_lint_issue(
                     "warning", idx, "crosses_scene_boundary", "Narration extends outside its midpoint scene boundary",
                     start=start, end=end, scene_start=scene_bounds[0], scene_end=scene_bounds[1],
+                ))
+
+            frame_fact_times = _frame_fact_times_for_segment(scenes_analysis, start, end)
+            max_visual_seconds = float(CONFIG.get("visual_beat_max_seconds", 18.0) or 18.0)
+            max_visual_facts = int(CONFIG.get("visual_beat_max_facts", 3) or 3)
+            if (end - start) > max_visual_seconds and len(frame_fact_times) > max_visual_facts:
+                warnings.append(_lint_issue(
+                    "warning", idx, "visual_beat_too_broad",
+                    "Narration spans many visual anchors; split or tighten timing so the voiceover stays tied to current pictures",
+                    start=start, end=end, duration=round(end - start, 2),
+                    frame_fact_times=[round(ts, 2) for ts in frame_fact_times[:8]],
                 ))
 
             if mode == "cut":
@@ -407,6 +441,95 @@ def _clean_narration_punctuation(text):
     return text
 
 
+def _align_narration_to_quiet(narration, scenes_analysis, silence_periods):
+    """将解说段移到同场景内的安静窗口，标记是否与语音重叠。"""
+    if not silence_periods:
+        for n in narration:
+            n["overlaps_speech"] = True
+        return _validate_narration_budget(narration, scenes_analysis)
+
+    quiet_windows = [qp for qp in silence_periods if not qp.get("has_speech", False)]
+    quiet_ratio_min = float(CONFIG.get("quiet_overlap_min_ratio", 0.8) or 0.8)
+    max_shift = float(CONFIG.get("max_quiet_shift_seconds", 3.0) or 3.0)
+
+    for n in narration:
+        seg_start = n["start"]
+        seg_end = n["end"]
+        seg_dur = seg_end - seg_start
+        if seg_dur <= 0:
+            n["overlaps_speech"] = True
+            continue
+
+        current_quiet_overlap = _quiet_overlap_seconds(seg_start, seg_end, quiet_windows)
+        if current_quiet_overlap >= seg_dur * quiet_ratio_min:
+            n["overlaps_speech"] = False
+            continue
+
+        parent_scene = _find_scene_for_midpoint(scenes_analysis, seg_start, seg_end)
+        scene_start = float(parent_scene["start"]) if parent_scene else 0.0
+        scene_end = float(parent_scene["end"]) if parent_scene else float("inf")
+        best_candidate = None
+        best_score = None
+
+        for qw in quiet_windows:
+            try:
+                window_start = max(float(qw["start"]), scene_start)
+                window_end = min(float(qw["end"]), scene_end)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if window_end - window_start < seg_dur:
+                continue
+            candidate_start = min(max(seg_start, window_start), window_end - seg_dur)
+            shift = abs(candidate_start - seg_start)
+            if shift > max_shift:
+                continue
+            candidate_end = candidate_start + seg_dur
+            candidate_overlap = _quiet_overlap_seconds(candidate_start, candidate_end, [qw])
+            if candidate_overlap < seg_dur * quiet_ratio_min:
+                continue
+            score = (shift, -candidate_overlap)
+            if best_score is None or score < best_score:
+                best_score = score
+                best_candidate = candidate_start
+
+        if best_candidate is not None:
+            new_start = round(max(0.0, best_candidate), 2)
+            n["start"] = new_start
+            n["end"] = round(new_start + seg_dur, 2)
+            n["overlaps_speech"] = False
+        else:
+            n["overlaps_speech"] = True
+
+    narration.sort(key=lambda x: x["start"])
+    for i in range(1, len(narration)):
+        prev = narration[i - 1]
+        curr = narration[i]
+        min_gap = 0.3
+        min_start = prev["end"] + min_gap
+        if curr["start"] < min_start:
+            seg_dur = curr["end"] - curr["start"]
+            curr["start"] = round(min_start, 2)
+            curr["end"] = round(min_start + seg_dur, 2)
+            parent_scene = _find_scene_for_midpoint(scenes_analysis, curr["start"], curr["end"])
+            if parent_scene and curr["end"] > parent_scene["end"]:
+                curr["end"] = round(parent_scene["end"], 2)
+            if curr["end"] - curr["start"] < 1.5:
+                curr["narration"] = ""
+
+    for n in narration:
+        try:
+            seg_start = float(n["start"])
+            seg_end = float(n["end"])
+        except (KeyError, TypeError, ValueError):
+            n["overlaps_speech"] = True
+            continue
+        seg_dur = max(0.0, seg_end - seg_start)
+        quiet_overlap = _quiet_overlap_seconds(seg_start, seg_end, quiet_windows)
+        n["overlaps_speech"] = quiet_overlap < max(0.3, seg_dur * quiet_ratio_min)
+
+    return _validate_narration_budget(narration, scenes_analysis)
+
+
 def _scene_asr_lines(asr_result, scene):
     lines = []
     for seg in asr_result or []:
@@ -435,7 +558,19 @@ def _quiet_windows_for_scene(silence_periods, scene):
     return windows
 
 
-def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_duration, work_dir):
+def _quiet_overlap_seconds(start, end, quiet_windows):
+    overlap_seconds = 0.0
+    for qw in quiet_windows:
+        try:
+            q_start = float(qw.get("start", 0))
+            q_end = float(qw.get("end", q_start))
+        except (TypeError, ValueError):
+            continue
+        overlap_seconds += max(0.0, min(float(end), q_end) - max(float(start), q_start))
+    return overlap_seconds
+
+
+def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_duration, work_dir, style="纪录片"):
     """Write a compact brief that tells the agent exactly how to author recap artifacts."""
     effective_rate = CONFIG["speech_rate"] * CONFIG["speech_safety_margin"]
     breath_sec = CONFIG.get("breath_ms", 250) / 1000
@@ -445,14 +580,15 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
     max_gap = CONFIG.get("max_narration_gap_seconds", 11.0)
     edit_mode = CONFIG.get("edit_mode", "full")
     target_duration = CONFIG.get("target_duration") or "(not set)"
-    # 粗略估算应写多少段（连续覆盖）；真正约束是上面的每分钟密度
     target_count = max(1, round(video_duration / 60 * target_spm))
+    mimo_overview_path = Path(work_dir) / "mimo_video_overview.json"
     lines = [
         "# Agent Narration Brief",
         "",
         "Write the required JSON artifact(s) manually from the analysis files in this work directory.",
         "The CLI will not generate final narration text; it will only validate timing, run TTS, and assemble the video.",
         "",
+        f"- Style: {style}",
         f"- Edit mode: {edit_mode}",
         f"- Source video duration: {video_duration:.1f}s",
         f"- Target duration (cut mode): {target_duration}",
@@ -463,6 +599,20 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         f"- Context: {CONFIG.get('context_info') or '(none)'}",
         "",
     ]
+
+    if mimo_overview_path.exists():
+        try:
+            mimo_overview = json.loads(mimo_overview_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            mimo_overview = {}
+        overview_text = (mimo_overview.get("content") or "").strip()
+        if overview_text:
+            lines.extend([
+                "## MiMo scene-chunk video overview",
+                "",
+                overview_text[:2000],
+                "",
+            ])
 
     if edit_mode == "cut":
         lines.extend([
@@ -507,13 +657,12 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         "",
         "1. Narrate continuously across the whole timeline as short punchy beats, keeping the original audio alive underneath as a ducked bed.",
         f"2. Hit the density target: ~{target_spm:.1f} beats/min (at least {min_spm:.1f}); never leave a gap longer than {max_gap:.0f}s without narration.",
-        "3. Default `overlaps_speech` to true — narration rides over the original audio. Set it false only for a beat you deliberately place in a real silent gap.",
-        "4. Keep each beat short: roughly one short sentence (1-2 subtitle lines). Shorter is safer for edge-tts and reads better.",
-        f"5. Use a short `pause_after_ms` (default {target_pause_ms}) to keep the rhythm tight; avoid long dead air between beats.",
-        "6. Do not describe what the viewer can already see; explain intent, stakes, subtext, relationships, and story logic.",
-        "7. Use known character names when `--context` or background research provides them.",
-        "8. In cut mode, select clips for plot causality, key dialogue, reveals, and emotional turns; avoid filler and repeated shots.",
-        "9. After writing, run: `python3 skills/video-recap/scripts/video_recap.py <video> --resume <work_dir>`.",
+        "3. Default `overlaps_speech` to true. The CLI auto-marks a beat as non-overlapping only when it actually lands inside a real silent window.",
+        "4. Keep each beat short: roughly one short sentence (1-2 subtitle lines). Shorter is safer for TTS and reads better.",
+        "5. Do not describe what the viewer can already see; explain intent, stakes, subtext, relationships, and story logic.",
+        "6. Keep timing visually local: if one line spans many frame-fact timestamps, split it or tighten start/end around the pictured beat.",
+        "7. In cut mode, select clips for plot causality, key dialogue, reveals, and emotional turns; avoid filler and repeated shots.",
+        "8. After writing, run: `python3 skills/video-recap/scripts/video_recap.py <video> --resume <work_dir>`.",
         "",
         "## Scene timing guide",
         "",
@@ -527,7 +676,7 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         lines.extend([
             f"### Scene {scene['scene_id'] + 1}: {scene['start']:.1f}-{scene['end']:.1f}s",
             f"- Duration: {duration:.1f}s; max budget if fully narrated: {max_chars} chars",
-            f"- Silent gaps (optional, for overlaps_speech=false beats): {quiet_text}",
+            f"- Quiet windows: {quiet_text}",
             f"- Description: {scene.get('description', '')}",
         ])
         if scene.get("depth_analysis"):

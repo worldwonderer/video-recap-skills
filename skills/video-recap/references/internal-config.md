@@ -13,7 +13,7 @@
 
 ## ffmpeg volume 表达式
 
-动态 ducking 使用 ffmpeg volume 滤镜做动态音量控制。关键技术点：
+zone ducking 使用 ffmpeg volume 滤镜做动态音量控制。关键技术点：
 - **必须用单引号包裹表达式**：`volume='if(between(t,0,12),0.12,1.0)':eval=frame`
 - **必须加 `:eval=frame`**：否则 `t` 只在开头求值一次，`between(t,0,12)` 永远返回 1
 - **不要用 `\,` 转义逗号**：ffmpeg 的 `\,` 在函数参数内行为不可靠，用单引号保护整个表达式
@@ -25,10 +25,10 @@
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `zone_ducking_volume` | 0.12 | 解说时原声压低音量 |
+| `narration_mode` | zone | 解说模式: zone（大段+原声交替）/ scene（逐场景） |
+| `zone_ducking_volume` | 0.12 | zone 模式解说时原声音量 |
 | `zone_fade_seconds` | 0.5 | 解说/原声切换淡入淡出时长 |
 | `narration_delay_seconds` | 1.5 | 解说延迟放置秒数，让画面先出现再解说 |
-| `speech_ducking_volume` | 0.2 | 解说与对白重叠时原声音量 |
 | `speech_rate` | 3.5 | TTS 语速（字符/秒） |
 | `speech_safety_margin` | 0.85 | 预算保守系数 |
 | `fade_ms` | 300 | TTS fade-in/fade-out(ms) |
@@ -43,24 +43,41 @@
 | `tts_timeout` | 90 / `TTS_TIMEOUT` | 单段 TTS 命令超时秒数 |
 | `tts_retries` | 3 / `TTS_RETRIES` | 单段 TTS 失败重试次数 |
 | `allow_partial_tts` | false / `ALLOW_PARTIAL_TTS` | 部分 TTS 失败时是否继续组装 |
+| `skip_narrative_analysis` | true | 跳过叙事结构分析 |
+| `api_provider` | openai / mimo | API 兼容提供方；MiMo 使用 `api-key` 头 |
+| `api_url` | normalized chat endpoint | 帧级 VLM 的 OpenAI-compatible chat/completions endpoint |
+| `mimo_api_url` | normalized chat endpoint | MiMo 共享 endpoint；默认供 video/TTS 复用 |
+| `mimo_video_api_url` | normalized chat endpoint | MiMo 视频理解 endpoint；未单独配置时使用 `mimo_api_url` |
+| `mimo_tts_api_url` | normalized chat endpoint | MiMo TTS endpoint；未单独配置时使用 `mimo_api_url` |
+| `mimo_video_overview` | false | 是否调用 MiMo `video_url` 对 ffmpeg scene 分片生成概览 |
+| `mimo_video_chunk_max_seconds` | 20.0 | MiMo scene 分片最长秒数；分片过大或超时时降低 |
+| `mimo_video_chunk_min_seconds` | 1.0 | MiMo scene 分片最短尾段秒数；避免产生极短尾段 |
+| `mimo_video_chunk_timeout` | 180 | ffmpeg 裁剪单个 MiMo 分片的超时秒数 |
+| `mimo_video_base64_max_mb` | 45 | 单个本地视频分片转 data URL 的安全上限，超过则需降低分片时长或 fps |
+| `mimo_disable_thinking` | true | MiMo 非 TTS 请求默认添加 `thinking: {type: disabled}`，避免短 max token 只返回推理内容 |
+| `mimo_tts_model` | mimo-v2.5-tts | MiMo TTS 模型 |
+| `mimo_tts_voice` | 冰糖 | MiMo TTS 音色 |
 
-- **`zone_ducking_volume` (0.12)**：解说时原声压到 12%，非解说时恢复 100%。0.12 是"原声可听到但不干扰解说"的平衡点。原声音乐很重要时可调到 0.2-0.3。
+解说区音量调优：
+
+- **`zone_ducking_volume` (0.12)**：解说时原声压到 12%，非解说时恢复 100%。0.12 是"原声可听到但不干扰解说"的平衡点。如果原声音乐很重要可以调到 0.2-0.3
 
 ## Ducking 行为说明
 
-视频组装时根据解说段的 `overlaps_speech` 标记选择混音策略：
+视频组装时根据解说段的 `overlaps_speech` 标记和 `narration_mode` 选择混音策略：
 
 | 场景 | 原声音量 | 说明 |
 |------|---------|------|
-| 解说时段（安静窗口） | 0.12 | 大幅压低，让解说清晰 |
-| 非解说时段 | 1.0 | 原声满音量 |
-| 解说与对白重叠 | 0.2 | 中等压低 |
+| Zone 模式，解说时段 | 0.12 | 大幅压低，让解说清晰 |
+| Zone 模式，非解说时段 | 1.0 | 原声满音量 |
+| Scene 模式，解说在安静窗口 | 0.7 | 轻微压低 |
+| Scene 模式，解说与对白重叠 | 0.2 | 大幅压低 |
 
-解说/原声切换使用梯形淡入淡出（`zone_fade_seconds`），避免音量突变产生爆音。
+Zone 模式使用梯形淡入淡出（`zone_fade_seconds`），避免音量突变产生爆音。
 
 ## 成片响度归一
 
-ducking 只负责原声与解说的相对平衡，组装末端再做一次整体响度归一（`loudnorm`），统一成片的绝对响度，避免输出偏轻。
+ducking 只负责原声与解说的相对平衡，组装末端再做一次整体响度归一（`loudnorm`），统一成片绝对响度，避免输出偏轻。
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
