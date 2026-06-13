@@ -46,3 +46,13 @@ def test_review_narration_writes_artifacts(monkeypatch, tmp_path):
     assert (tmp_path / "narration_review.json").exists()
     md = (tmp_path / "narration_review.md").read_text(encoding="utf-8")
     assert "weak_hook" in md and "需加钩子" in md
+
+
+def test_review_reads_dict_frame_facts():
+    """frame_facts is a dict {ts:[actions]} (vlm.py). The reviewer must surface those
+    actions as grounding (regression guard for the list-as-dict silent-drop bug)."""
+    narration = [{"start": 1.0, "end": 4.0, "narration": "他下定决心。"}]
+    vlm = [{"scene_id": 0, "start": 0, "end": 5, "description": "门口对峙",
+            "frame_facts": {"2.0": ["男子握紧拳头"], "4.0": ["女子后退一步"]}}]
+    content = review.build_review_messages(narration, vlm, [])[0]["content"]
+    assert "男子握紧拳头" in content and "女子后退一步" in content

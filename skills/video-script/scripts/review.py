@@ -53,16 +53,18 @@ def _scene_grounding(vlm_analysis, limit=60):
         start = scene.get("start", 0)
         end = scene.get("end", 0)
         desc = str(scene.get("description", "")).strip().replace("\n", " ")
-        facts = scene.get("frame_facts") or []
+        facts = scene.get("frame_facts")
         fact_txt = ""
-        if isinstance(facts, list) and facts:
-            picks = []
-            for f in facts[:4]:
-                if isinstance(f, dict):
-                    picks.append(str(f.get("fact", f.get("text", ""))).strip())
-                else:
-                    picks.append(str(f).strip())
-            fact_txt = " | 帧实: " + "；".join(p for p in picks if p)
+        picks = []
+        if isinstance(facts, dict):  # canonical shape: {"<ts>": ["action", ...]} (vlm.py)
+            for ts in sorted(facts.keys(), key=lambda x: float(x)):
+                vals = facts[ts]
+                picks.extend(vals if isinstance(vals, list) else [str(vals)])
+        elif isinstance(facts, list):  # defensive: legacy list shape
+            for f in facts:
+                picks.append(str(f.get("fact", f.get("text", ""))).strip() if isinstance(f, dict) else str(f).strip())
+        if picks:
+            fact_txt = " | 帧实: " + "；".join(p for p in picks[:4] if p)
         lines.append(f"[场景{sid} {float(start):.0f}-{float(end):.0f}s] {desc}{fact_txt}")
     return "\n".join(lines)
 
