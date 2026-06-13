@@ -41,13 +41,27 @@ def parse_duration_seconds(value):
             raise ValueError("duration must be positive")
         return seconds
 
-    match = re.fullmatch(r"([+-]?[0-9]+(?:\.[0-9]+)?)(ms|s|m|h)?", text)
-    if not match:
-        raise ValueError(f"invalid duration: {value}")
-    amount = float(match.group(1))
-    unit = match.group(2) or "s"
+    # One or more <number><unit> tokens: "600", "10m", "500ms", "2m30s", "1h5m30s".
+    # A bare number is read as seconds; units may be combined (compound durations).
     factors = {"ms": 0.001, "s": 1, "m": 60, "h": 3600}
-    seconds = amount * factors[unit]
+    sign = 1.0
+    body = text
+    if body[:1] in "+-":
+        sign = -1.0 if body[0] == "-" else 1.0
+        body = body[1:]
+    token_re = re.compile(r"([0-9]+(?:\.[0-9]+)?)(ms|s|m|h)?")
+    pos = 0
+    seconds = 0.0
+    matched = False
+    for m in token_re.finditer(body):
+        if m.start() != pos:
+            break
+        pos = m.end()
+        matched = True
+        seconds += float(m.group(1)) * factors[m.group(2) or "s"]
+    if not matched or pos != len(body):
+        raise ValueError(f"invalid duration: {value}")
+    seconds *= sign
     if seconds <= 0:
         raise ValueError("duration must be positive")
     return seconds

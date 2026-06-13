@@ -19,6 +19,19 @@ def test_parse_duration_seconds_accepts_common_forms():
         parse_duration_seconds("-1")
 
 
+def test_parse_duration_seconds_accepts_compound_unit_forms():
+    # Natural compound durations must not crash the cut pipeline (regression: "2m30s").
+    assert parse_duration_seconds("2m30s") == 150
+    assert parse_duration_seconds("1h5m") == 3900
+    assert parse_duration_seconds("1h5m30s") == 3930
+    assert parse_duration_seconds("500ms") == 0.5
+    assert parse_duration_seconds("90s") == 90
+    with pytest.raises(ValueError):
+        parse_duration_seconds("2m30x")   # trailing junk
+    with pytest.raises(ValueError):
+        parse_duration_seconds("m30")     # missing leading number
+
+
 def test_normalize_clip_plan_clamps_and_maps_output_timeline():
     plan = normalize_clip_plan({
         "target_duration": "10s",
