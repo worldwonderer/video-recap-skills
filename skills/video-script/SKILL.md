@@ -54,6 +54,20 @@ All timestamps are **original-video time**.
 - **收尾**：最后 1-2 个 beat 给出结果或反转，不要泛泛收场。
 - **给信息而非念画面**；**去废词**：用具体名词动词，删空泛形容。
 
+## Step 2.5 — review for quality (recommended)
+
+A separate **quality** pass (LLM-as-judge), distinct from the mechanical lint below.
+
+```bash
+python3 scripts/review.py --work-dir <work_dir>
+```
+
+Reads `narration_review.md`: severity-rated findings (hallucination / weak hook / no throughline /
+narrating-the-picture / density / pacing / cliché / incomplete). Revise `narration.json` for every
+`error` finding — especially **hallucination** (claims not grounded in the visual/ASR evidence) — then
+re-review until the verdict is `OK`. Advisory only; it never blocks (validate.py is the hard gate).
+Needs the chat API key (same as VLM).
+
 ## Step 3 — validate
 
 ```bash

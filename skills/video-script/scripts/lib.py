@@ -1,7 +1,16 @@
-"""Self-contained config + utils for the video-script skill (no cross-skill imports)."""
+"""Self-contained config + utilities for this skill (no cross-skill imports).
+Merged from the shared core; reads the same env vars as the rest of the bundle."""
+import json
+import hashlib
 import os
+import re
 import subprocess
+import time
+import urllib.request
+import urllib.error
 from pathlib import Path
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 
 # ── 配置 ──────────────────────────────────────────────────────────────
@@ -302,3 +311,207 @@ def get_video_duration(video_path):
         return float(result.stdout.strip())
     except (TypeError, ValueError):
         return 0.0
+
+def stable_json_dumps(value):
+    """Serialize values deterministically for non-secret cache fingerprints."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+def stable_hash(value):
+    """Return an md5 digest for deterministic JSON-serializable values."""
+    return hashlib.md5(stable_json_dumps(value).encode("utf-8")).hexdigest()
+
+def file_fingerprint(path, sample_bytes=65536):
+    """Return a fast content fingerprint based on file size plus head/tail bytes.
+
+    This intentionally avoids mtime/path so copied videos or JSON artifacts can
+    be reused when their bytes are identical, while changed bytes invalidate the
+    cache even if timestamps are misleading.
+    """
+    path = os.fspath(path)
+    size = os.path.getsize(path)
+    h = hashlib.md5()
+    h.update(str(size).encode("ascii"))
+    h.update(b"\0")
+    with open(path, "rb") as f:
+        head = f.read(sample_bytes)
+        if size > sample_bytes:
+            f.seek(max(0, size - sample_bytes))
+            tail = f.read(sample_bytes)
+        else:
+            tail = b""
+    h.update(head)
+    h.update(b"\0")
+    h.update(tail)
+    return h.hexdigest()
+
+def video_fingerprint(video_path):
+    """Fast video content fingerprint used as the root pipeline asset print."""
+    return file_fingerprint(video_path)
+
+def step_cache_key(video_path, step_name, params_fingerprint=""):
+    """Build a cache key from video content, step name and step parameters."""
+    params_digest = params_fingerprint
+    if not isinstance(params_digest, str):
+        params_digest = stable_hash(params_digest)
+    payload = f"{video_fingerprint(video_path)}_{step_name}_{params_digest}"
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()
+
+def _retry_after_seconds(value, fallback):
+    """Parse Retry-After seconds or HTTP-date; return fallback on malformed input."""
+    if not value:
+        return fallback
+    try:
+        return max(fallback, max(0, int(value)))
+    except (TypeError, ValueError):
+        pass
+    try:
+        retry_at = parsedate_to_datetime(value)
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(fallback, max(0, int((retry_at - datetime.now(timezone.utc)).total_seconds())))
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return fallback
+
+def _provider_uses_mimo(api_provider=None, api_url=None):
+    """Return True when the active API endpoint should use Xiaomi MiMo conventions."""
+    provider = str(api_provider if api_provider is not None else CONFIG.get("api_provider") or "").strip().lower()
+    url = str(api_url if api_url is not None else CONFIG.get("api_url") or "")
+    return provider == "mimo" or "xiaomimimo.com" in url
+
+def _api_headers(api_provider=None, api_url=None, api_key=None):
+    """Build auth headers for OpenAI-compatible providers and Xiaomi MiMo."""
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "video-recap/1.0",
+    }
+    key = CONFIG.get("api_key", "") if api_key is None else api_key
+    if _provider_uses_mimo(api_provider=api_provider, api_url=api_url):
+        headers["api-key"] = key
+    else:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+def _prepare_api_payload(payload, api_provider=None, api_url=None):
+    """Normalize payload fields for the active OpenAI-compatible provider."""
+    normalized = dict(payload)
+    uses_mimo = _provider_uses_mimo(api_provider=api_provider, api_url=api_url)
+    if uses_mimo and "max_tokens" in normalized and "max_completion_tokens" not in normalized:
+        normalized["max_completion_tokens"] = normalized.pop("max_tokens")
+    model = str(normalized.get("model") or "")
+    if (
+        uses_mimo
+        and CONFIG.get("mimo_disable_thinking", True)
+        and not model.endswith("-tts")
+        and "thinking" not in normalized
+    ):
+        # MiMo V2.5 may spend small max_completion_tokens budgets on
+        # reasoning_content. The recap pipeline needs visible scene text, so
+        # disable thinking by default unless the caller explicitly sets it.
+        normalized["thinking"] = {"type": "disabled"}
+    return normalized
+
+def _mimo_api_key():
+    """Return the MiMo key, falling back to the main key for legacy MiMo-only runs."""
+    if CONFIG.get("mimo_api_key"):
+        return CONFIG.get("mimo_api_key", "")
+    if _provider_uses_mimo():
+        return CONFIG.get("api_key", "")
+    return ""
+
+def _mimo_endpoint(kind):
+    """Return per-capability MiMo endpoint settings for video understanding or TTS."""
+    if kind == "video":
+        return {
+            "api_url": CONFIG.get("mimo_video_api_url") or CONFIG.get("mimo_api_url"),
+            "api_key": CONFIG.get("mimo_video_api_key") or _mimo_api_key(),
+            "api_key_source": CONFIG.get("mimo_video_api_key_source", "MIMO_VIDEO_API_KEY"),
+        }
+    if kind == "tts":
+        return {
+            "api_url": CONFIG.get("mimo_tts_api_url") or CONFIG.get("mimo_api_url"),
+            "api_key": CONFIG.get("mimo_tts_api_key") or _mimo_api_key(),
+            "api_key_source": CONFIG.get("mimo_tts_api_key_source", "MIMO_TTS_API_KEY"),
+        }
+    raise ValueError(f"Unsupported MiMo endpoint kind: {kind}")
+
+def _call_mimo_endpoint(kind, payload, max_retries=5):
+    settings = _mimo_endpoint(kind)
+    return api_call(
+        payload,
+        max_retries=max_retries,
+        api_provider="mimo",
+        api_url=settings["api_url"],
+        api_key=settings["api_key"],
+        api_key_source=settings["api_key_source"],
+    )
+
+def mimo_video_api_call(payload, max_retries=5):
+    """Call the MiMo video-understanding endpoint."""
+    return _call_mimo_endpoint("video", payload, max_retries=max_retries)
+
+def mimo_tts_api_call(payload, max_retries=5):
+    """Call the MiMo TTS endpoint."""
+    return _call_mimo_endpoint("tts", payload, max_retries=max_retries)
+
+def api_call(payload, max_retries=5, *, api_provider=None, api_url=None, api_key=None, api_key_source=None):
+    """调用 OpenAI-compatible API，带重试"""
+    endpoint = normalize_api_url(api_url if api_url is not None else CONFIG["api_url"])
+    headers = _api_headers(api_provider=api_provider, api_url=endpoint, api_key=api_key)
+    data = json.dumps(_prepare_api_payload(payload, api_provider=api_provider, api_url=endpoint)).encode("utf-8")
+
+    for attempt in range(max_retries):
+        try:
+            req = urllib.request.Request(endpoint, data=data, headers=headers)
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                return result
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")[:500]
+            wait = 2 ** attempt
+            if e.code == 429:
+                retry_after = e.headers.get("Retry-After")
+                wait = _retry_after_seconds(retry_after, wait)
+                log(f"API 速率限制 (尝试 {attempt+1}/{max_retries}), 等待 {wait}s")
+            elif e.code == 401:
+                key_name = api_key_source or CONFIG.get("api_key_source", "OPENAI_API_KEY")
+                raise RuntimeError(f"API 认证失败 (401)。请检查 {key_name} 和 API URL 是否匹配。")
+            elif e.code == 403:
+                hint = "API 访问被拒绝 (403)。"
+                if "1010" in body or "cloudflare" in body.lower():
+                    hint += "IP 被 Cloudflare 限流，请等待几分钟后重试。"
+                    raise RuntimeError(hint)
+                hint += "请检查 API key 权限和 API URL 设置。"
+                raise RuntimeError(hint)
+            elif e.code == 405:
+                raise RuntimeError("API 端点不可用 (405)，可能被 WAF 拦截。请检查 OPENAI_API_URL 或稍后重试。")
+            elif e.code == 503:
+                log(f"API 服务暂不可用 (503)，等待 {wait}s (尝试 {attempt+1}/{max_retries})")
+            elif e.code == 524:
+                # Cloudflare 超时：服务端处理超时，需要更长退避
+                wait = max(wait, 4 * (attempt + 1))
+                log(f"API 超时 (524)，等待 {wait}s (尝试 {attempt+1}/{max_retries})")
+            else:
+                log(f"API 调用失败 (尝试 {attempt+1}/{max_retries}): HTTP {e.code} — {body}")
+            if attempt < max_retries - 1:
+                time.sleep(wait)
+            else:
+                raise RuntimeError(f"API 调用失败 {max_retries} 次: HTTP {e.code} — {body}")
+        except (urllib.error.URLError, Exception) as e:
+            wait = 2 ** attempt
+            log(f"API 调用失败 (尝试 {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                log(f"等待 {wait}s 后重试...")
+                time.sleep(wait)
+            else:
+                raise RuntimeError(f"API 调用失败 {max_retries} 次: {e}")
+
+def load_prompt(name):
+    """加载 prompt 模板"""
+    path = PROMPTS_DIR / "prompt-templates.md"
+    if not path.exists():
+        return None
+    content = path.read_text()
+    # 用 ### NAME 和 ### 分隔提取对应 prompt
+    pattern = rf"### {name}\s*\n(.*?)(?=\n### |\Z)"
+    m = re.search(pattern, content, re.DOTALL)
+    return m.group(1).strip() if m else None

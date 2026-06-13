@@ -1,0 +1,48 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-script' / 'scripts'))
+import json
+
+import review
+
+
+def test_parse_review_handles_fenced_raw_and_garbage():
+    fenced = ('```json\n{"verdict":"REVISE","summary":"s","findings":'
+              '[{"segment":0,"severity":"error","category":"hallucination","issue":"i","fix":"f"}]}\n```')
+    r = review.parse_review_response(fenced)
+    assert r["verdict"] == "REVISE"
+    assert r["findings"][0]["category"] == "hallucination"
+    assert review.parse_review_response('{"verdict":"OK","summary":"g","findings":[]}')["verdict"] == "OK"
+    junk = review.parse_review_response("no json here")
+    assert junk["verdict"] == "REVISE" and junk.get("parse_error")
+
+
+def test_parse_review_normalizes_bad_severity_and_category_and_verdict():
+    r = review.parse_review_response('{"verdict":"weird","findings":[{"severity":"BOGUS","category":"nope","issue":"i"}]}')
+    assert r["verdict"] == "REVISE"
+    assert r["findings"][0]["severity"] == "warning"
+    assert r["findings"][0]["category"] == "other"
+
+
+def test_build_review_messages_includes_draft_and_grounding():
+    narration = [{"start": 1.0, "end": 4.0, "narration": "他下定决心。", "overlaps_speech": True}]
+    vlm = [{"scene_id": 0, "start": 0, "end": 5, "description": "门口对峙", "frame_facts": [{"fact": "男子握紧拳头"}]}]
+    asr = [{"start": 1, "end": 4, "text": "你给我站住"}]
+    content = review.build_review_messages(narration, vlm, asr)[0]["content"]
+    assert "他下定决心" in content and "门口对峙" in content
+    assert "你给我站住" in content and "握紧拳头" in content
+
+
+def test_review_narration_writes_artifacts(monkeypatch, tmp_path):
+    (tmp_path / "narration.json").write_text(json.dumps([{"start": 1, "end": 4, "narration": "测试。"}]), encoding="utf-8")
+    (tmp_path / "vlm_analysis.json").write_text("[]", encoding="utf-8")
+    (tmp_path / "asr_result.json").write_text("[]", encoding="utf-8")
+    fake = {"choices": [{"message": {"content": (
+        '{"verdict":"REVISE","summary":"需加钩子","findings":'
+        '[{"segment":0,"severity":"warning","category":"weak_hook","issue":"开头平淡","fix":"加悬念"}]}')}}]}
+    monkeypatch.setattr("review.api_call", lambda payload: fake)
+    r = review.review_narration(tmp_path)
+    assert r["verdict"] == "REVISE"
+    assert (tmp_path / "narration_review.json").exists()
+    md = (tmp_path / "narration_review.md").read_text(encoding="utf-8")
+    assert "weak_hook" in md and "需加钩子" in md
