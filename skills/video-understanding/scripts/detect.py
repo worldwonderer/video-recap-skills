@@ -170,7 +170,8 @@ def detect_silence_periods(video_path, work_dir, asr_result=None):
         tmp_path = work_dir / "audio.wav.tmp"
         extract = run_cmd([
             "ffmpeg", "-y", "-i", str(video_path),
-            "-vn", "-ar", "16000", "-ac", "1", str(tmp_path)
+            "-vn", "-ar", "16000", "-ac", "1",
+            "-f", "wav", str(tmp_path)  # .tmp extension hides the format from ffmpeg; state it
         ])
         if extract.returncode != 0 or not tmp_path.exists():
             log(f"音频提取失败，无法检测静音窗口（视频可能无音轨）: {extract.stderr}")

@@ -163,3 +163,21 @@ def test_detect_silence_extracts_to_temp_then_atomic_moves(monkeypatch, tmp_path
     assert not (tmp_path / "audio.wav.tmp").exists()
     # a cache file was written for the (successful) empty result
     assert (tmp_path / "silence_periods.json").exists()
+
+
+def test_silence_audio_extract_states_wav_format(monkeypatch, tmp_path):
+    """BUG: extracting to audio.wav.tmp hides the format from ffmpeg (muxer 'Invalid argument').
+    The extraction command must pass -f wav explicitly."""
+    cmds = []
+
+    def fake(cmd, **kw):
+        cmds.append([str(c) for c in cmd])
+        if any("audio.wav.tmp" in str(c) for c in cmd):
+            (tmp_path / "audio.wav.tmp").write_bytes(b"RIFF")  # simulate a successful extract
+        return _ok()
+
+    monkeypatch.setattr("detect.run_cmd", fake)
+    detect_silence_periods(tmp_path / "v.mp4", tmp_path, asr_result=[])
+    extract = next((c for c in cmds if any("audio.wav.tmp" in x for x in c)), None)
+    assert extract is not None, "no audio extraction command issued"
+    assert "-f" in extract and "wav" in extract, f"extract cmd missing -f wav: {extract}"
