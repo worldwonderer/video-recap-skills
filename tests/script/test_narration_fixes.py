@@ -1,8 +1,10 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-script' / 'scripts'))
 """Regression tests for narration.py punctuation + sentence-truncation fixes."""
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'skills' / 'video-recap' / 'scripts'))
 
 from narration import _truncate_at_sentence, _validate_narration_budget
 

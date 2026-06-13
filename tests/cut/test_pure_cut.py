@@ -1,0 +1,117 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-cut' / 'scripts'))
+import json
+import pytest  # noqa: F401
+from subprocess import CompletedProcess  # noqa: F401
+from cut import build_edited_source_video, map_narration_to_clips, normalize_clip_plan, parse_duration_seconds, source_time_to_output_time
+
+
+def test_parse_duration_seconds_accepts_common_forms():
+    assert parse_duration_seconds("600") == 600
+    assert parse_duration_seconds("10m") == 600
+    assert parse_duration_seconds("00:10:00") == 600
+    assert parse_duration_seconds("1:02") == 62
+    assert parse_duration_seconds(90) == 90
+    assert parse_duration_seconds("") is None
+    with pytest.raises(ValueError):
+        parse_duration_seconds("nope")
+    with pytest.raises(ValueError):
+        parse_duration_seconds("-1")
+
+
+def test_normalize_clip_plan_clamps_and_maps_output_timeline():
+    plan = normalize_clip_plan({
+        "target_duration": "10s",
+        "clips": [
+            {"start": 1.0, "end": 4.0, "reason": "开端"},
+            {"start": 8.0, "end": 12.0, "reason": "反转"},
+            {"start": 5.0, "end": 5.1, "reason": "too short"},
+            {"start": "bad", "end": 7.0},
+        ],
+    }, video_duration=10.0, clip_padding=0.5)
+
+    assert plan["target_duration"] == 10.0
+    assert plan["total_duration"] == 6.5
+    assert len(plan["clips"]) == 2
+    assert plan["clips"][0]["source_start"] == 0.5
+    assert plan["clips"][0]["source_end"] == 4.5
+    assert plan["clips"][0]["output_start"] == 0.0
+    assert plan["clips"][1]["source_start"] == 7.5
+    assert plan["clips"][1]["source_end"] == 10.0
+    assert plan["clips"][1]["output_start"] == 4.0
+
+
+def test_clip_plan_rejects_overlapping_source_ranges():
+    with pytest.raises(ValueError, match="overlaps an earlier source range"):
+        normalize_clip_plan([
+            {"start": 1.0, "end": 5.0},
+            {"start": 4.5, "end": 8.0},
+        ], video_duration=10.0)
+
+
+def test_source_time_and_narration_mapping_preserve_source_trace():
+    plan = normalize_clip_plan([
+        {"start": 10.0, "end": 20.0, "reason": "A"},
+        {"start": 40.0, "end": 50.0, "reason": "B"},
+    ], video_duration=60.0)
+
+    assert source_time_to_output_time(12.5, plan["clips"]) == 2.5
+    assert source_time_to_output_time(45.0, plan["clips"]) == 15.0
+    assert source_time_to_output_time(30.0, plan["clips"]) is None
+
+    mapped = map_narration_to_clips([
+        {"start": 12.0, "end": 16.0, "narration": "第一段。"},
+        {"start": 43.0, "end": 48.0, "narration": "第二段。", "overlaps_speech": True},
+        {"start": 22.0, "end": 24.0, "narration": "会被丢弃。"},
+    ], plan)
+
+    assert [(m["start"], m["end"]) for m in mapped] == [(2.0, 6.0), (13.0, 18.0)]
+    assert mapped[0]["source_start"] == 12.0
+    assert mapped[1]["source_clip_id"] == 1
+    assert mapped[1]["overlaps_speech"] is True
+
+
+def test_narration_mapping_uses_explicit_source_clip_id_for_repeated_ranges():
+    plan = normalize_clip_plan([
+        {"start": 10.0, "end": 20.0},
+        {"start": 10.0, "end": 20.0},
+    ], video_duration=30.0, allow_overlap=True)
+
+    unmapped = map_narration_to_clips([
+        {"start": 12.0, "end": 14.0, "narration": "重复画面但没说用哪次。"},
+    ], plan)
+    mapped = map_narration_to_clips([
+        {"start": 12.0, "end": 14.0, "source_clip_id": 1, "narration": "重复画面第二次出现。"},
+    ], plan)
+
+    assert unmapped == []
+    assert mapped[0]["start"] == 12.0
+    assert mapped[0]["source_clip_id"] == 1
+
+
+def test_build_edited_source_video_uses_ffmpeg_concat(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake")
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    plan = normalize_clip_plan([{"start": 0, "end": 1}, {"start": 2, "end": 3}], video_duration=4)
+    commands = []
+
+    def fake_run_cmd(cmd):
+        commands.append(cmd)
+        if cmd[0] == "ffprobe":
+            return CompletedProcess(cmd, 0, stdout="0\n", stderr="")
+        out = Path(cmd[-1])
+        out.write_bytes(b"mp4")
+        return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("cut.run_cmd", fake_run_cmd)
+    monkeypatch.setattr("cut.get_video_duration", lambda path: 2.0)
+
+    output = build_edited_source_video(video, plan, work_dir)
+
+    assert output.exists()
+    ffmpeg_cmd = [cmd for cmd in commands if cmd[0] == "ffmpeg"][0]
+    assert "trim=start=0.000:end=1.000" in " ".join(ffmpeg_cmd)
+    assert "concat=n=2" in " ".join(ffmpeg_cmd)

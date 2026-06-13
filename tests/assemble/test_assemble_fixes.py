@@ -1,10 +1,12 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-assemble' / 'scripts'))
 """Regression tests for assemble.py graceful-degradation fixes (bugs 6 & 7)."""
 import sys
 import wave
 from pathlib import Path
 from subprocess import CompletedProcess
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'skills' / 'video-recap' / 'scripts'))
 
 from assemble import (  # noqa: E402
     _build_timed_narration,

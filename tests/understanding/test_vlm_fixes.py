@@ -1,3 +1,6 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-understanding' / 'scripts'))
 """Regression tests for vlm.py bug fixes (null content, retry header, partial chunk cache)."""
 import json
 import sys
@@ -5,9 +8,8 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'skills' / 'video-recap' / 'scripts'))
 
-from config import CONFIG
+from lib import CONFIG
 from vlm import (
     _load_mimo_partial,
     _mimo_chunk_cache_key,

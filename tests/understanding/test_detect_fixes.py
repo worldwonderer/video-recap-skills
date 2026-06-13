@@ -1,9 +1,11 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-understanding' / 'scripts'))
 """Regression tests for detect.py bug fixes (BUG 2 junk filter, BUG 11 silence)."""
 import sys
 from pathlib import Path
 from subprocess import CompletedProcess
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'skills' / 'video-recap' / 'scripts'))
 
 import detect
 from detect import _filter_junk_scenes, detect_scenes, detect_silence_periods

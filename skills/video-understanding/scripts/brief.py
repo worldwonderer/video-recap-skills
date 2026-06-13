@@ -1076,7 +1076,7 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         "5. Do not describe what the viewer can already see; explain intent, stakes, subtext, relationships, and story logic.",
         "6. Keep timing visually local: if one line spans many frame-fact timestamps, split it or tighten start/end around the pictured beat.",
         "7. In cut mode, select clips for plot causality, key dialogue, reveals, and emotional turns; avoid filler and repeated shots.",
-        "8. After writing, run: `python3 skills/video-recap/scripts/video_recap.py <video> --resume <work_dir>`.",
+        "8. After writing, run: `python3 skills/video-recap/scripts/recap.py <video> --work-dir <work_dir>`.",
         "",
         "## Recap craft (what separates a real recap from captions)",
         "",

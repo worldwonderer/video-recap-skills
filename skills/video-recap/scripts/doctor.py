@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from config import CONFIG
+from lib import CONFIG
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent

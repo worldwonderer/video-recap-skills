@@ -1,5 +1,6 @@
-"""Self-contained config + log for the video-script skill (no cross-skill imports)."""
+"""Self-contained config + utils for the video-script skill (no cross-skill imports)."""
 import os
+import subprocess
 from pathlib import Path
 
 
@@ -274,3 +275,30 @@ PROMPTS_DIR = SCRIPT_DIR.parent / "references"
 
 def log(msg):
     print(f"[video-recap] {msg}", flush=True)
+
+def run_cmd(cmd, **kwargs):
+    """运行命令，返回 CompletedProcess"""
+    if isinstance(cmd, list):
+        display_parts = []
+        for part in cmd:
+            text = str(part)
+            display_parts.append(text if len(text) <= 240 else text[:237] + "...")
+        display = " ".join(display_parts)
+    else:
+        display = str(cmd)
+        if len(display) > 2000:
+            display = display[:1997] + "..."
+    log(f"运行: {display}")
+    return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+
+def get_video_duration(video_path):
+    """获取视频时长（秒）"""
+    cmd = ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+           "-of", "csv=p=0", str(video_path)]
+    result = run_cmd(cmd)
+    if result.returncode != 0:
+        return 0.0
+    try:
+        return float(result.stdout.strip())
+    except (TypeError, ValueError):
+        return 0.0
