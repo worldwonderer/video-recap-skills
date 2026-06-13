@@ -1,0 +1,4 @@
+# Each skill ships its own lib.py, so tests prepend their skill's scripts dir to
+# sys.path before importing — that legitimately puts imports after a statement (E402).
+[lint.per-file-ignores]
+"tests/**" = ["E402"]

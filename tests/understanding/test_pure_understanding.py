@@ -1,7 +1,6 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-understanding' / 'scripts'))
-import json
 import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
 import asr as asr_module

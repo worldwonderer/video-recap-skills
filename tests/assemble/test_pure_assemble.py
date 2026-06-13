@@ -1,7 +1,6 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-assemble' / 'scripts'))
-import json
 import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
 from assemble import _build_audio_filter_complex, _build_timed_narration, _escape_ass_text, _generate_ass, _generate_srt, _seconds_to_ass_time, _seconds_to_srt_time, _subtitle_burn_filter, assemble_video, assembly_settings_fingerprint, final_loudnorm_filter

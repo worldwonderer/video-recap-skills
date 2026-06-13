@@ -1,7 +1,6 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-cut' / 'scripts'))
-import json
 import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
 from cut import build_edited_source_video, map_narration_to_clips, normalize_clip_plan, parse_duration_seconds, source_time_to_output_time

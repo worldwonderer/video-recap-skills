@@ -4,7 +4,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-u
 import json  # noqa: F401
 import pytest  # noqa: F401
 from lib import CONFIG
-from brief import _chunk_asr_for_writing, build_agent_brief, _build_timeline_fusion
+from brief import _chunk_asr_for_writing, build_agent_brief
 
 
 def test_asr_chunks_split_on_sentences_and_track_scene_ids(monkeypatch):
