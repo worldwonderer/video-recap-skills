@@ -54,19 +54,33 @@ All timestamps are **original-video time**.
 - **收尾**：最后 1-2 个 beat 给出结果或反转，不要泛泛收场。
 - **给信息而非念画面**；**去废词**：用具体名词动词，删空泛形容。
 
-## Step 2.5 — review for quality (recommended)
+## Step 2.5 — review GATE (advisory, logged, overridable)
 
-A separate **quality** pass (LLM-as-judge), distinct from the mechanical lint below.
+A separate **quality** pass (LLM-as-judge), distinct from the mechanical lint below. Needs the chat API key (same as VLM).
 
-```bash
-python3 scripts/review.py --work-dir <work_dir>
+1. Run: `python3 scripts/review.py --work-dir <work_dir>`
+2. Open `narration_review.md`. For every `error` finding (ESPECIALLY `category=hallucination` — a claim
+   not grounded in the visual/ASR evidence), revise `narration.json` and re-run review until either:
+   - (a) verdict == `OK` with zero `error` findings, OR
+   - (b) you consciously **OVERRIDE** a remaining finding (next step).
+3. To OVERRIDE: append a block to `work_dir/narration_review_override.md` naming WHICH finding
+   (segment + category), WHY it is acceptable, and who signed off. Unaddressed `error` findings with
+   no override entry mean the draft is **NOT ready**.
+4. Only then proceed to Step 3 (`validate.py` — the hard gate).
+
+**GATE rule:** review NEVER blocks the tooling (it leans on a flaky chat API and a re-render is cheap).
+`validate.py` is the deterministic hard gate. The override log makes "we saw the finding and chose to
+ship it" auditable — review.py / validate.py never read it; it is a record for the human in the loop.
+
+Override block shape — `work_dir/narration_review_override.md` (append-only):
+
 ```
-
-Reads `narration_review.md`: severity-rated findings (hallucination / weak hook / no throughline /
-narrating-the-picture / density / pacing / cliché / incomplete). Revise `narration.json` for every
-`error` finding — especially **hallucination** (claims not grounded in the visual/ASR evidence) — then
-re-review until the verdict is `OK`. Advisory only; it never blocks (validate.py is the hard gate).
-Needs the chat API key (same as VLM).
+## Override — <date>
+- Finding: segment 4 / category=hallucination
+- Reviewer said: "‘他早已知情’无画面/对白依据"
+- Decision: KEEP — grounded in the --context synopsis (s2 reveal); reviewer lacked that context.
+- Signed: <agent/human>
+```
 
 ## Step 3 — validate
 
