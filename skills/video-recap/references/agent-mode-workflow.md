@@ -142,9 +142,4 @@ Verdict: APPROVE | REVISE
 python3 scripts/video_recap.py <video> --resume work_dir
 ```
 
-如果改过已经配音的 `narration.json`，先清理旧 TTS 缓存：
-
-```bash
-rm -rf work_dir/tts_segments/ work_dir/.step_tts.done \
-  work_dir/.step_assemble.done work_dir/tts_meta.json
-```
+如果改过已经配音的 `narration.json`，先清理旧 TTS 缓存再续跑，清理命令见 `references/pipeline-resume.md`（「改解说词后重新配音」一节）。

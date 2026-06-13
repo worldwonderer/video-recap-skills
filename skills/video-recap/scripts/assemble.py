@@ -101,10 +101,6 @@ def _wrap_subtitle_text(text, max_chars=20, line_break="\n"):
     return line_break.join(lines)
 
 
-def _wrap_srt_text(text, max_chars=20):
-    return _wrap_subtitle_text(text, max_chars=max_chars, line_break="\n")
-
-
 def _subtitle_entries(narration):
     """Collect subtitle entries from final TTS segment placement."""
     entries = []
@@ -134,7 +130,7 @@ def _generate_srt(narration, work_dir):
         end_ts = _seconds_to_srt_time(entry["end"])
         srt_lines.append(str(idx))
         srt_lines.append(f"{start_ts} --> {end_ts}")
-        srt_lines.append(_wrap_srt_text(entry["text"], max_chars=max_chars))
+        srt_lines.append(_wrap_subtitle_text(entry["text"], max_chars=max_chars))
         srt_lines.append("")
     srt_path = work_dir / "subtitles.srt"
     srt_path.write_text("\n".join(srt_lines), encoding="utf-8")
@@ -458,7 +454,7 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
 
     for seg in tts_segments:
         wav_path = seg["audio_path"]
-        seg_pause_ms = seg.get("pause_after_ms", CONFIG.get("breath_ms", 600))
+        seg_pause_ms = seg.get("pause_after_ms", CONFIG.get("breath_ms", 250))
 
         if not os.path.exists(wav_path):
             seg["actual_place_start"] = seg["start"]
@@ -494,7 +490,7 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         tts_rate_offset = seg.get("tts_rate_offset", 0.0)
         tts_dur = seg.get("audio_duration", 0)
 
-        configured_delay = max(0.0, float(CONFIG.get("narration_delay_seconds", 2.0) or 0.0))
+        configured_delay = max(0.0, float(CONFIG.get("narration_delay_seconds", 1.5) or 0.0))
         tail_pad = max(0.0, float(CONFIG.get("narration_tail_pad_seconds", 0.1) or 0.0))
         slot_duration = max(0.0, float(seg["end"]) - float(seg["start"]))
         max_delay = max(0.0, slot_duration - float(tts_dur or 0.0) - tail_pad)
@@ -568,7 +564,7 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
             actual_start = last_written_end
 
         # fade-in / fade-out（在 overlap 裁剪之后应用，确保正确的音频包络）
-        fade_len = min(int(CONFIG.get("fade_ms", 50) * sample_rate / 1000), write_samples // 4)
+        fade_len = min(int(CONFIG.get("fade_ms", 300) * sample_rate / 1000), write_samples // 4)
         for i in range(fade_len):
             gain = i / fade_len
             s = i * 2

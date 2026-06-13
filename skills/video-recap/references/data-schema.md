@@ -67,9 +67,11 @@
 
 ```json
 [
-  {"start": 2.0, "end": 8.5}
+  {"start": 2.0, "end": 8.5, "duration": 6.5, "has_speech": false}
 ]
 ```
+
+`has_speech` 标记该窗口是否与检测到的 ASR 语音重叠；下游（pipeline / narration）只把 `has_speech=false` 的窗口当作可放解说的安静窗口。
 
 ## timeline_fusion.json
 

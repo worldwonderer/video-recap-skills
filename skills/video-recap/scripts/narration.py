@@ -292,11 +292,11 @@ def _normalise_narration_segment(seg, scenes_analysis=None):
     text = str(seg.get("narration", "")).strip()
     if not text:
         return None
-    pause = seg.get("pause_after_ms", CONFIG.get("breath_ms", 600))
+    pause = seg.get("pause_after_ms", CONFIG.get("breath_ms", 250))
     try:
         pause = int(pause)
     except (TypeError, ValueError):
-        pause = CONFIG.get("breath_ms", 600)
+        pause = CONFIG.get("breath_ms", 250)
     item = {
         "start": round(start, 2),
         "end": round(end, 2),
@@ -402,11 +402,11 @@ def lint_narration(narration, scenes_analysis=None, *, clip_plan=None, mode="ful
                 errors.append(_lint_issue("error", idx, "invalid_time", "start/end must be numeric"))
                 continue
             text = str(seg.get("narration", "")).strip()
-            pause_raw = seg.get("pause_after_ms", CONFIG.get("breath_ms", 600))
+            pause_raw = seg.get("pause_after_ms", CONFIG.get("breath_ms", 250))
             try:
                 pause = int(pause_raw)
             except (TypeError, ValueError):
-                pause = CONFIG.get("breath_ms", 600)
+                pause = CONFIG.get("breath_ms", 250)
                 warnings.append(_lint_issue(
                     "warning", idx, "invalid_pause",
                     "pause_after_ms is invalid; default will be used",
@@ -550,7 +550,6 @@ def lint_narration(narration, scenes_analysis=None, *, clip_plan=None, mode="ful
         "warnings": warnings,
     }
     if work_dir is not None:
-        import json
         Path(work_dir, "narration_lint.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -697,7 +696,7 @@ def _quiet_overlap_seconds(start, end, quiet_windows):
                 q_end = float(q_end)
         except (TypeError, ValueError):
             continue
-        overlap_seconds += max(0.0, min(float(end), q_end) - max(float(start), q_start))
+        overlap_seconds += _overlap_seconds(start, end, q_start, q_end)
     return overlap_seconds
 
 

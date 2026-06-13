@@ -28,10 +28,6 @@ def _command_path(name: str) -> str | None:
     return shutil.which(name)
 
 
-def _command_exists(name: str) -> bool:
-    return _command_path(name) is not None
-
-
 def _run(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
 

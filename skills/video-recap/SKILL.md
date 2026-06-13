@@ -16,7 +16,7 @@ description: >
 | 何时读 | 文档 |
 |---|---|
 | **写 narration.json 之前必读** | `references/agent-mode-workflow.md` |
-| 撰写解说词时（风格 / 反幻觉 / 字数公式） | `references/prompt-templates.md` |
+| 撰写解说词时（风格 / 反幻觉 / 字数公式） | `references/agent-mode-workflow.md` |
 | 读写中间 JSON | `references/data-schema.md` |
 | 改 CLI 参数或环境变量 | `references/parameters.md` |
 | 中断恢复 / 局部重跑 | `references/pipeline-resume.md` |
@@ -72,7 +72,7 @@ python3 scripts/video_recap.py <video> --resume work_dir
 python3 scripts/video_recap.py <video> --resume work_dir --burn-subtitles
 ```
 
-⚠️ 改完 narration.json 后如需重配音，删 `tts_segments/`、`.step_tts.done`、`.step_assemble.done` 和 `tts_meta.json`。cut 模式下 CLI 会自动检测 `clip_plan.json` / `narration.json` 是否比剪辑产物更新，并重建映射。
+⚠️ 改完 narration.json 后如需重配音，按 `references/pipeline-resume.md` 清理 TTS/组装缓存再续跑。cut 模式下 CLI 会自动检测 `clip_plan.json` / `narration.json` 是否比剪辑产物更新并重建映射。
 
 ## 自检
 

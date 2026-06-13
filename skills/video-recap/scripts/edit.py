@@ -167,11 +167,6 @@ def _clips_for_midpoint(start, end, clips):
     return [clip for clip in clips if clip["source_start"] <= mid <= clip["source_end"]]
 
 
-def _clip_for_midpoint(start, end, clips):
-    matches = _clips_for_midpoint(start, end, clips)
-    return matches[0] if matches else None
-
-
 def map_narration_to_clips(narration, validated_plan, min_duration=0.3):
     """Convert source-time narration segments to edited-output timeline segments."""
     clips = validated_plan["clips"] if isinstance(validated_plan, dict) else validated_plan

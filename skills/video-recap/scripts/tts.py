@@ -6,7 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import CONFIG
-from common import log, mimo_tts_api_call, run_cmd
+from common import log, mimo_tts_api_call, run_cmd, get_video_duration
 from narration import _truncate_at_sentence
 
 SUPPORTED_TTS_ENGINES = {"edge-tts", "mimo-tts"}
@@ -333,16 +333,8 @@ def _tts_edge(text, output_path, rate="+0%", pitch="+0Hz"):
 
 
 def _get_audio_duration(audio_path):
-    """获取音频文件时长"""
-    cmd = ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-           "-of", "csv=p=0", str(audio_path)]
-    result = run_cmd(cmd)
-    if result.returncode == 0 and result.stdout.strip():
-        try:
-            return float(result.stdout.strip())
-        except ValueError:
-            pass
-    return 0.0
+    """获取音频文件时长（复用 common.get_video_duration 的 ffprobe 探测）。"""
+    return get_video_duration(audio_path)
 
 
 # ── Step 7: 视频组装 ─────────────────────────────────────────────────

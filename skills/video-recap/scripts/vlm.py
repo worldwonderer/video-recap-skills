@@ -279,10 +279,15 @@ def _mimo_chunk_prompt(chunk):
     )
 
 
+def _mimo_video_model():
+    """MiMo 视频理解使用的模型：优先 mimo_video_model，回退 mimo_model，再回退 vlm_model。"""
+    return CONFIG.get("mimo_video_model") or CONFIG.get("mimo_model") or CONFIG["vlm_model"]
+
+
 def mimo_video_settings_fingerprint():
     """Return non-secret MiMo video-overview settings that affect generated content."""
     return {
-        "model": CONFIG.get("mimo_video_model") or CONFIG.get("mimo_model") or CONFIG.get("vlm_model"),
+        "model": _mimo_video_model(),
         "mimo_video_fps": CONFIG.get("mimo_video_fps", 2.0),
         "mimo_media_resolution": CONFIG.get("mimo_media_resolution", "default"),
         "mimo_video_chunk_max_seconds": CONFIG.get("mimo_video_chunk_max_seconds", 20.0),
@@ -346,7 +351,7 @@ def _analyze_mimo_video_chunk(chunk_path, chunk):
         },
         {"type": "text", "text": _mimo_chunk_prompt(chunk)},
     ]
-    model = CONFIG.get("mimo_video_model") or CONFIG.get("mimo_model") or CONFIG["vlm_model"]
+    model = _mimo_video_model()
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": content_parts}],
@@ -420,7 +425,7 @@ def analyze_video_overview(video_path, work_dir, scenes=None):
     )
 
     overview = {
-        "model": CONFIG.get("mimo_video_model") or CONFIG.get("mimo_model") or CONFIG["vlm_model"],
+        "model": _mimo_video_model(),
         "content": content,
         "chunks": chunk_results,
         "chunk_count": len(chunk_results),

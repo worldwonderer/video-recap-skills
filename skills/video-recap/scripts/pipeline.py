@@ -771,6 +771,12 @@ def _tail_video_path(video_path, work_dir):
     return video_path
 
 
+def _final_output_path(video_path, work_dir, output_dir):
+    """最终成片路径：指定 output_dir 时放其中，否则放 work_dir 的上级目录。"""
+    base = Path(output_dir) if output_dir else work_dir.parent
+    return base / f"recap_{video_path.stem}.mp4"
+
+
 def _run_cached_tail_step(video_path, work_dir, step, output_dir):
     """Run tts/assemble from existing artifacts without VLM/API prerequisites."""
     if step not in ("tts", "assemble"):
@@ -806,7 +812,7 @@ def _run_cached_tail_step(video_path, work_dir, step, output_dir):
     else:
         _assemble_video_stateful(work_dir, assembly_input, tts_segments, output_path, [tts_meta, assembly_input])
 
-    final_output = Path(output_dir) / f"recap_{video_path.stem}.mp4" if output_dir else work_dir.parent / f"recap_{video_path.stem}.mp4"
+    final_output = _final_output_path(video_path, work_dir, output_dir)
     if final_output != output_path:
         shutil.copy2(str(output_path), str(final_output))
     log(f"步骤 assemble 完成: {final_output}")
@@ -865,14 +871,11 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
     log(f"成片模式: {CONFIG.get('edit_mode', 'full')}")
 
     # 如果指定了 step，只执行那一步
+    # 仅含可直接调度的前置步骤；tts/assemble 走 _run_cached_tail_step，script 走 stop_after_script
     steps = {
         "extract": lambda: extract_frames(video_path, work_dir),
         "detect": lambda: detect_scenes(video_path, work_dir, scene_threshold),
         "asr": lambda: transcribe_audio(video_path, work_dir) if not skip_asr else [],
-        "analyze": None,  # 需要前置数据
-        "script": None,   # Agent-authored narration.json / clip_plan.json validation
-        "tts": None,      # 需要前置数据
-        "assemble": None, # 需要前置数据
     }
 
     # 动态 FPS（需要在 step dispatch 之前，--step extract 需要）
@@ -1200,10 +1203,7 @@ def run_pipeline(video_path, output_dir=None, step=None, style="纪录片",
         log(f"[{time.time()-t0:.1f}s] 视频组装完成")
 
     # 复制到输出目录
-    if output_dir:
-        final_output = Path(output_dir) / f"recap_{video_path.stem}.mp4"
-    else:
-        final_output = work_dir.parent / f"recap_{video_path.stem}.mp4"
+    final_output = _final_output_path(video_path, work_dir, output_dir)
     if final_output != output_path:
         shutil.copy2(str(output_path), str(final_output))
 
