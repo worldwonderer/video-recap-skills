@@ -69,3 +69,9 @@ python3 scripts/recap.py --doctor
 `--context`, `--scene-threshold`, `--style`, `--edit-mode {full,cut}`, `--target-duration`,
 `--skip-asr`, `--mimo-video-overview`, `--voice`, `--mimo-tts-voice`, `--tts-engine`,
 `--burn-subtitles`, `--output-dir`.
+
+## What this skill does NOT do
+- Does NOT write narration.json / clip_plan.json — the agent authors those (see the video-script skill).
+- Does NOT hard-block on the narration review (advisory; validate.py is the hard gate).
+- Is NOT an unattended scheduler — it is human-in-the-loop and posts to no channel.
+- Shares NO code between stage skills — they communicate only through work_dir artifacts.

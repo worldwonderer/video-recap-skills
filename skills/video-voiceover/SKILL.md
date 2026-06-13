@@ -46,3 +46,8 @@ python3 scripts/voiceover.py --work-dir <work_dir> \
 ## Notes
 - To re-voice after editing narration, delete `tts_segments/` + `tts_meta.json` and rerun.
 - `TTS_WORKERS`, `TTS_TIMEOUT`, `TTS_RETRIES`, `ALLOW_PARTIAL_TTS` tune throughput/robustness.
+
+## What this skill does NOT do
+- Does NOT write or edit narration text.
+- Does NOT mux, duck, or render subtitles — that is video-assemble.
+- Does NOT analyze the video or choose timestamps — it voices the segments it is given.

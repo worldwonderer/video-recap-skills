@@ -56,3 +56,9 @@ Downstream, **video-script** reads the brief + index to write `narration.json`.
 ## References
 - Background research before writing: `references/research-guide.md` (writes `background_research.json`).
 - Output JSON shapes: `references/data-schema.md`.
+
+## What this skill does NOT do
+- Does NOT write narration / 解说词 or score it — that is video-script.
+- Does NOT cut, edit, voice, or render video.
+- Does NOT invent plot the signal doesn't support — it emits a substrate warning when ASR/VLM are thin, rather than fabricating.
+- Does NOT publish or schedule anything; it writes artifacts to work_dir and stops.

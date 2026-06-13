@@ -53,3 +53,8 @@ Downstream (voiceover + assemble) treat `edited_source.mp4` as the video and `na
 - Timestamps in `clip_plan.json` and `narration.json` are always **original-video time**; this tool does the source→output remap.
 - Overlapping/duplicate source ranges raise an error unless `--allow-overlap` is set; with overlap, narration should set `source_clip_id`.
 - Segments that fall outside every kept clip are dropped (logged).
+
+## What this skill does NOT do
+- Does NOT re-transcribe or re-analyze the video.
+- Does NOT write narration, and does NOT pick clips for you — it consumes an agent-authored clip_plan.json.
+- Does NOT re-encode beyond the concatenation/remap needed to build the cut source.

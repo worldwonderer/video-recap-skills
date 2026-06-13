@@ -87,3 +87,9 @@ the shortened timeline. Validate with `--mode cut`.
 ```json
 {"target_duration": "10m", "clips": [{"start": 12.0, "end": 38.0, "reason": "冲突开端"}]}
 ```
+
+## What this skill does NOT do
+- Does NOT run ASR/VLM or analyze the video — it consumes the understanding index.
+- Does NOT synthesize audio or render video.
+- `review.py` does NOT edit narration.json and does NOT block the pipeline — it is advisory.
+- `validate.py` does NOT rewrite the meaning of the text — it only checks/aligns timing and quiet windows.

@@ -39,3 +39,8 @@ python3 scripts/assemble.py <video> --work-dir <work_dir> \
 - Subtitle look: `SUBTITLE_FONT_SIZE`, `SUBTITLE_MARGIN_V`, `SUBTITLE_MAX_CHARS`, etc.
 - Ducking / loudness: `DUCKING_MODE`, `ZONE_DUCKING_VOLUME`, `FINAL_LOUDNORM`, `TARGET_LUFS`.
 - Burning subtitles requires an ffmpeg with `subtitles`/libass support.
+
+## What this skill does NOT do
+- Does NOT generate narration or synthesize TTS.
+- Does NOT re-transcribe or alter timing decisions — it consumes placement from tts_meta.json.
+- Burning subtitles is opt-in (`--burn-subtitles`); it does not re-encode unless asked.
