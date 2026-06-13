@@ -31,6 +31,8 @@ export OPENAI_MODEL=doubao-seed-2-0-lite-260428
 MiMo (optional): `MIMO_API_KEY` enables MiMo scene-chunk video understanding (`--mimo-video-overview`)
 and is preferred for TTS. `tp-*` Token Plan keys default to the cn cluster (`MIMO_TOKEN_PLAN_CLUSTER`).
 
+Overridable defaults (zero-config otherwise): see `references/config-playbook.md`.
+
 ## Use
 
 ### 1. Analyze → pause for narration

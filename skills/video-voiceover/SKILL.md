@@ -1,5 +1,6 @@
 ---
 name: video-voiceover
+user-invocable: false
 description: >
  Synthesize Chinese narration audio (TTS voiceover) from a timestamped narration.json.
  Use to turn a written narration script into per-segment speech audio, with edge-tts or

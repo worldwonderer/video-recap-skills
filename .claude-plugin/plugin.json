@@ -1,0 +1,6 @@
+{
+  "name": "video-recap",
+  "version": "0.1.0",
+  "description": "Auto-generate a Chinese-narration recap video from any video: understanding -> narration -> cut -> voiceover -> assemble. A bundle of independent skills + a thin orchestrator.",
+  "author": "PiteChen"
+}

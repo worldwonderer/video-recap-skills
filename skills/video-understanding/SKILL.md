@@ -1,5 +1,6 @@
 ---
 name: video-understanding
+user-invocable: false
 description: >
  Analyze a video into a structured understanding index: scene detection, ASR transcript,
  per-scene visual (VLM) analysis, silence windows, a fused timeline, and a narration-writing

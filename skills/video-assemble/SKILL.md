@@ -1,5 +1,6 @@
 ---
 name: video-assemble
+user-invocable: false
 description: >
  Assemble a final recap video: mux narration audio over the source video, duck the original
  audio under the narration, render subtitles (SRT/ASS, optionally burned in), and loudness-

@@ -1,5 +1,6 @@
 ---
 name: video-cut
+user-invocable: false
 description: >
  Cut a long video down to selected source ranges (montage / clip assembly) and remap
  timestamped narration onto the shortened timeline. Use when an agent has chosen which
