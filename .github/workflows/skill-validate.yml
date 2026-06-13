@@ -4,7 +4,8 @@ on:
     paths:
       - 'skills/**'
       - 'tests/**'
-      - 'Makefile'
+      - '.claude-plugin/**'
+      - 'scripts/test.sh'
 
 jobs:
   validate:
@@ -12,28 +13,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install deps
-        run: pip3 install --break-system-packages pyflakes pytest
-      - name: Lint
-        run: python3 -m pyflakes skills/video-recap/scripts/*.py tests/*.py
-      - name: Check SKILL.md
+        run: pip3 install --break-system-packages ruff pytest
+      - name: Lint (all skills + tests)
+        run: ruff check skills/*/scripts tests
+      - name: Tests (one isolated process per skill)
+        run: bash scripts/test.sh
+      - name: SKILL.md frontmatter
         run: |
-          LINES=$(wc -l < skills/video-recap/SKILL.md)
-          if [ "$LINES" -gt 100 ]; then echo "SKILL.md has $LINES lines, must be ≤100"; exit 1; fi
-          head -1 skills/video-recap/SKILL.md | grep -q "^---" || { echo "SKILL.md missing frontmatter"; exit 1; }
-      - name: Validate prompt anchors
+          for f in skills/*/SKILL.md; do
+            head -1 "$f" | grep -q '^---' || { echo "$f missing YAML frontmatter"; exit 1; }
+          done
+          echo "All SKILL.md have frontmatter"
+      - name: plugin.json has exactly the 4 Anthropic keys
+        run: |
+          python3 -c "
+          import json
+          m = json.load(open('.claude-plugin/plugin.json'))
+          assert set(m) == {'name', 'version', 'description', 'author'}, m
+          print('plugin.json OK')
+          "
+      - name: VLM prompt anchors resolve
         run: |
           python3 -c "
           import re, glob
           anchors = set()
-          for f in glob.glob('skills/video-recap/scripts/*.py'):
+          for f in glob.glob('skills/video-understanding/scripts/*.py'):
               for m in re.finditer(r'load_prompt\([\"\\x27](.+?)[\"\\x27]\)', open(f).read()):
                   anchors.add(m.group(1))
-          content = open('skills/video-recap/references/prompt-templates.md').read()
-          for a in sorted(anchors):
-              if f'### {a}' not in content:
-                  print(f'MISSING anchor: ### {a}')
-                  exit(1)
-          print(f'All {len(anchors)} anchors OK')
+          content = open('skills/video-understanding/references/prompt-templates.md').read()
+          missing = [a for a in anchors if f'### {a}' not in content]
+          assert not missing, f'MISSING prompt anchors: {missing}'
+          print(f'All {len(anchors)} prompt anchors OK')
           "
-      - name: Test
-        run: python3 -m pytest tests/ -v

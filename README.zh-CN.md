@@ -2,95 +2,100 @@
 
 中文说明 · [English](README.md)
 
-> 一个 Claude Code skill：把输入视频制作成中文解说 / recap 视频。结合剧情调研、ASR+VLM 画面理解、TTS 配音、字幕与动态混音。
+> 一个把视频转成中文解说 recap 的 Claude Code **插件**——背景调研、ASR + VLM 场景理解、Agent 撰写解说词、TTS 配音、字幕、动态混音——由一组小而独立的 skill 组合而成。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Claude Code Skill](https://img.shields.io/badge/Claude%20Code-Skill-purple)
+![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-Plugin-purple)
 ![TTS](https://img.shields.io/badge/TTS-MiMo--first-green)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 
-## 效果预览
+## 演示
 
 https://github.com/user-attachments/assets/92698ec6-0d23-4f9f-8825-c3684ef57aff
 
 ## 这是什么？
 
-`video-recap` 是一个 Claude Code skill，用来把已有视频制作成中文短视频解说 / recap。
+`video-recap` 帮 Agent 把已有视频做成短篇带解说的 recap 视频。它是 **五个独立 skill + 一个轻量编排器** 的组合：每个阶段都是自包含的 skill（各自带代码，不共享模块），它们只通过共享 `work_dir` 里的 JSON/MP4 产物通信。解说词由 Agent 撰写，确定性的多媒体处理交给脚本。
 
 ```mermaid
 flowchart TB
-    input([输入视频]) --> prep[准备分析素材]
-    context[[剧情调研 / 背景资料]] -.-> brief
+    input([输入视频]) --> understand
+    context[[背景调研 / 上下文]] -.-> script
 
-    subgraph understand[1. 理解视频]
+    subgraph understand[video-understanding]
         direction LR
-        scene[场景切分]
-        asr[ASR 对白]
-        vlm[VLM 帧级事实]
+        scene[场景切分] --- asr[ASR 对白] --- vlm[VLM 帧实] --- brief[Brief + 索引]
     end
 
-    subgraph write[2. 规划解说]
+    subgraph script[video-script · Agent 写 narration.json]
         direction LR
-        brief[写稿 brief]
-        script[narration.json]
+        write[撰写] --- review[评审门] --- validate[校验时间]
     end
 
-    subgraph produce[3. 生成成片]
+    cut[video-cut · 可选，剪辑模式]
+    subgraph produce[产出]
         direction LR
-        tts[MiMo 优先 TTS 配音]
-        mix[字幕 + 动态压低原声]
-        output([解说视频])
+        voice[video-voiceover · MiMo 优先 TTS] --- assemble[video-assemble · 混音 + 压低 + 字幕]
     end
+    output([Recap 视频])
 
-    prep --> scene
-    prep --> asr
-    prep --> vlm
-    scene --> brief
-    asr --> brief
-    vlm --> brief
-    brief --> script
-    script --> tts
-    script --> mix
-    tts --> mix
-    mix --> output
+    understand --> script
+    script --> cut --> produce
+    script --> produce
+    produce --> output
 
-    classDef source fill:#eef6ff,stroke:#4f86c6,stroke-width:1px,color:#1f2937;
-    classDef analysis fill:#fff7e6,stroke:#d99100,stroke-width:1px,color:#1f2937;
-    classDef scriptStyle fill:#f3ecff,stroke:#7c3aed,stroke-width:1px,color:#1f2937;
-    classDef output fill:#ecfdf3,stroke:#16a34a,stroke-width:1px,color:#1f2937;
-    class input,context,prep source;
-    class scene,asr,vlm analysis;
-    class brief,script scriptStyle;
-    class tts,mix,output output;
+    classDef s fill:#eef6ff,stroke:#4f86c6,color:#1f2937;
+    classDef w fill:#f3ecff,stroke:#7c3aed,color:#1f2937;
+    classDef p fill:#ecfdf3,stroke:#16a34a,color:#1f2937;
+    class input,context,understand s;
+    class script,cut w;
+    class produce,output p;
 ```
+
+## 架构 —— skill 组合
+
+`video-recap` 是面向用户的**编排器**，它把各阶段 skill（以子进程方式）串起来，并在需要 Agent 写解说词时暂停。四个纯工具阶段是隐藏的（`user-invocable: false`）；你直接调用的是 `video-recap` 和 `video-script`。
+
+| Skill | 职责 | 输入 → 输出（`work_dir` 契约） |
+|---|---|---|
+| **video-understanding** | 场景检测 · 抽帧 · ASR · VLM · 时间轴融合 · 生成 brief（可选 `--consolidate` 索引） | `视频` → `scenes / asr_result / vlm_analysis / silence_periods / timeline_fusion / agent_narration_brief.md` |
+| **video-script** | 写作规则（SKILL.md）+ 评审（LLM 评委）+ lint/校验 | `brief + 索引` → `narration.json` |
+| **video-cut** | 片段计划 → 拼剪源 + 重映射解说（剪辑模式） | `clip_plan.json + 视频` → `edited_source.mp4 + narration_mapped.json` |
+| **video-voiceover** | 合成解说音频（MiMo 优先 TTS） | `narration.json` → `tts_segments/ + tts_meta.json` |
+| **video-assemble** | 混音 · 压低原声 · 渲染字幕 | `视频 + tts_meta` → `recap_<名>.mp4 + subtitles.srt/.ass` |
+| **video-recap** | 编排器 + `--doctor` | `视频` → `recap_<名>.mp4` |
+
+每个 skill 自带 `lib.py`（合并的配置 + 工具）——**没有任何共享代码文件**，JSON 产物是唯一接口。各 skill 的完整参数见其 `SKILL.md`。
 
 ## 为什么用它？
 
-- **剧情调研先行**：把剧情梗概、人物关系、世界观和上下文纳入 brief，避免只看画面硬猜。
-- **ASR + VLM 双通道理解**：对白转写补剧情线索，VLM 描述和帧级事实补动作、表情与场景信息。
-- **写稿前先给时间预算**：`agent_narration_brief.md` 标出安静窗口、对白重叠、场景时长和字数预算。
-- **保留原声质感**：解说出现时动态压低原声，尽量保留对白、环境声和原片节奏。
-- **改稿后低成本续跑**：直接编辑 `narration.json`，通常只重跑 TTS/组装，不必重新分析视频。
-- **支持剪辑式解说**：`--edit-mode cut` 下用 `clip_plan.json` 选择原片片段，可把长视频剪成短解说。
-- **MiMo 优先的 TTS 支持**：`--tts` 支持 `auto`、`edge-tts`、`mimo-tts`；默认 `auto` 在 MiMo key 已配置时优先选 MiMo TTS，否则才回退 `edge-tts`。
-- **无 MiMo key 时仍可运行**：没有 MiMo 配置时使用 `edge-tts` 和 `zh-CN-YunxiNeural` 作为免 key 后备。
+- **先调研再写稿**——把剧情、人物、关系、世界观写进 brief，解说不靠看图猜。
+- **ASR + VLM 理解**——对白转写结合场景切分、VLM 画面描述与帧级事实。
+- **可选「整理 / 索引」**——`--consolidate` 把逐场景 VLM 汇总成全局人物/关系/剧情索引；`--consolidate-asr` 清洗转写（时间戳保持不变）。
+- **质量评审门**——`review.py` 对草稿打分（幻觉、钩子、主线、密度……），作为**建议性**的有记录的评审；`validate.py` 仍是确定性的硬门。
+- **保留原声**——配音以压低（ducking）方式混入，而不是盖掉对白与环境声。
+- **改稿即重跑**——改 `narration.json` 后重跑配音/组装，无需重做视频分析。
+- **剪辑式 recap**——`--edit-mode cut` 在 `clip_plan.json` 中选取原片片段，把长视频做成更短的带解说剪辑。
+- **MiMo 优先 TTS**——`auto` 在配置了 MiMo key 时选 MiMo TTS，否则回退到 `edge-tts`（`zh-CN-YunxiNeural`）。
 
 ## 安装
 
-### 1. 安装 Claude Code skill
+### 1. 安装插件
 
-直接告诉 Claude Code：
+对 Claude Code 说：
 
 ```text
-安装这个 skill https://github.com/worldwonderer/video-recap
+安装这个插件：https://github.com/worldwonderer/video-recap
 ```
 
-### 2. 安装运行依赖
+### 2. 运行时依赖
 
 ```bash
 brew install ffmpeg
 pip3 install edge-tts
 ```
+
+ASR 使用 [`qwen3-asr-rs`](https://github.com/alan890104/qwen3-asr-rs)（`ASR_BIN` / `ASR_MODEL_DIR`）；没有它就加 `--skip-asr`。
 
 ### 3. 配置 OpenAI 兼容 API
 
@@ -99,135 +104,117 @@ export OPENAI_API_KEY=your-key
 export OPENAI_API_URL=https://your-api-url/v1
 export OPENAI_MODEL=doubao-seed-2-0-lite-260428
 
-# 如果代理或服务商对 VLM 并发敏感，建议串行：
+# 代理/服务商对并发 VLM 请求敏感时建议：
 export VLM_WORKERS=1
 ```
 
-### 可选：Xiaomi MiMo
+其余均为零配置默认值，可覆盖的环境变量见
+[`skills/video-recap/references/config-playbook.md`](skills/video-recap/references/config-playbook.md)。
 
-MiMo 可用于可选的场景分片视频理解和 MiMo TTS 配音。密钥只放环境变量，
-不要写进仓库文件、日志或文档。
+### 可选：小米 MiMo
 
-最简单的混合配置：OpenAI 兼容端点（如 Doubao）负责帧级 VLM，
-同一个 MiMo key 同时负责视频分片理解和 TTS。
+MiMo 用于可选的分片视频理解和 MiMo TTS。key 只放环境变量，不要写进仓库。
 
 ```bash
-export OPENAI_API_KEY=your-doubao-or-vlm-key
+export OPENAI_API_KEY=your-doubao-or-vlm-key      # 帧级 VLM
 export OPENAI_API_URL=https://your-vlm-api-url/v1
 export OPENAI_MODEL=doubao-seed-2-0-lite-260428
 
-export MIMO_API_KEY=your-mimo-key
+export MIMO_API_KEY=your-mimo-key                 # MiMo 视频 + MiMo TTS
 export MIMO_MODEL=mimo-v2.5
 
-# 按量付费 sk-* key 默认使用 https://api.xiaomimimo.com/v1。
-# Token Plan tp-* key 默认使用中国集群：
-#   https://token-plan-cn.xiaomimimo.com/v1
-# 订阅在其他集群时可覆盖：
+# 按量付费 sk-* key 默认 https://api.xiaomimimo.com/v1。
+# Token Plan tp-* key 默认走中国集群（token-plan-cn.xiaomimimo.com/v1）：
 export MIMO_TOKEN_PLAN_CLUSTER=cn   # cn | sgp | ams
-# 或直接指定完整 base URL：
-# export MIMO_API_URL=https://token-plan-cn.xiaomimimo.com/v1
+# 或直接指定 base URL：export MIMO_API_URL=https://token-plan-cn.xiaomimimo.com/v1
 ```
 
-MiMo 视频理解只走场景分片：先用 ffmpeg `scdet` 找场景边界，再把每个本地分片裁成 MP4，
-编码为 `data:video/mp4;base64,...` 的 `video_url` 发给 MiMo。Pipeline 始终分析这些
-本地 scene chunks，不绕过分片流程。每个分片默认按 45 MB 安全上限控制（MiMo base64
-上限 50 MB）；分片过大时降低 `MIMO_VIDEO_CHUNK_MAX_SECONDS` 或 `MIMO_VIDEO_FPS`。
-
-高级拆分端点是可选的：默认 `MIMO_API_KEY` / `MIMO_API_URL` 同时用于 MiMo 视频理解和 MiMo TTS；
-只有需要不同网关时才设置 `MIMO_VIDEO_API_URL` / `MIMO_TTS_API_URL`，不同凭证才额外设置
-`MIMO_VIDEO_API_KEY` / `MIMO_TTS_API_KEY`。
+`MIMO_API_KEY` / `MIMO_API_URL` 默认同时供 MiMo 视频和 MiMo TTS；只有需要拆分两条路由时才用
+`MIMO_VIDEO_API_URL` / `MIMO_TTS_API_URL`（以及不同凭证的 `MIMO_VIDEO_API_KEY` / `MIMO_TTS_API_KEY`）。
 
 ## 快速开始
 
-安装 skill 后，在 Claude Code 里说：
+安装后对 Claude Code 说：
 
 ```text
-用 video-recap 为 /path/to/video.mp4 生成中文解说视频。
-优先使用 MiMo TTS；如果没有 MiMo key，再用 edge-tts。背景：<节目 / 电影 / 角色信息>。
+用 video-recap 给 /path/to/video.mp4 做一个解说视频。
+优先 MiMo TTS，没有 MiMo key 就回退 edge-tts。上下文：<剧名 / 电影 / 人物背景>。
 ```
 
-Pipeline 会准备场景、ASR、VLM 分析素材，然后生成 `agent_narration_brief.md` 并暂停。Agent 读取 brief 后写 `narration.json`，CLI 再续跑 TTS 与视频组装。
+编排器先跑理解阶段，然后带着 `agent_narration_brief.md` **暂停**。Agent 按 **video-script** skill 写 `narration.json`，随后你**重跑同一条命令**继续——校验 →（剪辑）→ 配音 → 组装。
 
-如果你想手动启动前置分析：
+手动驱动：
 
 ```bash
-python3 skills/video-recap/scripts/video_recap.py /path/to/video.mp4 \
-  --context "节目名、角色名、剧情背景"
+# 1. 分析 → 暂停并给出 brief
+python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --work-dir work_dir \
+  --context "剧名、人物或剧情背景" \
+  --mimo-video-overview --consolidate          # 可选：MiMo 视频上下文 + 全局索引
+
+# 2. 阅读 work_dir/agent_narration_brief.md，写 work_dir/narration.json
+#    （可选质量评审）：python3 skills/video-script/scripts/review.py --work-dir work_dir
+
+# 3. 重跑同一条命令产出 recap
+python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --work-dir work_dir
 ```
 
-使用 Doubao 做帧级 VLM、MiMo 做分片视频理解和 TTS 的示例：
+**剪辑模式**（长视频 → 短解说剪辑；目标时长是规划目标）：
 
 ```bash
-python3 skills/video-recap/scripts/video_recap.py /path/to/video.mp4 \
-  --vlm-model doubao-seed-2-0-lite-260428 \
-  --mimo-video-overview \
-  --mimo-tts-voice 冰糖
+python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --work-dir work_dir \
+  --edit-mode cut --target-duration 10m
 ```
 
-命令会在 TTS 前暂停并输出 `work_dir`。读取 `work_dir/agent_narration_brief.md`，写入 `work_dir/narration.json` 后，再执行打印出的续跑命令。
+用原视频时间写 `work_dir/clip_plan.json` 和 `work_dir/narration.json`；编排器会拼出
+`edited_source.mp4`，把解说映射到 `narration_mapped.json`，然后继续。
 
-写完 `narration.json` 后，可以先用 `--step script` 做 TTS 前预检；CLI 会写出 `work_dir/narration_lint.json`，列出时间错误和预警。
-
-如果要做“长视频剪短”的剪辑式解说（目标时长是选片规划目标）：
+**压制字幕**进最终视频（会重编码；需要带 `subtitles`/libass 滤镜的 ffmpeg）：
 
 ```bash
-python3 skills/video-recap/scripts/video_recap.py /path/to/video.mp4 \
-  --edit-mode cut \
-  --target-duration 10m
+python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --work-dir work_dir --burn-subtitles
 ```
 
-cut 模式下同时写 `work_dir/clip_plan.json` 和 `work_dir/narration.json`，时间戳都用原视频时间。CLI 会生成 `edited_source.mp4`，把解说映射到 `narration_mapped.json`，再继续 TTS/组装。
-
-如果要把解说字幕直接压制进最终视频，在续跑/组装时加 `--burn-subtitles`：
+**自检**（ffmpeg 滤镜、ASR 就绪、API 配置、默认 TTS）：
 
 ```bash
-python3 skills/video-recap/scripts/video_recap.py /path/to/video.mp4 \
-  --resume work_dir \
-  --burn-subtitles
+python3 skills/video-recap/scripts/recap.py --doctor
 ```
 
-CLI 会根据最终 `narration.json` 和 TTS 实际放置时间导出 `subtitles.srt`；压制时会额外生成内部使用的 `subtitles.ass`，使用底部居中的可读样式。压制会对视频重编码，当前 `ffmpeg` 需要带 `subtitles`/libass 滤镜。
+## 输出
 
-### Doctor 自检
+- `recap_<video>.mp4` —— 最终 recap 视频 · `subtitles.srt`（加 `--burn-subtitles` 时另有 `subtitles.ass`）
+- `work_dir/agent_narration_brief.md` —— 给 Agent 的时间/场景 brief
+- `work_dir/narration.json` —— 解说脚本 · `work_dir/narration_lint.json` —— 时间诊断
+- `work_dir/narration_review.md` —— 可选评审意见（建议性）
+- `work_dir/vlm_analysis.json`、`asr_result.json`、`silence_periods.json`、`timeline_fusion.json` —— 理解产物
+- `work_dir/understanding_index.json` / `asr_clean.json` —— 可选 `--consolidate` 产物
+- `work_dir/clip_plan.json`、`edited_source.mp4`、`narration_mapped.json` —— 剪辑模式产物
+- `work_dir/mimo_video_overview.json` —— 可选 MiMo 分片理解
+- `work_dir/tts_segments/`、`tts_meta.json` —— TTS 音频与放置信息
+
+## 开发
+
+每个 skill 自带 `lib.py`，所以测试要**每个 skill 一个进程**跑（直接 `pytest tests/` 会因 `lib` 模块同名冲突）：
 
 ```bash
-python3 skills/video-recap/scripts/video_recap.py --doctor
+bash scripts/test.sh                 # 全部（或：bash scripts/test.sh script）
+ruff check skills/*/scripts tests    # lint
+python3 skills/video-recap/scripts/recap.py --doctor   # 运行时自检
 ```
 
-如果还想测试后备 `edge-tts` 能否真实合成一小段音频，加 `--doctor-tts-smoke`。doctor 也会检查 ffmpeg 字幕滤镜、ASR 路径和模型目录、规范化后的 API 配置，以及默认 TTS 设置。
-
-## 输出文件
-
-常见输出：
-
-- `recap_<video>.mp4`：最终解说视频
-- `work_dir/subtitles.srt`：根据最终 TTS 放置时间生成的解说字幕
-- `work_dir/subtitles.ass`：使用 `--burn-subtitles` 时用于压制的解说字幕文件
-- `work_dir/agent_narration_brief.md`：给 Agent 写解说词用的场景与时长 brief
-- `work_dir/narration.json`：解说词稿
-- `work_dir/narration_lint.json`：`--step script` 或续跑验证时生成的写稿时间预检结果
-- `work_dir/clip_plan.json`：cut 模式下要保留的原片片段
-- `work_dir/edited_source.mp4`：cut 模式下拼出的短视频源
-- `work_dir/narration_mapped.json`：从原视频时间映射到短视频时间的解说稿
-- `work_dir/vlm_analysis.json`：场景级视觉分析
-- `work_dir/mimo_video_overview.json`：可选的 MiMo 场景分片视频理解结果
-- `work_dir/asr_result.json`：可用时的 ASR 转写结果；用于写解说参考
-- `work_dir/tts_segments/`：分段 TTS 音频
+测试位于 `tests/<skill>/`，CI 跑同样的检查（`.github/workflows/skill-validate.yml`）。
 
 ## 参考文档
 
-- [Skill 说明](skills/video-recap/SKILL.md)
-- [Agent 模式工作流](skills/video-recap/references/agent-mode-workflow.md)
-- [参数参考](skills/video-recap/references/parameters.md)
-- [Prompt 模板](skills/video-recap/references/prompt-templates.md)
-- [断点续跑与局部重跑](skills/video-recap/references/pipeline-resume.md)
-- [数据结构](skills/video-recap/references/data-schema.md)
+- 各 skill 契约：每个 `skills/<skill>/SKILL.md`（写作规则在 video-script 的 SKILL.md）
+- [数据结构](skills/video-recap/references/data-schema.md) · [配置手册](skills/video-recap/references/config-playbook.md)
+- [背景调研指南](skills/video-understanding/references/research-guide.md) · [VLM prompt 模板](skills/video-understanding/references/prompt-templates.md)
 
 ## 致谢
 
 - [linux.do](https://linux.do)
 - [qwen3-asr-rs](https://github.com/alan890104/qwen3-asr-rs)
 
-## License / 许可证
+## 许可
 
-MIT — see [LICENSE](LICENSE)。
+MIT —— 见 [LICENSE](LICENSE)。
