@@ -22,3 +22,18 @@ def test_brief_and_narration_are_byte_identical():
         "brief.py and narration.py have drifted. They are intentional byte-identical "
         "copies; apply the SAME diff to BOTH in one commit (see the plan's lockstep rule)."
     )
+
+
+def test_asr_span_tol_matches_across_files():
+    """_ASR_SPAN_TOL is duplicated in consolidate.py and brief.py/narration.py (they cannot
+    import each other across skills). Guard that the literal stays in sync."""
+    import re
+    def tol(rel):
+        m = re.search(r"_ASR_SPAN_TOL\s*=\s*([0-9.]+)", (ROOT / rel).read_text())
+        return m.group(1) if m else None
+    vals = {
+        tol("skills/video-understanding/scripts/consolidate.py"),
+        tol("skills/video-understanding/scripts/brief.py"),
+        tol("skills/video-script/scripts/narration.py"),
+    }
+    assert vals == {"0.05"}, f"_ASR_SPAN_TOL drifted across files: {vals}"
