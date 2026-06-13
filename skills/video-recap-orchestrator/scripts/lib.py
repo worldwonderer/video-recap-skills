@@ -1,0 +1,276 @@
+"""Self-contained config + log for the video-recap orchestrator (no cross-skill imports)."""
+import os
+from pathlib import Path
+
+
+# ── 配置 ──────────────────────────────────────────────────────────────
+
+DEFAULT_OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
+DEFAULT_MIMO_API_URL = "https://api.xiaomimimo.com/v1"
+DEFAULT_MIMO_TOKEN_PLAN_CLUSTER = "cn"
+MIMO_TOKEN_PLAN_API_URLS = {
+    "cn": "https://token-plan-cn.xiaomimimo.com/v1",
+    "sgp": "https://token-plan-sgp.xiaomimimo.com/v1",
+    "ams": "https://token-plan-ams.xiaomimimo.com/v1",
+}
+DEFAULT_VLM_MODEL = "doubao-seed-2-0-lite-260428"
+DEFAULT_MIMO_MODEL = "mimo-v2.5"
+
+
+def normalize_api_url(raw_url):
+    """Accept either an OpenAI-compatible base URL or chat/completions endpoint."""
+    url = (raw_url or DEFAULT_OPENAI_CHAT_URL).rstrip("/")
+    if url.endswith("/chat/completions"):
+        return url
+    return f"{url}/chat/completions"
+
+
+def is_mimo_token_plan_key(api_key):
+    """Return True for Xiaomi MiMo Token Plan keys, which use token-plan base URLs."""
+    return str(api_key or "").strip().startswith("tp-")
+
+
+def default_mimo_api_url(api_key="", cluster=None):
+    """Pick the correct MiMo base URL for pay-as-you-go vs Token Plan keys.
+
+    MiMo uses independent credentials for pay-as-you-go (`sk-*`) and Token Plan
+    (`tp-*`). Token Plan keys must be sent to the Token Plan cluster base URL,
+    not the pay-as-you-go `api.xiaomimimo.com` endpoint.
+    """
+    if is_mimo_token_plan_key(api_key):
+        cluster_name = (cluster or os.environ.get("MIMO_TOKEN_PLAN_CLUSTER") or DEFAULT_MIMO_TOKEN_PLAN_CLUSTER)
+        cluster_name = str(cluster_name).strip().lower()
+        return MIMO_TOKEN_PLAN_API_URLS.get(cluster_name, MIMO_TOKEN_PLAN_API_URLS[DEFAULT_MIMO_TOKEN_PLAN_CLUSTER])
+    return DEFAULT_MIMO_API_URL
+
+
+def env_int(name, default, *, minimum=None):
+    """Read an integer env var; ignore malformed values instead of crashing import."""
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
+def env_bool(name, default=False):
+    """Read common boolean env var forms."""
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def env_float(name, default, *, minimum=None):
+    """Read a float env var; ignore malformed values instead of crashing import."""
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
+_api_provider = os.environ.get("API_PROVIDER", "").strip().lower()
+_mimo_api_key = os.environ.get("MIMO_API_KEY", "")
+_mimo_video_api_key = os.environ.get("MIMO_VIDEO_API_KEY", "") or _mimo_api_key
+_mimo_tts_api_key = os.environ.get("MIMO_TTS_API_KEY", "") or _mimo_api_key
+_openai_api_key = os.environ.get("OPENAI_API_KEY", "")
+_main_api_provider = _api_provider or ("mimo" if _mimo_api_key and not _openai_api_key else "openai")
+_configured_api_key = (_mimo_api_key or _openai_api_key) if _main_api_provider == "mimo" else _openai_api_key
+_using_mimo_env = _main_api_provider == "mimo"
+_mimo_key_for_defaults = _mimo_api_key or _mimo_video_api_key or _mimo_tts_api_key or (
+    _openai_api_key if _using_mimo_env else ""
+)
+_raw_mimo_api_url = os.environ.get("MIMO_API_URL") or default_mimo_api_url(_mimo_key_for_defaults)
+_raw_mimo_video_api_url = (
+    os.environ.get("MIMO_VIDEO_API_URL")
+    or os.environ.get("MIMO_API_URL")
+    or default_mimo_api_url(_mimo_video_api_key or _mimo_key_for_defaults)
+)
+_raw_mimo_tts_api_url = (
+    os.environ.get("MIMO_TTS_API_URL")
+    or os.environ.get("MIMO_API_URL")
+    or default_mimo_api_url(_mimo_tts_api_key or _mimo_key_for_defaults)
+)
+if _using_mimo_env:
+    _openai_api_url_for_mimo = os.environ.get("OPENAI_API_URL", "")
+    if "xiaomimimo.com" not in _openai_api_url_for_mimo:
+        _openai_api_url_for_mimo = ""
+    _raw_api_url = (
+        _raw_mimo_api_url
+        or _openai_api_url_for_mimo
+        or default_mimo_api_url(_configured_api_key)
+    )
+else:
+    _raw_api_url = os.environ.get("OPENAI_API_URL")
+
+CONFIG = {
+    "api_provider": _main_api_provider,
+    "api_provider_source": "env" if _api_provider else "default",
+    "api_url": normalize_api_url(_raw_api_url),
+    "api_url_source": "env" if os.environ.get("OPENAI_API_URL") else "default",
+    "api_key": _configured_api_key,
+    "api_key_source": "MIMO_API_KEY" if _using_mimo_env and _mimo_api_key else "OPENAI_API_KEY",
+    "mimo_api_url": normalize_api_url(_raw_mimo_api_url),
+    "mimo_api_url_source": "env" if os.environ.get("MIMO_API_URL") else "default",
+    "mimo_api_key": _mimo_api_key or (_openai_api_key if _using_mimo_env else ""),
+    "mimo_api_key_source": "MIMO_API_KEY" if _mimo_api_key else ("OPENAI_API_KEY" if _using_mimo_env else "MIMO_API_KEY"),
+    "mimo_video_api_url": normalize_api_url(_raw_mimo_video_api_url),
+    "mimo_video_api_url_source": "env" if (
+        os.environ.get("MIMO_VIDEO_API_URL") or os.environ.get("MIMO_API_URL")
+    ) else "default",
+    "mimo_video_api_key": _mimo_video_api_key or (_openai_api_key if _using_mimo_env else ""),
+    "mimo_video_api_key_source": "MIMO_VIDEO_API_KEY" if os.environ.get("MIMO_VIDEO_API_KEY") else (
+        "MIMO_API_KEY" if _mimo_api_key else ("OPENAI_API_KEY" if _using_mimo_env else "MIMO_VIDEO_API_KEY")
+    ),
+    "mimo_tts_api_url": normalize_api_url(_raw_mimo_tts_api_url),
+    "mimo_tts_api_url_source": "env" if (
+        os.environ.get("MIMO_TTS_API_URL") or os.environ.get("MIMO_API_URL")
+    ) else "default",
+    "mimo_tts_api_key": _mimo_tts_api_key or (_openai_api_key if _using_mimo_env else ""),
+    "mimo_tts_api_key_source": "MIMO_TTS_API_KEY" if os.environ.get("MIMO_TTS_API_KEY") else (
+        "MIMO_API_KEY" if _mimo_api_key else ("OPENAI_API_KEY" if _using_mimo_env else "MIMO_TTS_API_KEY")
+    ),
+    "mimo_model": os.environ.get("MIMO_MODEL", DEFAULT_MIMO_MODEL),
+    "mimo_model_source": "env" if os.environ.get("MIMO_MODEL") else "default",
+    "mimo_video_model": os.environ.get("MIMO_VIDEO_MODEL") or os.environ.get("MIMO_MODEL", DEFAULT_MIMO_MODEL),
+    "mimo_video_model_source": "env" if (
+        os.environ.get("MIMO_VIDEO_MODEL") or os.environ.get("MIMO_MODEL")
+    ) else "default",
+    "vlm_model": (os.environ.get("MIMO_MODEL") if _using_mimo_env else None) or os.environ.get("OPENAI_MODEL") or (
+        DEFAULT_MIMO_MODEL if _using_mimo_env else DEFAULT_VLM_MODEL
+    ),
+    "vlm_model_source": "env" if (
+        os.environ.get("OPENAI_MODEL") or (_using_mimo_env and os.environ.get("MIMO_MODEL"))
+    ) else "default",
+    "asr_bin": os.environ.get("ASR_BIN", "local_transcribe"),
+    "asr_model_dir": os.environ.get("ASR_MODEL_DIR", ""),
+    # ASR 分段窗口秒数。越小 → 长视频的对白时间戳越精细（默认 30s）。旧值 180s 会把 >3min
+    # 视频的对白塌缩成一个时间戳，既让 brief 无法定位对白，又触发 detect.py 的粗粒度跳过，
+    # 使 overlaps_speech/安静窗口判断失真。代价是更多 ASR 调用；ASR 慢时可调大。
+    "asr_segment_seconds": env_float("ASR_SEGMENT_SECONDS", 30.0, minimum=5.0),
+    "scene_threshold": 0.1,
+    "scene_threshold_source": "default",
+    "tts_engine": os.environ.get("TTS_ENGINE", "auto"),  # auto | edge-tts | mimo-tts
+    "tts_engine_source": "env" if os.environ.get("TTS_ENGINE") else "default",
+    "edge_tts_voice": "zh-CN-YunxiNeural",
+    "mimo_tts_model": os.environ.get("MIMO_TTS_MODEL", "mimo-v2.5-tts"),
+    "mimo_tts_model_source": "env" if os.environ.get("MIMO_TTS_MODEL") else "default",
+    "mimo_tts_voice": os.environ.get("MIMO_TTS_VOICE", "冰糖"),
+    "mimo_tts_voice_source": "env" if os.environ.get("MIMO_TTS_VOICE") else "default",
+    "mimo_tts_style": os.environ.get(
+        "MIMO_TTS_STYLE",
+        "自然、清晰、适合中文视频解说；语速中等，情绪克制但有故事感。",
+    ),
+    "mimo_tts_style_source": "env" if os.environ.get("MIMO_TTS_STYLE") else "default",
+    "mimo_media_resolution": os.environ.get("MIMO_MEDIA_RESOLUTION", "default"),
+    "mimo_media_resolution_source": "env" if os.environ.get("MIMO_MEDIA_RESOLUTION") else "default",
+    "mimo_video_overview": env_bool("MIMO_VIDEO_OVERVIEW", False),
+    "mimo_video_overview_source": "env" if os.environ.get("MIMO_VIDEO_OVERVIEW") else "default",
+    "mimo_video_fps": env_float("MIMO_VIDEO_FPS", 2.0, minimum=0.1),
+    "mimo_video_fps_source": "env" if os.environ.get("MIMO_VIDEO_FPS") else "default",
+    "mimo_video_chunk_max_seconds": env_float("MIMO_VIDEO_CHUNK_MAX_SECONDS", 20.0, minimum=1.0),
+    "mimo_video_chunk_min_seconds": env_float("MIMO_VIDEO_CHUNK_MIN_SECONDS", 1.0, minimum=0.2),
+    "mimo_video_chunk_timeout": env_int("MIMO_VIDEO_CHUNK_TIMEOUT", 180, minimum=1),
+    "mimo_video_base64_max_mb": env_float("MIMO_VIDEO_BASE64_MAX_MB", 45.0, minimum=1.0),
+    "mimo_video_prompt": os.environ.get(
+        "MIMO_VIDEO_PROMPT",
+        "请用中文分析这个视频分片的主要人物、场景变化、关键动作、情绪走向和剧情冲突，"
+        "重点提取适合写短视频解说的故事线索。不要泛泛复述画面，要标出对后续写稿有用的信息。",
+    ),
+    "mimo_disable_thinking": env_bool("MIMO_DISABLE_THINKING", True),
+    "mimo_disable_thinking_source": "env" if os.environ.get("MIMO_DISABLE_THINKING") else "default",
+    "fps": 0,  # 0 = 自动（≤60s→2fps, ≤5min→1.5fps, >5min→1fps）
+    # TTS 语速（字符/秒），由校准得出。edge-tts YunxiNeural 约 3.5 字/秒
+    # 生成解说时使用 speech_rate * safety_margin 作为约束
+    "speech_rate": 3.5,
+    "speech_safety_margin": 0.85,  # 保守系数：TTS 实际语速有 ±20% 波动
+    "fade_ms": 300,  # TTS fade-in/fade-out 时长(ms)
+    "breath_ms": 250,  # 段间呼吸空间(ms)；连续原声铺底风格用短停顿保持节奏
+    # 解说密度目标（连续原声铺底的高密度 recap 风格；写入 brief 并由 lint 检查）
+    "target_segments_per_minute": 9.6,   # 目标解说密度（段/分钟）
+    "min_segments_per_minute": 6.24,     # 低于此密度时 lint 警告
+    "max_narration_gap_seconds": 11.0,   # 相邻解说段最大间隔；超过则 lint 警告（保持连续铺底）
+    "ducking_mode": "fixed",  # fixed | sidechaincompress | none
+    "ducking_threshold": 0.15,
+    "ducking_ratio": 3,
+    "ducking_attack": 10,
+    "ducking_release": 300,
+    "ducking_level_sc": 2.0,
+    "ducking_makeup": 1.2,
+    "ducking_narr_weight": 1.5,
+    "ducking_orig_volume": 0.5,
+    "zone_ducking_volume": 0.12,    # 解说时原声压低到的音量
+    "zone_fade_seconds": 0.5,      # 解说/原声切换的淡入淡出时长(秒)
+    "narration_delay_seconds": 1.5,  # 解说延迟放置秒数，让画面先出现再解说
+    "narration_tail_pad_seconds": 0.1,  # 解说尾部最少留白；短 slot 会自动压低 delay 避免截断
+    "quiet_overlap_min_ratio": 0.8,  # 解说段至少多少比例落在安静窗口内才标记为非对白重叠
+    "visual_beat_max_seconds": 18.0,  # 单段解说超过该时长且跨多个帧锚点时给 lint 提醒
+    "visual_beat_max_facts": 3,  # 单段解说最多建议覆盖的 frame_facts 锚点数量
+    "asr_chunk_min_chars": env_int("ASR_CHUNK_MIN_CHARS", 500, minimum=1),  # brief 中 ASR 写作分块最小字数/词数
+    "asr_chunk_max_chars": env_int("ASR_CHUNK_MAX_CHARS", 800, minimum=1),  # brief 中 ASR 写作分块最大字数/词数
+    "speech_ducking_volume": 0.2,    # 解说与对白重叠时原声音量
+    "silence_noise_threshold": "-25dB",  # ffmpeg silencedetect 噪声阈值
+    "silence_min_duration": 0.3,     # 静音最短持续秒数
+    "quiet_window_min": 1.0,         # 可放解说的安静窗口最短秒数
+    "silence_merge_gap": 0.5,        # 相邻静音段间隔<此值时合并
+    "scene_merge_min": 4.0,         # 场景合并最短时长，<此值的场景合并到相邻场景
+    "scene_junk_filter": env_bool("SCENE_JUNK_FILTER", True),  # 过滤连续黑/白帧无效过渡场景
+    "scene_junk_dark_luma": env_float("SCENE_JUNK_DARK_LUMA", 8.0, minimum=0.0),
+    "scene_junk_bright_luma": env_float("SCENE_JUNK_BRIGHT_LUMA", 245.0, minimum=0.0),
+    "scene_junk_pixel_ratio": env_float("SCENE_JUNK_PIXEL_RATIO", 0.995, minimum=0.0),
+    "context_info": "",              # 额外上下文（节目名、角色名等）
+    "context_info_source": "default",
+    "fps_source": "default",
+    "style": "纪录片",               # 解说风格（resume 时随 run_settings 持久化/恢复）
+    "style_source": "default",
+    "tts_dynamic_params": True,  # 启用动态语速调节
+    "vlm_workers": env_int("VLM_WORKERS", 8, minimum=1),  # VLM 并行分析线程数
+    "tts_workers": env_int("TTS_WORKERS", 4, minimum=1),  # TTS 并行合成线程数
+    "tts_timeout": env_int("TTS_TIMEOUT", 90, minimum=1),  # 单段 TTS 命令超时秒数
+    "tts_retries": env_int("TTS_RETRIES", 3, minimum=1),  # 单段 TTS 失败重试次数
+    "allow_partial_tts": env_bool("ALLOW_PARTIAL_TTS", False),
+    "edit_mode": os.environ.get("EDIT_MODE", "full"),  # full | cut
+    "edit_mode_source": "env" if os.environ.get("EDIT_MODE") else "default",
+    "target_duration": os.environ.get("TARGET_DURATION", ""),  # cut 模式目标成片时长，如 10m
+    "target_duration_source": "env" if os.environ.get("TARGET_DURATION") else "default",
+    "clip_padding": env_float("CLIP_PADDING", 0.0, minimum=0.0),  # cut 模式片段两端扩展秒数
+    "clip_padding_source": "env" if os.environ.get("CLIP_PADDING") else "default",
+    "allow_clip_overlap": env_bool("ALLOW_CLIP_OVERLAP", False),  # cut 模式是否允许重复/重叠使用原片
+    "burn_subtitles": False,  # 烧录字幕到视频（需要重编码）
+    "force_video_reencode": env_bool("FORCE_VIDEO_REENCODE", False),  # 组装时重编码视频，修复部分容器时间戳问题
+    # 成片末端整体响度归一（默认混音偏轻，归一后更接近常见短视频响度；样片约 -11.9，默认取更安全的 -14）
+    "final_loudnorm": env_bool("FINAL_LOUDNORM", True),  # 组装末端做一次整体响度归一
+    "target_lufs": env_float("TARGET_LUFS", -14.0),       # 目标综合响度 (LUFS)
+    "target_true_peak": env_float("TARGET_TRUE_PEAK", -1.0),  # 目标真峰值 (dBTP)
+    "target_lra": env_float("TARGET_LRA", 11.0),          # 目标响度范围 (LU)
+    "subtitle_font_name": os.environ.get("SUBTITLE_FONT_NAME", "Arial"),
+    "subtitle_font_size": env_int("SUBTITLE_FONT_SIZE", 42, minimum=8),
+    "subtitle_primary_color": os.environ.get("SUBTITLE_PRIMARY_COLOR", "&H00FFFFFF"),
+    "subtitle_outline_color": os.environ.get("SUBTITLE_OUTLINE_COLOR", "&H00000000"),
+    "subtitle_outline": env_float("SUBTITLE_OUTLINE", 2.0, minimum=0.0),
+    "subtitle_shadow": env_float("SUBTITLE_SHADOW", 1.0, minimum=0.0),
+    "subtitle_margin_v": env_int("SUBTITLE_MARGIN_V", 48, minimum=0),
+    "subtitle_margin_l": env_int("SUBTITLE_MARGIN_L", 40, minimum=0),
+    "subtitle_margin_r": env_int("SUBTITLE_MARGIN_R", 40, minimum=0),
+    "subtitle_alignment": env_int("SUBTITLE_ALIGNMENT", 2, minimum=1),
+    "subtitle_max_chars": env_int("SUBTITLE_MAX_CHARS", 20, minimum=6),
+    "subtitle_play_res_x": env_int("SUBTITLE_PLAY_RES_X", 1280, minimum=1),
+    "subtitle_play_res_y": env_int("SUBTITLE_PLAY_RES_Y", 720, minimum=1),
+}
+
+SCRIPT_DIR = Path(__file__).parent
+PROMPTS_DIR = SCRIPT_DIR.parent / "references"
+
+def log(msg):
+    print(f"[video-recap] {msg}", flush=True)

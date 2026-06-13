@@ -1,0 +1,58 @@
+---
+name: video-understanding
+description: >
+ Analyze a video into a structured understanding index: scene detection, ASR transcript,
+ per-scene visual (VLM) analysis, silence windows, a fused timeline, and a narration-writing
+ brief. Use to understand / index / summarize what happens in a video, or as the first stage
+ of the video-recap bundle before writing narration. Input: a video file. Output: scenes.json,
+ asr_result.json, vlm_analysis.json, silence_periods.json, timeline_fusion.json,
+ agent_narration_brief.md. 触发词: 视频理解, 视频分析, 视频索引, video understanding, analyze video, 看懂视频.
+---
+
+## What this does
+
+Turns a source video into an **understanding index** an agent (or a downstream stage) can read:
+1. **Scene detection** — `scenes.json` (cut points, durations) + junk-scene filtering.
+2. **Frame extraction** — sampled frames for the visual analysis.
+3. **ASR** — `asr_result.json` (timestamped dialogue) via `qwen3-asr-rs`.
+4. **Silence detection** — `silence_periods.json` (quiet windows, `has_speech` flag).
+5. **VLM analysis** — `vlm_analysis.json` (per-scene description, depth analysis, `frame_facts`).
+6. **Timeline fusion + brief** — `timeline_fusion.json`, `asr_writing_chunks.json`, `agent_narration_brief.md`.
+
+Stateless: a stage is skipped only if its output exists and is newer than its input. `--force` recomputes.
+
+## Requirements
+
+```bash
+brew install ffmpeg
+export OPENAI_API_KEY=***          # frame VLM (or MIMO_API_KEY for the MiMo path)
+export OPENAI_MODEL=doubao-seed-2-0-lite-260428
+```
+
+ASR needs `qwen3-asr-rs` (`ASR_BIN` / `ASR_MODEL_DIR`); without it, run `--skip-asr`.
+Optional MiMo scene-chunk video understanding: `--mimo-video-overview` (needs `MIMO_API_KEY`).
+
+## Run
+
+```bash
+python3 scripts/understand.py <video> --work-dir <work_dir> \
+  [--context "节目名/角色名"] [--scene-threshold 0.1] [--skip-asr] [--mimo-video-overview] [--force]
+```
+
+## Output contract
+
+| File | Content |
+|------|---------|
+| `scenes.json` | scene cut list (start/end/duration) |
+| `asr_result.json` | `[{start, end, text}]` timestamped transcript |
+| `vlm_analysis.json` | per-scene description / depth / `frame_facts` |
+| `silence_periods.json` | `[{start, end, duration, has_speech}]` quiet windows |
+| `timeline_fusion.json` | VLM + ASR + silence overlap, unified timeline |
+| `asr_writing_chunks.json` | ASR split at sentence boundaries, scene-aligned |
+| `agent_narration_brief.md` | the human/agent-facing writing brief (read this first) |
+
+Downstream, **video-script** reads the brief + index to write `narration.json`.
+
+## References
+- Background research before writing: `references/research-guide.md` (writes `background_research.json`).
+- Output JSON shapes: `references/data-schema.md`.
