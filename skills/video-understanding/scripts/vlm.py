@@ -375,6 +375,21 @@ def _analyze_mimo_video_chunk(chunk_path, chunk):
     }
 
 
+_MIMO_REJECTION_MARKERS = (
+    "request was rejected", "considered high risk", "high risk",
+    "content policy", "cannot process", "无法处理", "内容审核", "违规",
+)
+
+
+def _is_mimo_chunk_usable(content):
+    """A chunk is usable only if MiMo returned real analysis (not empty / a moderation refusal)."""
+    text = str(content or "").strip()
+    if not text:
+        return False
+    low = text.lower()
+    return not any(marker in low for marker in _MIMO_REJECTION_MARKERS)
+
+
 def analyze_video_overview(video_path, work_dir, scenes=None):
     """Use MiMo video understanding over local ffmpeg scene chunks."""
     if not CONFIG.get("mimo_video_overview", False):
@@ -417,10 +432,19 @@ def analyze_video_overview(video_path, work_dir, scenes=None):
         done[cache_key] = chunk_result
         _save_mimo_partial(partial_path, done)
 
+    usable = sum(1 for it in chunk_results if _is_mimo_chunk_usable(it.get("content")))
+    if usable == 0:
+        log(f"MiMo 视频概览：{len(chunk_results)} 段均无有效内容（疑似被内容审核拦截），跳过概览")
+        try:
+            partial_path.unlink()
+        except OSError:
+            pass
+        return None
+
     content = "\n\n".join(
         f"### 分片 {item['chunk_id'] + 1} "
         f"(scene {item['scene_id']}, {item['start']:.1f}-{item['end']:.1f}s)\n"
-        f"{item.get('content', '').strip() or '(MiMo 未返回内容)'}"
+        f"{item['content'].strip() if _is_mimo_chunk_usable(item.get('content')) else '(MiMo 未返回内容)'}"
         for item in chunk_results
     )
 

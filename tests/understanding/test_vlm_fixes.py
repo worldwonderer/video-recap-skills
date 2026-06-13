@@ -260,3 +260,42 @@ def test_full_success_writes_canonical_file_without_partial(monkeypatch, tmp_pat
     assert overview["input"] == "scene_chunks"
     assert (tmp_path / "mimo_video_overview.json").exists()
     assert not (tmp_path / "mimo_video_overview.partial.json").exists()
+
+
+def test_all_rejected_chunks_skip_overview(monkeypatch, tmp_path):
+    """When MiMo rejects every chunk (content moderation), the overview degrades gracefully:
+    return None, write no canonical file, leave no partial — instead of polluting the brief."""
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake-video")
+    monkeypatch.setitem(CONFIG, "mimo_video_overview", True)
+    monkeypatch.setitem(CONFIG, "mimo_video_api_key", "secret")
+    monkeypatch.setitem(CONFIG, "mimo_video_model", "mimo-v2.5")
+    monkeypatch.setitem(CONFIG, "vlm_model", "doubao")
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_max_seconds", 2)
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_min_seconds", 0.5)
+
+    def fake_extract(video_path, chunk, output_path):
+        output_path.write_bytes(b"x")
+        return output_path
+
+    def rejected(chunk_path, chunk):
+        return {"chunk_id": chunk["chunk_id"], "scene_id": chunk["scene_id"],
+                "start": chunk["start"], "end": chunk["end"], "model": "mimo-v2.5",
+                "content": "The request was rejected because it was considered high risk",
+                "reasoning_content": "", "usage": {}, "clip_path": "x"}
+
+    monkeypatch.setattr("vlm._extract_video_chunk", fake_extract)
+    monkeypatch.setattr("vlm._analyze_mimo_video_chunk", rejected)
+
+    overview = analyze_video_overview(video, tmp_path, [{"scene_id": 1, "start": 0.0, "end": 3.0}])
+    assert overview is None
+    assert not (tmp_path / "mimo_video_overview.json").exists()
+    assert not (tmp_path / "mimo_video_overview.partial.json").exists()
+
+
+def test_is_mimo_chunk_usable():
+    from vlm import _is_mimo_chunk_usable
+    assert _is_mimo_chunk_usable("范闲在竹林中打斗，剑光凌厉") is True
+    assert _is_mimo_chunk_usable("") is False
+    assert _is_mimo_chunk_usable("The request was rejected because it was considered high risk") is False
+    assert _is_mimo_chunk_usable("内容审核未通过") is False
