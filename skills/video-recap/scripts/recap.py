@@ -41,6 +41,8 @@ def main():
     ap.add_argument("--target-duration", default=None)
     ap.add_argument("--skip-asr", action="store_true")
     ap.add_argument("--mimo-video-overview", action="store_true")
+    ap.add_argument("--consolidate", action="store_true", help="build understanding index (Pass B)")
+    ap.add_argument("--consolidate-asr", action="store_true", help="also clean ASR (Pass A)")
     ap.add_argument("--voice", default=None, help="edge-tts voice")
     ap.add_argument("--mimo-tts-voice", default=None, help="MiMo TTS voice")
     ap.add_argument("--tts-engine", default=None, help="auto | edge-tts | mimo-tts")
@@ -74,6 +76,10 @@ def main():
             uargs.append("--skip-asr")
         if args.mimo_video_overview:
             uargs.append("--mimo-video-overview")
+        if args.consolidate:
+            uargs.append("--consolidate")
+        if args.consolidate_asr:
+            uargs.append("--consolidate-asr")
         _run("video-understanding", "understand.py", *uargs)
         brief = work_dir / "agent_narration_brief.md"
         cont = f"python3 {_entry('video-recap', 'recap.py')} {video} --work-dir {work_dir}"

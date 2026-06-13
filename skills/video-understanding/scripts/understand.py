@@ -38,6 +38,8 @@ def main():
     ap.add_argument("--skip-asr", action="store_true")
     ap.add_argument("--mimo-video-overview", action="store_true")
     ap.add_argument("--force", action="store_true", help="ignore cached artifacts and recompute")
+    ap.add_argument("--consolidate", action="store_true", help="build the global understanding index (Pass B)")
+    ap.add_argument("--consolidate-asr", action="store_true", help="also clean the ASR transcript (Pass A)")
     args = ap.parse_args()
 
     video = args.video
@@ -123,6 +125,14 @@ def main():
                 analyze_video_overview(video, work_dir, scenes)
             except Exception as e:
                 log(f"MiMo 分片视频概览失败（忽略）: {e}")
+
+    # optional consolidation (整理): build the understanding index before the brief folds it in
+    if args.consolidate or args.consolidate_asr:
+        from consolidate import consolidate
+        try:
+            consolidate(work_dir, do_asr=args.consolidate_asr, do_index=True)
+        except Exception as e:
+            log(f"consolidate 跳过（忽略）: {e}")
 
     # understanding substrate warning + writing brief
     substrate = assess_understanding_substrate(vlm_analysis, asr_result)

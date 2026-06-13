@@ -973,6 +973,105 @@ def _format_timeline_fusion_for_brief(fusion, max_items=40):
     return lines
 
 
+def _load_consolidation(work_dir):
+    """Load consolidate.py's understanding_index.json if present, else {}."""
+    path = Path(work_dir) / "understanding_index.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _format_consolidation(index):
+    """Render consolidate.py's understanding_index.json into a compact brief section."""
+    if not index:
+        return []
+    lines = ["## Understanding index (from consolidate.py)", ""]
+    chars = index.get("characters") or []
+    if chars:
+        lines.append("- Characters:")
+        for c in chars:
+            if isinstance(c, dict):
+                lines.append(f"    - {c.get('name', '?')}: {str(c.get('description', '')).strip()}")
+            else:
+                lines.append(f"    - {c}")
+    rels = index.get("relationships") or []
+    if rels:
+        lines.append("- Relationships:")
+        for r in rels:
+            if isinstance(r, dict):
+                lines.append(f"    - {r.get('a', '?')} — {r.get('relation', '?')} — {r.get('b', '?')}")
+            else:
+                lines.append(f"    - {r}")
+    plot = index.get("plot_points") or []
+    if plot:
+        lines.append("- Plot spine:")
+        lines.extend(f"    {i + 1}. {p}" for i, p in enumerate(plot))
+    ents = index.get("entities") or []
+    if ents:
+        lines.append(f"- Entities: {', '.join(str(e) for e in ents)}")
+    lines.append("")
+    return lines
+
+
+# Span tolerance for the clean-ASR timing guard. MUST equal consolidate._ASR_SPAN_TOL
+# (this file cannot import consolidate without breaking brief/narration byte-parity).
+_ASR_SPAN_TOL = 0.05
+
+
+def _clean_asr_fresh(out_path, source_path):
+    # canonical: understand._fresh — inlined so video-script's byte-identical narration.py
+    # copy (which cannot import a video-understanding module) stays in lockstep.
+    try:
+        return out_path.exists() and source_path.exists() and (
+            out_path.stat().st_mtime >= source_path.stat().st_mtime)
+    except OSError:
+        return False
+
+
+def _load_clean_asr(work_dir, asr_result):
+    """Return consolidate.py's cleaned ASR segments, or None to fall back to raw asr_result.
+    Gated on parse + non-empty + freshness + provenance(source_md5) + timing invariant
+    (len== first, then per-segment spans within _ASR_SPAN_TOL)."""
+    base = [s for s in (asr_result or []) if isinstance(s, dict)]
+    if not base:
+        return None
+    work_dir = Path(work_dir)
+    clean_path = work_dir / "asr_clean.json"
+    src_path = work_dir / "asr_result.json"
+    if not clean_path.exists() or not _clean_asr_fresh(clean_path, src_path):
+        return None
+    try:
+        payload = json.loads(clean_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    segments = payload.get("segments")
+    if not isinstance(segments, list) or len(segments) != len(base):
+        return None
+    try:
+        import hashlib
+        if payload.get("source_md5") != hashlib.md5(src_path.read_bytes()).hexdigest():
+            return None
+    except OSError:
+        return None
+    for orig, clean in zip(base, segments):
+        if not isinstance(clean, dict):
+            return None
+        try:
+            if abs(float(clean.get("start")) - float(orig.get("start"))) > _ASR_SPAN_TOL:
+                return None
+            if abs(float(clean.get("end")) - float(orig.get("end"))) > _ASR_SPAN_TOL:
+                return None
+        except (TypeError, ValueError):
+            return None
+    return segments
+
+
 def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_duration, work_dir, style="纪录片"):
     """Write a compact brief that tells the agent exactly how to author recap artifacts."""
     effective_rate = CONFIG["speech_rate"] * CONFIG["speech_safety_margin"]
@@ -1006,8 +1105,10 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
     substrate = assess_understanding_substrate(scenes_analysis, asr_result)
     lines.extend(_format_substrate_warning(substrate))
     lines.extend(_format_background_research(_load_background_research(work_dir)))
+    lines.extend(_format_consolidation(_load_consolidation(work_dir)))
 
-    asr_chunks = _chunk_asr_for_writing(asr_result, scenes_analysis)
+    asr_for_chunks = _load_clean_asr(work_dir, asr_result) or asr_result
+    asr_chunks = _chunk_asr_for_writing(asr_for_chunks, scenes_analysis)
     timeline_fusion = _build_timeline_fusion(scenes_analysis, asr_result, silence_periods)
     _write_json_artifact(work_dir, "asr_writing_chunks.json", asr_chunks)
     _write_json_artifact(work_dir, "timeline_fusion.json", timeline_fusion)
