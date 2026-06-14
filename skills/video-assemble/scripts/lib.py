@@ -204,6 +204,9 @@ CONFIG = {
     "idle_orig_volume": env_float("IDLE_ORIG_VOLUME", 0.85, minimum=0.0),  # 解说间隙(无旁白)时的原声音量，铺底避免顿挫
     "duck_fade_seconds": env_float("DUCK_FADE_SECONDS", 0.25, minimum=0.0),  # 原声 ducking 过渡淡入淡出(秒)
     "bgm_path": os.environ.get("BGM_PATH", "").strip(),  # 背景音乐文件(可选)，留空则不加 BGM
+    "source_video": os.environ.get("SOURCE_VIDEO", "").strip(),  # 剪辑模式下的原始视频(可选)，用于时间线/剪映导出引用原片片段
+    "export_jianying": env_bool("EXPORT_JIANYING", False),  # 渲染后可选导出剪映草稿(默认关；与核心解耦)
+    "jianying_draft_dir": os.environ.get("JIANYING_DRAFT_DIR", "").strip(),  # 剪映草稿输出父目录(留空=work_dir)
     "bgm_volume": env_float("BGM_VOLUME", 0.18, minimum=0.0),  # BGM 铺底音量
     "bgm_ducking_volume": env_float("BGM_DUCKING_VOLUME", 0.10, minimum=0.0),  # 旁白时 BGM 压低到的音量
     "narration_speed": env_float("NARRATION_SPEED", 1.2, minimum=0.5),  # 解说整体提速(atempo)，默认偏快适配短视频；长片可设 1.0

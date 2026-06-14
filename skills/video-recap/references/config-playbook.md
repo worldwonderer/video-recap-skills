@@ -29,5 +29,12 @@ bundle ships no root `CLAUDE.md` (so it never collides with your project/global 
 | VLM workers | `VLM_WORKERS` | `8` | lower to 1 if a proxy/WAF rate-limits |
 | Subtitle size | `SUBTITLE_FONT_SIZE` / `SUBTITLE_MARGIN_V` | `42` / `48` | look & placement |
 | 整理 / index | `--consolidate` / `--consolidate-asr` | off | build the understanding index (and optionally clean ASR) |
+| 剪映 export (optional) | `--export-jianying` / `EXPORT_JIANYING` | off | after rendering, also write a 剪映/JianYing draft from `timeline.json`. Decoupled — the core render never needs it |
+| 剪映 draft dir | `JIANYING_DRAFT_DIR` | work_dir | parent folder for the exported draft |
+| Source video | `--source-video` / `SOURCE_VIDEO` | — | original video (cut mode) so `timeline.json` / 剪映 export reference the real source clips instead of the concatenated `edited_source.mp4` |
+
+`video-assemble` always writes `timeline.json` — a backend-neutral multi-track model
+(video / original-audio / narration / BGM / subtitle, with ducking automation). The
+canonical renderer is ffmpeg; the 剪映 exporter is an optional consumer of the same file.
 
 See each stage skill's SKILL.md for the full per-stage option list.

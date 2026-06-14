@@ -5,8 +5,109 @@ from pathlib import Path
 
 from lib import CONFIG
 from lib import log, run_cmd, get_video_duration
+from timeline import build_timeline, save_timeline
 
 SUBTITLE_RENDER_VERSION = 1
+
+
+def _probe_canvas(video_path):
+    """Return {width, height, fps} for a video via ffprobe (best-effort defaults)."""
+    res = run_cmd(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                   "-show_entries", "stream=width,height,r_frame_rate",
+                   "-of", "default=nw=1:nk=0", str(video_path)])
+    width, height, fps = 1280, 720, 30.0
+    if res.returncode == 0:
+        for line in res.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("width="):
+                width = int(line.split("=", 1)[1] or width)
+            elif line.startswith("height="):
+                height = int(line.split("=", 1)[1] or height)
+            elif line.startswith("r_frame_rate="):
+                rate = line.split("=", 1)[1]
+                if "/" in rate:
+                    num, den = rate.split("/", 1)
+                    if float(den or 0):
+                        fps = round(float(num) / float(den), 3)
+    return {"width": width, "height": height, "fps": fps}
+
+
+def _build_video_clips(input_video, work_dir, duration_s):
+    """Video-track clips for the timeline.
+
+    In cut mode (a clip_plan.json + a known original source) each plan entry
+    becomes a clip referencing the ORIGINAL source range, so an editor sees the
+    real cuts. Otherwise (or full mode) the rendered input is a single clip.
+    """
+    source_video = CONFIG.get("source_video", "")
+    plan_path = Path(work_dir) / "clip_plan.json"
+    if source_video and os.path.exists(source_video) and plan_path.exists():
+        try:
+            import json
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            entries = plan.get("clips", plan) if isinstance(plan, dict) else plan
+            clips, cursor = [], 0.0
+            for c in entries:
+                ss, se = float(c["start"]), float(c["end"])
+                dur = max(0.0, se - ss)
+                if dur <= 0:
+                    continue
+                clips.append({"source_path": source_video, "source_start": ss,
+                              "source_end": se, "timeline_start": cursor,
+                              "timeline_end": cursor + dur})
+                cursor += dur
+            if clips:
+                return clips
+        except (ValueError, KeyError, OSError) as exc:
+            log(f"  时间线: clip_plan 解析失败，回退单片 ({exc})")
+    return [{"source_path": str(input_video), "source_start": 0.0,
+             "source_end": float(duration_s), "timeline_start": 0.0,
+             "timeline_end": float(duration_s)}]
+
+
+def _emit_timeline(input_video, tts_segments, work_dir, duration_s, has_bgm):
+    """Build and persist the backend-neutral multi-track timeline.json (best-effort)."""
+    try:
+        canvas = _probe_canvas(input_video)
+        video_clips = _build_video_clips(input_video, work_dir, duration_s)
+        narration_segments = []
+        for seg in tts_segments:
+            if not isinstance(seg, dict):
+                continue
+            s, e = _seg_place_window(seg)
+            if e <= s:
+                continue
+            narration_segments.append({
+                "source_path": seg.get("audio_path", ""),
+                "timeline_start": s, "timeline_end": e,
+                "text": seg.get("narration", ""),
+                "overlaps_speech": seg.get("overlaps_speech", True),
+                "gain": 1.0,
+            })
+        fade = CONFIG.get("duck_fade_seconds", 0.25)
+        bgm = None
+        if has_bgm:
+            bgm = {"source_path": CONFIG.get("bgm_path", ""),
+                   "volume": CONFIG.get("bgm_volume", 0.18),
+                   "ducking_volume": CONFIG.get("bgm_ducking_volume", 0.10),
+                   "fade": fade}
+        # carry ducking automation whenever ducking is on at all; even under sidechain
+        # mode the draft gets editable volume keyframes (ffmpeg stays the canonical mix)
+        ducking = None
+        if CONFIG.get("ducking_mode", "fixed") != "none":
+            ducking = {"idle": CONFIG.get("idle_orig_volume", 0.85),
+                       "speech": CONFIG.get("speech_ducking_volume", 0.2),
+                       "quiet": CONFIG.get("zone_ducking_volume", 0.12),
+                       "fade": fade}
+        timeline = build_timeline(canvas, duration_s, video_clips,
+                                  narration_segments, bgm=bgm, ducking=ducking)
+        out = Path(work_dir) / "timeline.json"
+        save_timeline(timeline, out)
+        log(f"时间线模型: {out} ({len(timeline['tracks'])} 轨)")
+        return timeline
+    except Exception as exc:  # never let timeline emission break the render
+        log(f"  ⚠️ 时间线生成失败（不影响成片）: {exc}")
+        return None
 
 
 def _seconds_to_srt_time(seconds):
@@ -418,6 +519,9 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
     elif has_bgm:
         log(f"BGM 铺底: {bgm_path} (音量 {CONFIG.get('bgm_volume', 0.18)}，旁白时 {CONFIG.get('bgm_ducking_volume', 0.10)})")
 
+    # 多轨时间线模型（timeline.json）：canonical 渲染仍是 ffmpeg，此模型供检视/可选导出
+    _emit_timeline(input_video, tts_segments, work_dir, video_duration, has_bgm)
+
     # 混合原始音频 + 解说音频（+ 可选 BGM）
     filter_complex = _build_audio_filter_complex(tts_segments, has_bgm)
 
@@ -698,10 +802,19 @@ def main():
     ap.add_argument("--recap-stem", default=None, help="final recap filename stem (default: video stem)")
     ap.add_argument("--output-dir", default=None)
     ap.add_argument("--burn-subtitles", action="store_true")
+    ap.add_argument("--source-video", default=None,
+                    help="original source video (cut mode) so timeline.json / 剪映 export reference the real clips")
+    ap.add_argument("--export-jianying", action="store_true",
+                    help="also export an OPTIONAL 剪映/JianYing draft from timeline.json after rendering")
+    ap.add_argument("--jianying-out", default=None, help="parent dir for the 剪映 draft (default: work-dir)")
     args = ap.parse_args()
     work_dir = Path(args.work_dir)
     if args.burn_subtitles:
         CONFIG["burn_subtitles"] = True
+    if args.source_video:
+        CONFIG["source_video"] = args.source_video
+    if args.export_jianying:
+        CONFIG["export_jianying"] = True
     tts_meta = Path(args.tts_meta) if args.tts_meta else work_dir / "tts_meta.json"
     tts_segments = json.loads(tts_meta.read_text(encoding="utf-8"))["segments"]
     output_path = work_dir / "output.mp4"
@@ -712,8 +825,33 @@ def main():
     if final_output != output_path:
         shutil.copy2(str(output_path), str(final_output))
     log(f"组装完成: {final_output}")
+
+    # OPTIONAL, decoupled: export a 剪映 draft from the timeline (lazy import; never
+    # required by the core render path).
+    if CONFIG.get("export_jianying"):
+        _maybe_export_jianying(work_dir, args.jianying_out, stem)
+
     print(json.dumps({"status": "assembled", "output": str(final_output), "work_dir": str(work_dir)},
                      ensure_ascii=False))
+
+
+def _maybe_export_jianying(work_dir, out_dir, stem):
+    """Lazy-import the optional 剪映 exporter and write a draft from timeline.json."""
+    timeline_path = Path(work_dir) / "timeline.json"
+    if not timeline_path.exists():
+        log("  ⚠️ 跳过剪映导出：未找到 timeline.json")
+        return
+    try:
+        from export_jianying import export_timeline_to_jianying
+        from timeline import load_timeline
+        parent = out_dir or CONFIG.get("jianying_draft_dir") or str(work_dir)
+        draft_dir, notes = export_timeline_to_jianying(
+            load_timeline(timeline_path), parent, draft_name=f"recap_{stem}")
+        for n in notes:
+            log(f"  注意: {n}")
+        log(f"剪映草稿已导出: {draft_dir}")
+    except Exception as exc:  # optional feature must never fail the render
+        log(f"  ⚠️ 剪映导出失败（不影响成片）: {exc}")
 
 
 if __name__ == "__main__":

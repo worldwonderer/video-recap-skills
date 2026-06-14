@@ -28,6 +28,7 @@ description: >
 ```bash
 python3 scripts/assemble.py <video> --work-dir <work_dir> \
   [--recap-stem <name>] [--output-dir <dir>] [--burn-subtitles]
+  [--source-video <orig.mp4>] [--export-jianying [--jianying-out <dir>]]
 ```
 
 ## Output contract
@@ -35,9 +36,12 @@ python3 scripts/assemble.py <video> --work-dir <work_dir> \
 - `recap_<stem>.mp4` — the final recap video (written to `--output-dir` or `work_dir`'s parent).
 - `work_dir/output.mp4` — the in-place render.
 - `subtitles.srt` — narration subtitles; `subtitles.ass` when `--burn-subtitles` is used.
+- `timeline.json` — backend-neutral multi-track model (video / original-audio / narration / BGM / subtitle tracks with ducking automation). Always written.
+- 剪映 draft folder (`recap_<stem>/draft_content.json` + `draft_info.json` + `draft_meta_info.json`) — only with `--export-jianying`.
 
 ## Notes
 - Audio is mixed as tracks (like a cut-software timeline): the original audio, an optional BGM bed, and the narration.
+- Optional 剪映/JianYing export: `--export-jianying` (or `EXPORT_JIANYING=1`) turns `timeline.json` into an editable 剪映 draft — original clips, separate audio tracks, and volume keyframes for the ducking. Fully decoupled and lazy-imported: the ffmpeg render never depends on it, and 剪映 need not be installed. In cut mode pass `--source-video <orig>` so the draft references the real clips. Note: the draft references the un-burned original, so the source's hardcoded subtitles are visible there (mask them in 剪映 if needed).
 - Subtitle look: `SUBTITLE_FONT_SIZE`, `SUBTITLE_MARGIN_V`, `SUBTITLE_MAX_CHARS`, etc.
 - Ducking / loudness: the original swells to `IDLE_ORIG_VOLUME` in the gaps and ducks to `SPEECH_DUCKING_VOLUME` under narration (`DUCK_FADE_SECONDS` smooths the transition); also `DUCKING_MODE`, `ZONE_DUCKING_VOLUME`, `FINAL_LOUDNORM`, `TARGET_LUFS`.
 - BGM (optional): set `BGM_PATH` to any audio file; it loops to length and ducks under narration (`BGM_VOLUME` / `BGM_DUCKING_VOLUME`).

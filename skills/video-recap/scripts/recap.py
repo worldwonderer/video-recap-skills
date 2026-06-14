@@ -46,6 +46,8 @@ def main():
     ap.add_argument("--mimo-tts-voice", default=None, help="MiMo TTS voice")
     ap.add_argument("--burn-subtitles", action="store_true")
     ap.add_argument("--output-dir", default=None)
+    ap.add_argument("--export-jianying", action="store_true",
+                    help="also export an OPTIONAL 剪映/JianYing draft (decoupled; never required)")
     ap.add_argument("--doctor", action="store_true")
     args = ap.parse_args()
 
@@ -110,6 +112,11 @@ def main():
         aargs += ["--output-dir", args.output_dir]
     if args.burn_subtitles:
         aargs.append("--burn-subtitles")
+    if cut:
+        # let the timeline / 剪映 export reference the original clips, not edited_source.mp4
+        aargs += ["--source-video", str(video)]
+    if args.export_jianying:  # env EXPORT_JIANYING is honored by assemble.py itself
+        aargs.append("--export-jianying")
     _run("video-assemble", "assemble.py", *aargs)
 
     final_dir = Path(args.output_dir) if args.output_dir else work_dir.parent

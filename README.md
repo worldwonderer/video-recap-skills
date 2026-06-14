@@ -46,7 +46,7 @@ flowchart TD
 | **video-script** | 写作规则（SKILL.md）+ 评审（LLM 评委）+ lint/校验 | `brief + 索引` → `narration.json` |
 | **video-cut** | 片段计划 → 拼剪源 + 重映射解说（剪辑模式） | `clip_plan.json + 视频` → `edited_source.mp4 + narration_mapped.json` |
 | **video-voiceover** | 合成解说音频（MiMo TTS，`mimo-v2.5-tts`） | `narration.json` → `tts_segments/ + tts_meta.json` |
-| **video-assemble** | 混音 · 压低原声 · 渲染字幕 | `视频 + tts_meta` → `recap_<名>.mp4 + subtitles.srt/.ass` |
+| **video-assemble** | 混音 · 压低原声 · 渲染字幕 · 多轨时间线（可选导出剪映） | `视频 + tts_meta` → `recap_<名>.mp4 + subtitles.srt/.ass + timeline.json` |
 | **video-recap** | 编排器 + `--doctor` | `视频` → `recap_<名>.mp4` |
 
 每个 skill 自带一份 `lib.py`（配置和工具都在里面），相互之间没有共享代码文件，JSON 产物就是唯一的接口。各 skill 的完整参数见各自的 `SKILL.md`。
@@ -62,6 +62,8 @@ flowchart TD
 可以「整理」成索引。`--consolidate` 把逐场景的 VLM 结果汇总成一份全局的人物 / 关系 / 剧情索引；`--consolidate-asr` 顺手把转写清洗一遍，时间戳不动。
 
 写完先过一道评审。`review.py` 给草稿挑毛病（幻觉、钩子、主线、密度这些），只给建议、留记录；真正卡着不放行的是 `validate.py`。
+
+多轨时间线，可选导出剪映。合成阶段会顺手产出一份后端中立的 `timeline.json`（视频 / 原声 / 解说 / BGM / 字幕 多轨，带 ducking 自动化）。想继续手动精修，就加 `--export-jianying` 把它导成剪映草稿（原片片段 + 各条音轨 + 音量关键帧）。这件事完全可选：核心渲染只靠 `ffmpeg`，不装剪映也照常出片。
 
 原声不丢。解说是把原声压低之后混进去的，不会盖掉对白和环境声。
 
@@ -148,12 +150,13 @@ python3 skills/video-recap/scripts/recap.py --doctor
 ## 参考文档
 
 - 各 skill 的契约：每个 `skills/<skill>/SKILL.md`（写作规则在 video-script 的 SKILL.md 里）
-- [数据结构](skills/video-recap/references/data-schema.md) · [配置手册](skills/video-recap/references/config-playbook.md)
+- [数据结构](skills/video-recap/references/data-schema.md) · [配置手册](skills/video-recap/references/config-playbook.md) · [多轨时间线 / 剪映导出](skills/video-recap/references/timeline-and-jianying.md)
 - [背景调研指南](skills/video-understanding/references/research-guide.md) · [VLM prompt 模板](skills/video-understanding/references/prompt-templates.md)
 
 ## 致谢
 
 - [linux.do](https://linux.do)
+- 可选的剪映草稿导出参考了开源项目 [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft)（© GuanYixuan，Apache-2.0）与 [capcut-mate](https://github.com/Hommy-master/capcut-mate)（© Hommy，Apache-2.0）的草稿结构。本仓库未内置其代码，剪映草稿 JSON 由本项目自行生成。
 
 ## 许可
 
