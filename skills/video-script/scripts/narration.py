@@ -1,8 +1,9 @@
+import hashlib
 import json
 import re
 from pathlib import Path
 
-from lib import CONFIG
+from lib import CONFIG, file_fingerprint, stable_hash
 from lib import log
 
 
@@ -500,6 +501,11 @@ def lint_narration(narration, scenes_analysis=None, *, clip_plan=None, mode="ful
             normalized.append({"index": idx, "start": start, "end": end, "char_count": char_count})
 
     sorted_segments = sorted(normalized, key=lambda item: item["start"])
+    if isinstance(narration, list) and not sorted_segments:
+        errors.append(_lint_issue(
+            "error", None, "empty_narration_file",
+            "narration.json must contain at least one valid narration segment",
+        ))
     for prev, curr in zip(sorted_segments, sorted_segments[1:]):
         if curr["start"] < prev["end"]:
             errors.append(_lint_issue(
@@ -973,16 +979,62 @@ def _format_timeline_fusion_for_brief(fusion, max_items=40):
     return lines
 
 
-def _load_consolidation(work_dir):
-    """Load consolidate.py's understanding_index.json if present, else {}."""
-    path = Path(work_dir) / "understanding_index.json"
-    if not path.exists():
+def _consolidation_model():
+    return CONFIG.get("vlm_model", "")
+
+
+def _clean_asr_prompt_fingerprint():
+    # Keep this literal in sync with consolidate.CLEAN_PROMPT without importing it;
+    # brief.py and narration.py must remain byte-identical cross-skill copies.
+    prompt = """你在清洗中文视频的 ASR 逐段转写。对【每一段】做：补标点、修明显同音/错别字、（能判断时）在句首轻标说话人，让长段连读文本变成清晰可读的句子。
+铁律：
+- 不要合并或拆分段落，输出段数必须与输入完全一致，顺序一致。
+- 不要改时间，不要输出 start/end（时间由程序保留）。
+- 只清洗 text，不要增删事实、不要脑补画面。
+只返回 JSON：{"segments":[{"i":0,"text":"清洗后的文本","speaker":"可选说话人"}, ...]}，i 为输入段的下标。"""
+    return hashlib.md5(prompt.encode("utf-8")).hexdigest()
+
+
+def _index_prompt_fingerprint():
+    prompt = """你在根据逐场景画面分析，为一个视频建立【全局理解索引】，供后续写解说词时保持人物/关系/主线一致。
+只依据给到的画面证据（场景描述 + 帧实动作），不要脑补画面之外的剧情。
+只返回 JSON：
+{"characters":[{"name":"角色名或外观指代","description":"身份/特征"}],
+ "relationships":[{"a":"角色","b":"角色","relation":"关系"}],
+ "plot_points":["按时间顺序的关键剧情节点"],
+ "entities":["重要物件/地点/线索"]}"""
+    return hashlib.md5(prompt.encode("utf-8")).hexdigest()
+
+
+def _load_consolidation(work_dir, scenes_analysis=None):
+    """Load consolidate.py's understanding_index.json only when provenance matches VLM input."""
+    work_dir = Path(work_dir)
+    path = work_dir / "understanding_index.json"
+    meta_path = work_dir / "understanding_index.json.meta.json"
+    if not path.exists() or not meta_path.exists():
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict) or not isinstance(meta, dict):
+        return {}
+    src_path = work_dir / "vlm_analysis.json"
+    try:
+        source_md5 = hashlib.md5(src_path.read_bytes()).hexdigest()
+    except OSError:
+        return {}
+    if meta.get("source_md5") != source_md5:
+        return {}
+    expected_count = len([s for s in (scenes_analysis or []) if isinstance(s, dict)])
+    if expected_count and meta.get("scene_count") != expected_count:
+        return {}
+    if meta.get("model") != _consolidation_model():
+        return {}
+    if meta.get("prompt_md5") != _index_prompt_fingerprint():
+        return {}
+    return data
 
 
 def _format_consolidation(index):
@@ -1054,10 +1106,13 @@ def _load_clean_asr(work_dir, asr_result):
     if not isinstance(segments, list) or len(segments) != len(base):
         return None
     try:
-        import hashlib
         if payload.get("source_md5") != hashlib.md5(src_path.read_bytes()).hexdigest():
             return None
     except OSError:
+        return None
+    if payload.get("model") != _consolidation_model():
+        return None
+    if payload.get("prompt_md5") != _clean_asr_prompt_fingerprint():
         return None
     for orig, clean in zip(base, segments):
         if not isinstance(clean, dict):
@@ -1072,7 +1127,130 @@ def _load_clean_asr(work_dir, asr_result):
     return segments
 
 
-def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_duration, work_dir, style="纪录片"):
+_MIMO_REJECTION_MARKERS = (
+    "request was rejected", "considered high risk", "high risk",
+    "content policy", "cannot process", "无法处理", "内容审核", "违规",
+)
+
+
+def _is_mimo_chunk_usable(content):
+    text = str(content or "").strip()
+    if not text:
+        return False
+    low = text.lower()
+    return not any(marker in low for marker in _MIMO_REJECTION_MARKERS)
+
+
+def _mimo_video_settings_fingerprint():
+    return {
+        "model": CONFIG.get("mimo_video_model") or CONFIG.get("mimo_model") or CONFIG.get("vlm_model"),
+        "mimo_video_api_url": CONFIG.get("mimo_video_api_url"),
+        "mimo_video_fps": CONFIG.get("mimo_video_fps", 2.0),
+        "mimo_media_resolution": CONFIG.get("mimo_media_resolution", "default"),
+        "mimo_video_chunk_max_seconds": CONFIG.get("mimo_video_chunk_max_seconds", 20.0),
+        "mimo_video_chunk_min_seconds": CONFIG.get("mimo_video_chunk_min_seconds", 1.0),
+        "mimo_video_base64_max_mb": CONFIG.get("mimo_video_base64_max_mb", 45.0),
+        "mimo_video_prompt": CONFIG.get("mimo_video_prompt", ""),
+        "mimo_disable_thinking": CONFIG.get("mimo_disable_thinking", True),
+    }
+
+
+def _mimo_chunk_cache_key(chunk):
+    return (
+        f"{chunk['chunk_id']}|{chunk['scene_id']}|"
+        f"{float(chunk['start']):.3f}-{float(chunk['end']):.3f}"
+    )
+
+
+def _mimo_cached_chunks_fingerprint(done):
+    return stable_hash(done)
+
+
+def _mimo_overview_payload_fingerprint(overview):
+    payload = dict(overview)
+    payload.pop("overview_fingerprint", None)
+    return stable_hash(payload)
+
+
+def _mimo_video_chunks_for_brief(scenes):
+    max_seconds = float(CONFIG.get("mimo_video_chunk_max_seconds", 20.0) or 20.0)
+    min_seconds = float(CONFIG.get("mimo_video_chunk_min_seconds", 1.0) or 1.0)
+    chunks = []
+    for scene_index, scene in enumerate(scenes or []):
+        if not isinstance(scene, dict):
+            continue
+        try:
+            start = float(scene.get("start", 0.0))
+            end = float(scene.get("end", start))
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        scene_id = scene.get("scene_id", scene_index)
+        cursor = start
+        while cursor < end:
+            chunk_end = min(end, cursor + max_seconds)
+            if end - chunk_end < min_seconds and chunk_end < end:
+                chunk_end = end
+            if chunk_end > cursor:
+                chunks.append({
+                    "chunk_id": len(chunks),
+                    "scene_id": scene_id,
+                    "start": round(cursor, 3),
+                    "end": round(chunk_end, 3),
+                })
+            cursor = chunk_end
+    return chunks
+
+
+def _mimo_overview_matches_current_inputs(overview, scenes_analysis, video_path=None):
+    if not isinstance(overview, dict) or overview.get("input") != "scene_chunks":
+        return False
+    if overview.get("settings") != _mimo_video_settings_fingerprint():
+        return False
+    overview_fingerprint = overview.get("overview_fingerprint")
+    if not overview_fingerprint or overview_fingerprint != _mimo_overview_payload_fingerprint(overview):
+        return False
+    if video_path is not None:
+        try:
+            if overview.get("source_video_fingerprint") != file_fingerprint(video_path):
+                return False
+        except OSError:
+            return False
+    chunks = overview.get("chunks")
+    if not isinstance(chunks, list) or not all(
+        isinstance(chunk, dict) and _is_mimo_chunk_usable(chunk.get("content"))
+        for chunk in chunks
+    ):
+        return False
+    chunks_fingerprint = overview.get("chunks_fingerprint")
+    if not chunks_fingerprint or chunks_fingerprint != _mimo_cached_chunks_fingerprint(chunks):
+        return False
+    expected_chunks = _mimo_video_chunks_for_brief(scenes_analysis)
+    if not expected_chunks or len(chunks) != len(expected_chunks):
+        return False
+    try:
+        cached_keys = [_mimo_chunk_cache_key(chunk) for chunk in chunks]
+        expected_keys = [_mimo_chunk_cache_key(chunk) for chunk in expected_chunks]
+    except (KeyError, TypeError, ValueError):
+        return False
+    return cached_keys == expected_keys
+
+
+def _load_mimo_overview_for_brief(work_dir, scenes_analysis, enabled=None, video_path=None):
+    overview_enabled = CONFIG.get("mimo_video_overview", False) if enabled is None else enabled
+    if not overview_enabled:
+        return {}
+    path = Path(work_dir) / "mimo_video_overview.json"
+    if not path.exists():
+        return {}
+    try:
+        overview = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return overview if _mimo_overview_matches_current_inputs(overview, scenes_analysis, video_path=video_path) else {}
+
+def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_duration, work_dir, style="纪录片", *, mimo_overview_enabled=None, mimo_overview_video_path=None):
     """Write a compact brief that tells the agent exactly how to author recap artifacts."""
     effective_rate = CONFIG["speech_rate"] * CONFIG["speech_safety_margin"]
     breath_sec = CONFIG.get("breath_ms", 250) / 1000
@@ -1083,7 +1261,6 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
     edit_mode = CONFIG.get("edit_mode", "full")
     target_duration = CONFIG.get("target_duration") or "(not set)"
     target_count = max(1, round(video_duration / 60 * target_spm))
-    mimo_overview_path = Path(work_dir) / "mimo_video_overview.json"
     lines = [
         "# Agent Narration Brief",
         "",
@@ -1105,7 +1282,7 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
     substrate = assess_understanding_substrate(scenes_analysis, asr_result)
     lines.extend(_format_substrate_warning(substrate))
     lines.extend(_format_background_research(_load_background_research(work_dir)))
-    lines.extend(_format_consolidation(_load_consolidation(work_dir)))
+    lines.extend(_format_consolidation(_load_consolidation(work_dir, scenes_analysis)))
 
     asr_for_chunks = _load_clean_asr(work_dir, asr_result) or asr_result
     asr_chunks = _chunk_asr_for_writing(asr_for_chunks, scenes_analysis)
@@ -1115,19 +1292,17 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
     lines.extend(_format_asr_chunks_for_brief(asr_chunks))
     lines.extend(_format_timeline_fusion_for_brief(timeline_fusion))
 
-    if mimo_overview_path.exists():
-        try:
-            mimo_overview = json.loads(mimo_overview_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            mimo_overview = {}
-        overview_text = (mimo_overview.get("content") or "").strip()
-        if overview_text:
-            lines.extend([
-                "## MiMo scene-chunk video overview",
-                "",
-                overview_text[:2000],
-                "",
-            ])
+    mimo_overview = _load_mimo_overview_for_brief(
+        work_dir, scenes_analysis, enabled=mimo_overview_enabled, video_path=mimo_overview_video_path,
+    )
+    overview_text = (mimo_overview.get("content") or "").strip()
+    if overview_text:
+        lines.extend([
+            "## MiMo scene-chunk video overview",
+            "",
+            overview_text[:2000],
+            "",
+        ])
 
     if edit_mode == "cut":
         lines.extend([

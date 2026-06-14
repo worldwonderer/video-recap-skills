@@ -103,14 +103,16 @@ python3 skills/video-recap/scripts/recap.py --doctor
 
 每个 skill 自带一份 `lib.py`，相互之间没有共享代码文件，JSON 产物就是唯一的接口。完整参数见各自的 `SKILL.md`。
 
+测试请运行 `python3 scripts/test.py`。不要在仓库根目录直接运行裸 `pytest`：各 skill 故意保留同名顶层模块（如 `lib.py`），需要由测试脚本按 skill 分组隔离进程。
+
 ## 输出
 
-- `recap_<video>.mp4`：成片。`subtitles.srt`（加 `--burn-subtitles` 时还有 `subtitles.ass`）
+- `recap_<video>.mp4`：成片（固定输出名，每次运行原地覆盖，迭代解说时刷新同一文件）。`subtitles.srt`（加 `--burn-subtitles` 时还有 `subtitles.ass`）
 - `work_dir/narration.json`：解说脚本（`narration_lint.json` 时间诊断、`narration_review.md` 评审意见）
 - `work_dir/agent_narration_brief.md`：给 Agent 的时间和场景 brief
 - `work_dir/vlm_analysis.json` · `asr_result.json` · `silence_periods.json` · `timeline_fusion.json`：理解产物
 - `work_dir/clip_plan.json` · `edited_source.mp4` · `narration_mapped.json`：剪辑模式产物
-- `work_dir/timeline.json` · `tts_segments/` · `tts_meta.json`：多轨时间线与 TTS 音频
+- `work_dir/timeline.json` · `work_dir/assembly_manifest.json` · `tts_segments/` · `tts_meta.json`：多轨时间线、渲染记录与 TTS 音频
 
 ## 参考文档
 

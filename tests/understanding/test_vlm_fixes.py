@@ -12,10 +12,13 @@ import pytest
 from lib import CONFIG
 from vlm import (
     _load_mimo_partial,
+    _mimo_cached_chunks_fingerprint,
+    _mimo_overview_payload_fingerprint,
     _mimo_chunk_cache_key,
     _save_mimo_partial,
     analyze_scenes,
     analyze_video_overview,
+    mimo_video_overview_cache_fresh,
     mimo_video_settings_fingerprint,
 )
 
@@ -105,7 +108,8 @@ def test_retry_text_keeps_frame_timestamp_header(monkeypatch, tmp_path):
 
     monkeypatch.setattr("vlm.api_call", fake_api_call)
 
-    analyze_scenes(scenes, [frame], tmp_path)
+    with pytest.raises(RuntimeError, match="VLM 分析失败"):
+        analyze_scenes(scenes, [frame], tmp_path)
 
     assert len(retry_texts) == 3
     # frame_00001.jpg @ fps=1.0 -> 1.0s ; header must appear on every attempt incl. retries
@@ -115,6 +119,40 @@ def test_retry_text_keeps_frame_timestamp_header(monkeypatch, tmp_path):
     # retry attempts also carry the explicit format reminder
     assert "请务必按格式输出，不要留空。" in retry_texts[1]
     assert "请务必按格式输出，不要留空。" in retry_texts[2]
+
+
+def test_scene_api_failure_does_not_write_placeholder_cache(monkeypatch, tmp_path):
+    """Transient VLM failures must fail the stage instead of caching placeholder analysis."""
+    frame = _make_frame(tmp_path)
+    scenes = [{"start": 0.0, "end": 1.0}]
+
+    monkeypatch.setitem(CONFIG, "fps", 1.0)
+    monkeypatch.setitem(CONFIG, "vlm_model", "mimo-v2.5")
+    monkeypatch.setitem(CONFIG, "vlm_workers", 1)
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    monkeypatch.setattr("vlm.api_call", lambda payload: (_ for _ in ()).throw(RuntimeError("quota")))
+
+    with pytest.raises(RuntimeError, match="VLM 分析失败"):
+        analyze_scenes(scenes, [frame], tmp_path)
+
+    assert not (tmp_path / "vlm_analysis.json").exists()
+
+
+def test_all_empty_scene_responses_do_not_write_placeholder_cache(monkeypatch, tmp_path):
+    """Repeated empty VLM responses are not a successful analysis cache."""
+    frame = _make_frame(tmp_path)
+    scenes = [{"start": 0.0, "end": 1.0}]
+
+    monkeypatch.setitem(CONFIG, "fps", 1.0)
+    monkeypatch.setitem(CONFIG, "vlm_model", "mimo-v2.5")
+    monkeypatch.setitem(CONFIG, "vlm_workers", 1)
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    monkeypatch.setattr("vlm.api_call", lambda payload: {"choices": [{"message": {"content": ""}}]})
+
+    with pytest.raises(RuntimeError, match="VLM 分析失败"):
+        analyze_scenes(scenes, [frame], tmp_path)
+
+    assert not (tmp_path / "vlm_analysis.json").exists()
 
 
 # ── BUG 5: 增量分片缓存往返 + 失败保留已付费分片 ───────────────────────────
@@ -135,6 +173,62 @@ def test_partial_cache_roundtrip_invalidates_on_settings_change(monkeypatch, tmp
     # changing a fingerprinted setting invalidates the whole partial
     monkeypatch.setitem(CONFIG, "mimo_video_chunk_max_seconds", 99)
     assert _load_mimo_partial(partial_path) == {}
+
+
+
+
+
+def test_partial_cache_rejects_payload_mutation(tmp_path):
+    """Partial cache metadata must not trust edited chunk JSON as paid fresh content."""
+    partial_path = tmp_path / "mimo_video_overview.partial.json"
+    chunk = {"chunk_id": 0, "scene_id": 7, "start": 0.0, "end": 2.0}
+    key = _mimo_chunk_cache_key(chunk)
+    done = {key: {"chunk_id": 0, "scene_id": 7, "content": "original paid chunk"}}
+
+    _save_mimo_partial(partial_path, done)
+    payload = json.loads(partial_path.read_text(encoding="utf-8"))
+    payload["chunks"][key]["content"] = "tampered but non-empty"
+    partial_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert _load_mimo_partial(partial_path) == {}
+
+
+def test_partial_cache_rejects_source_video_mismatch(monkeypatch, tmp_path):
+    """Incremental MiMo chunks from another source video must not be reused."""
+    old_video = tmp_path / "old.mp4"
+    new_video = tmp_path / "new.mp4"
+    old_video.write_bytes(b"old-video")
+    new_video.write_bytes(b"new-video")
+    scenes = [{"scene_id": 7, "start": 0.0, "end": 2.0}]
+    partial_path = tmp_path / "mimo_video_overview.partial.json"
+    chunk = {"chunk_id": 0, "scene_id": 7, "start": 0.0, "end": 2.0}
+    key = _mimo_chunk_cache_key(chunk)
+    done = {key: {"chunk_id": 0, "scene_id": 7, "content": "old paid chunk"}}
+
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_max_seconds", 2)
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_min_seconds", 0.5)
+    _save_mimo_partial(partial_path, done, old_video, scenes)
+
+    assert _load_mimo_partial(partial_path, old_video, scenes) == done
+    assert _load_mimo_partial(partial_path, new_video, scenes) == {}
+
+
+def test_partial_cache_rejects_scene_chunk_mismatch(monkeypatch, tmp_path):
+    """Incremental MiMo chunks must be tied to the current scene/chunk plan."""
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    old_scenes = [{"scene_id": 7, "start": 0.0, "end": 2.0}]
+    new_scenes = [{"scene_id": 7, "start": 0.0, "end": 4.0}]
+    partial_path = tmp_path / "mimo_video_overview.partial.json"
+    chunk = {"chunk_id": 0, "scene_id": 7, "start": 0.0, "end": 2.0}
+    done = {_mimo_chunk_cache_key(chunk): {"chunk_id": 0, "scene_id": 7, "content": "old paid chunk"}}
+
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_max_seconds", 2)
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_min_seconds", 0.5)
+    _save_mimo_partial(partial_path, done, video, old_scenes)
+
+    assert _load_mimo_partial(partial_path, video, old_scenes) == done
+    assert _load_mimo_partial(partial_path, video, new_scenes) == {}
 
 
 def test_failed_chunk_preserves_completed_chunks_and_resume_skips(monkeypatch, tmp_path):
@@ -258,8 +352,115 @@ def test_full_success_writes_canonical_file_without_partial(monkeypatch, tmp_pat
     overview = analyze_video_overview(video, tmp_path, [{"scene_id": 1, "start": 0.0, "end": 3.0}])
 
     assert overview["input"] == "scene_chunks"
+    assert overview["source_video_fingerprint"]
+    assert mimo_video_overview_cache_fresh(tmp_path / "mimo_video_overview.json", video, [{"scene_id": 1, "start": 0.0, "end": 3.0}])
     assert (tmp_path / "mimo_video_overview.json").exists()
     assert not (tmp_path / "mimo_video_overview.partial.json").exists()
+
+
+
+def test_final_overview_cache_rejects_payload_mutation(monkeypatch, tmp_path):
+    """The final MiMo overview skip path must reject byte/content edits to cached chunks."""
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake-video")
+
+    monkeypatch.setitem(CONFIG, "mimo_video_overview", True)
+    monkeypatch.setitem(CONFIG, "mimo_video_api_key", "secret")
+    monkeypatch.setitem(CONFIG, "mimo_video_model", "mimo-v2.5")
+    monkeypatch.setitem(CONFIG, "vlm_model", "mimo-v2.5")
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_max_seconds", 2)
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_min_seconds", 0.5)
+
+    def fake_extract(video_path, chunk, output_path):
+        output_path.write_bytes(b"tiny-chunk")
+        return output_path
+
+    def fake_chunk(chunk_path, chunk):
+        return {
+            "chunk_id": chunk["chunk_id"],
+            "scene_id": chunk["scene_id"],
+            "start": chunk["start"],
+            "end": chunk["end"],
+            "model": "mimo-v2.5",
+            "content": f"分片{chunk['chunk_id']}",
+            "reasoning_content": "",
+            "usage": {},
+            "clip_path": f"mimo_video_chunks/{chunk_path.name}",
+        }
+
+    scenes = [{"scene_id": 1, "start": 0.0, "end": 3.0}]
+    monkeypatch.setattr("vlm._extract_video_chunk", fake_extract)
+    monkeypatch.setattr("vlm._analyze_mimo_video_chunk", fake_chunk)
+    analyze_video_overview(video, tmp_path, scenes)
+
+    overview_path = tmp_path / "mimo_video_overview.json"
+    payload = json.loads(overview_path.read_text(encoding="utf-8"))
+    payload["chunks"][0]["content"] = "tampered but non-empty"
+    overview_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    assert not mimo_video_overview_cache_fresh(overview_path, video, scenes)
+
+    payload["chunks_fingerprint"] = _mimo_cached_chunks_fingerprint(payload["chunks"])
+    overview_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    assert not mimo_video_overview_cache_fresh(overview_path, video, scenes)
+
+    payload["overview_fingerprint"] = _mimo_overview_payload_fingerprint(payload)
+    overview_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    assert mimo_video_overview_cache_fresh(overview_path, video, scenes)
+
+
+def test_final_overview_cache_invalidates_on_settings_source_or_chunks(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake-video")
+
+    monkeypatch.setitem(CONFIG, "mimo_video_overview", True)
+    monkeypatch.setitem(CONFIG, "mimo_video_api_key", "secret")
+    monkeypatch.setitem(CONFIG, "mimo_video_model", "mimo-v2.5")
+    monkeypatch.setitem(CONFIG, "vlm_model", "mimo-v2.5")
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_max_seconds", 2)
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_min_seconds", 0.5)
+    original_prompt = CONFIG.get("mimo_video_prompt")
+
+    def fake_extract(video_path, chunk, output_path):
+        output_path.write_bytes(b"tiny-chunk")
+        return output_path
+
+    def fake_chunk(chunk_path, chunk):
+        return {
+            "chunk_id": chunk["chunk_id"],
+            "scene_id": chunk["scene_id"],
+            "start": chunk["start"],
+            "end": chunk["end"],
+            "model": "mimo-v2.5",
+            "content": f"分片{chunk['chunk_id']}",
+            "reasoning_content": "",
+            "usage": {},
+            "clip_path": f"mimo_video_chunks/{chunk_path.name}",
+        }
+
+    scenes = [{"scene_id": 1, "start": 0.0, "end": 3.0}]
+    monkeypatch.setattr("vlm._extract_video_chunk", fake_extract)
+    monkeypatch.setattr("vlm._analyze_mimo_video_chunk", fake_chunk)
+    analyze_video_overview(video, tmp_path, scenes)
+
+    overview_path = tmp_path / "mimo_video_overview.json"
+    assert mimo_video_overview_cache_fresh(overview_path, video, scenes)
+
+    monkeypatch.setitem(CONFIG, "mimo_video_prompt", "changed prompt")
+    assert not mimo_video_overview_cache_fresh(overview_path, video, scenes)
+
+    monkeypatch.setitem(CONFIG, "mimo_video_prompt", original_prompt)
+    original_url = CONFIG.get("mimo_video_api_url")
+    monkeypatch.setitem(CONFIG, "mimo_video_api_url", "https://changed.example/v1/chat/completions")
+    assert not mimo_video_overview_cache_fresh(overview_path, video, scenes)
+
+    monkeypatch.setitem(CONFIG, "mimo_video_api_url", original_url)
+    other_video = tmp_path / "other.mp4"
+    other_video.write_bytes(b"other-video")
+    assert not mimo_video_overview_cache_fresh(overview_path, other_video, scenes)
+
+    changed_scenes = [{"scene_id": 1, "start": 0.0, "end": 5.0}]
+    assert not mimo_video_overview_cache_fresh(overview_path, video, changed_scenes)
 
 
 def test_all_rejected_chunks_skip_overview(monkeypatch, tmp_path):
@@ -299,3 +500,70 @@ def test_is_mimo_chunk_usable():
     assert _is_mimo_chunk_usable("") is False
     assert _is_mimo_chunk_usable("The request was rejected because it was considered high risk") is False
     assert _is_mimo_chunk_usable("内容审核未通过") is False
+
+
+
+def test_mixed_unusable_chunks_do_not_write_fresh_overview(monkeypatch, tmp_path):
+    """A single empty/refused MiMo chunk must remain retryable, not become a fresh final overview."""
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake-video")
+    monkeypatch.setitem(CONFIG, "mimo_video_overview", True)
+    monkeypatch.setitem(CONFIG, "mimo_video_api_key", "secret")
+    monkeypatch.setitem(CONFIG, "mimo_video_model", "mimo-v2.5")
+    monkeypatch.setitem(CONFIG, "vlm_model", "mimo-v2.5")
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_max_seconds", 2)
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_min_seconds", 0.5)
+
+    def fake_extract(video_path, chunk, output_path):
+        output_path.write_bytes(b"tiny-chunk")
+        return output_path
+
+    def mixed(chunk_path, chunk):
+        return {
+            "chunk_id": chunk["chunk_id"],
+            "scene_id": chunk["scene_id"],
+            "start": chunk["start"],
+            "end": chunk["end"],
+            "model": "mimo-v2.5",
+            "content": "" if chunk["chunk_id"] == 1 else f"分片{chunk['chunk_id']}",
+            "reasoning_content": "",
+            "usage": {},
+            "clip_path": f"mimo_video_chunks/{chunk_path.name}",
+        }
+
+    monkeypatch.setattr("vlm._extract_video_chunk", fake_extract)
+    monkeypatch.setattr("vlm._analyze_mimo_video_chunk", mixed)
+
+    scenes = [{"scene_id": 1, "start": 0.0, "end": 5.0}]
+    with pytest.raises(RuntimeError, match="部分分片无有效内容"):
+        analyze_video_overview(video, tmp_path, scenes)
+
+    assert not (tmp_path / "mimo_video_overview.json").exists()
+    partial = json.loads((tmp_path / "mimo_video_overview.partial.json").read_text(encoding="utf-8"))
+    assert len(partial["chunks"]) == 2
+    assert all(item["content"] for item in partial["chunks"].values())
+
+
+def test_final_overview_cache_rejects_unusable_cached_chunk(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake-video")
+    monkeypatch.setitem(CONFIG, "mimo_video_model", "mimo-v2.5")
+    monkeypatch.setitem(CONFIG, "vlm_model", "mimo-v2.5")
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_max_seconds", 2)
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_min_seconds", 0.5)
+    scenes = [{"scene_id": 1, "start": 0.0, "end": 3.0}]
+    chunks = [
+        {"chunk_id": 0, "scene_id": 1, "start": 0.0, "end": 2.0, "content": "有效"},
+        {"chunk_id": 1, "scene_id": 1, "start": 2.0, "end": 3.0, "content": ""},
+    ]
+    (tmp_path / "mimo_video_overview.json").write_text(json.dumps({
+        "input": "scene_chunks",
+        "content": "有效\n(MiMo 未返回内容)",
+        "chunks": chunks,
+        "chunks_fingerprint": _mimo_cached_chunks_fingerprint(chunks),
+        "overview_fingerprint": "stale",
+        "source_video_fingerprint": __import__("vlm").file_fingerprint(video),
+        "settings": mimo_video_settings_fingerprint(),
+    }), encoding="utf-8")
+
+    assert not mimo_video_overview_cache_fresh(tmp_path / "mimo_video_overview.json", video, scenes)

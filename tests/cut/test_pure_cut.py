@@ -127,3 +127,149 @@ def test_build_edited_source_video_uses_ffmpeg_concat(monkeypatch, tmp_path):
     ffmpeg_cmd = [cmd for cmd in commands if cmd[0] == "ffmpeg"][0]
     assert "trim=start=0.000:end=1.000" in " ".join(ffmpeg_cmd)
     assert "concat=n=2" in " ".join(ffmpeg_cmd)
+
+
+
+
+def test_cut_source_fingerprint_detects_middle_only_changes(tmp_path):
+    import cut
+
+    first = tmp_path / "a.mp4"
+    second = tmp_path / "b.mp4"
+    first.write_bytes(b"A" * 70000 + b"middle-one" + b"Z" * 70000)
+    second.write_bytes(b"A" * 70000 + b"middle-two" + b"Z" * 70000)
+
+    assert first.stat().st_size == second.stat().st_size
+    assert cut.file_fingerprint(first) != cut.file_fingerprint(second)
+
+
+def test_cut_main_does_not_reuse_edited_source_when_normalized_plan_changes(monkeypatch, tmp_path):
+    import json
+    import sys
+    import cut
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "clip_plan.json").write_text(json.dumps([{"start": 10.0, "end": 20.0}]), encoding="utf-8")
+    edited = work / "edited_source.mp4"
+    edited.write_bytes(b"old-edited")
+
+    calls = []
+
+    def fake_build(video_path, validated_plan, work_dir, output_path=None):
+        calls.append(validated_plan)
+        Path(output_path).write_bytes(b"new-edited")
+        cut._write_edited_source_meta(output_path, validated_plan, video_path)
+        return Path(output_path)
+
+    monkeypatch.setattr("cut.get_video_duration", lambda path: 100.0)
+    monkeypatch.setattr("cut.build_edited_source_video", fake_build)
+    monkeypatch.setattr(sys, "argv", [
+        "cut.py", str(video), "--work-dir", str(work), "--clip-padding", "5",
+    ])
+
+    cut.main()
+
+    assert len(calls) == 1
+    assert json.loads((work / "clip_plan_validated.json").read_text(encoding="utf-8"))["clips"][0]["source_start"] == 5.0
+    assert edited.read_bytes() == b"new-edited"
+
+
+def test_cut_main_reuses_edited_source_when_fingerprint_matches(monkeypatch, tmp_path):
+    import json
+    import sys
+    import cut
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    raw_plan = [{"start": 10.0, "end": 20.0}]
+    (work / "clip_plan.json").write_text(json.dumps(raw_plan), encoding="utf-8")
+    validated = cut.normalize_clip_plan(raw_plan, video_duration=100.0)
+    edited = work / "edited_source.mp4"
+    edited.write_bytes(b"cached-edited")
+    cut._write_edited_source_meta(edited, validated, video)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("matching edited_source cache should be reused")
+
+    monkeypatch.setattr("cut.get_video_duration", lambda path: 100.0)
+    monkeypatch.setattr("cut.build_edited_source_video", boom)
+    monkeypatch.setattr(sys, "argv", ["cut.py", str(video), "--work-dir", str(work)])
+
+    cut.main()
+
+    assert edited.read_bytes() == b"cached-edited"
+
+
+def test_cut_main_rebuilds_when_source_video_bytes_change(monkeypatch, tmp_path):
+    import json
+    import sys
+    import cut
+
+    old_video = tmp_path / "video_old.mp4"
+    new_video = tmp_path / "video_new.mp4"
+    old_video.write_bytes(b"old source bytes")
+    new_video.write_bytes(b"new source bytes")
+    work = tmp_path / "work"
+    work.mkdir()
+    raw_plan = [{"start": 10.0, "end": 20.0}]
+    (work / "clip_plan.json").write_text(json.dumps(raw_plan), encoding="utf-8")
+    validated = cut.normalize_clip_plan(raw_plan, video_duration=100.0)
+    edited = work / "edited_source.mp4"
+    edited.write_bytes(b"edited-from-old-source")
+    cut._write_edited_source_meta(edited, validated, old_video)
+
+    calls = []
+
+    def fake_build(video_path, validated_plan, work_dir, output_path=None):
+        calls.append(Path(video_path).name)
+        Path(output_path).write_bytes(b"edited-from-new-source")
+        cut._write_edited_source_meta(output_path, validated_plan, video_path)
+        return Path(output_path)
+
+    monkeypatch.setattr("cut.get_video_duration", lambda path: 100.0)
+    monkeypatch.setattr("cut.build_edited_source_video", fake_build)
+    monkeypatch.setattr(sys, "argv", ["cut.py", str(new_video), "--work-dir", str(work)])
+
+    cut.main()
+
+    assert calls == ["video_new.mp4"]
+    assert edited.read_bytes() == b"edited-from-new-source"
+
+
+def test_cut_main_rebuilds_when_cached_edited_source_bytes_change(monkeypatch, tmp_path):
+    import json
+    import sys
+    import cut
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    raw_plan = [{"start": 10.0, "end": 20.0}]
+    (work / "clip_plan.json").write_text(json.dumps(raw_plan), encoding="utf-8")
+    validated = cut.normalize_clip_plan(raw_plan, video_duration=100.0)
+    edited = work / "edited_source.mp4"
+    edited.write_bytes(b"cached-edited")
+    cut._write_edited_source_meta(edited, validated, video)
+    edited.write_bytes(b"externally-mutated-edited-source")
+    calls = []
+
+    def fake_build(video_path, validated_plan, work_dir, output_path=None):
+        calls.append(Path(video_path).name)
+        Path(output_path).write_bytes(b"rebuilt-edited")
+        cut._write_edited_source_meta(output_path, validated_plan, video_path)
+        return Path(output_path)
+
+    monkeypatch.setattr("cut.get_video_duration", lambda path: 100.0)
+    monkeypatch.setattr("cut.build_edited_source_video", fake_build)
+    monkeypatch.setattr(sys, "argv", ["cut.py", str(video), "--work-dir", str(work)])
+
+    cut.main()
+
+    assert calls == ["video.mp4"]
+    assert edited.read_bytes() == b"rebuilt-edited"

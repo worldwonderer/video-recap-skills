@@ -33,15 +33,16 @@ python3 scripts/assemble.py <video> --work-dir <work_dir> \
 
 ## Output contract
 
-- `recap_<stem>.mp4` — the final recap video (written to `--output-dir` or `work_dir`'s parent).
+- `recap_<stem>.mp4` — the final recap video (written to `--output-dir` or `work_dir`'s parent). It is the stable output alias, overwritten in place on every run so iterating on the narration refreshes the same file.
 - `work_dir/output.mp4` — the in-place render.
 - `subtitles.srt` — narration subtitles; `subtitles.ass` when `--burn-subtitles` is used.
 - `timeline.json` — backend-neutral multi-track model (video / original-audio / narration / BGM / subtitle tracks with ducking automation). Always written.
+- `assembly_manifest.json` — a slim render record: the input/source paths, the cut-mode source fingerprint (proving a stale ambient `SOURCE_VIDEO` did not leak into a full-mode export), the render settings, and the final output path.
 - 剪映 draft folder (`recap_<stem>/draft_content.json` + `draft_info.json` + `draft_meta_info.json`) — only with `--export-jianying`.
 
 ## Notes
 - Audio is mixed as tracks (like a cut-software timeline): the original audio, an optional BGM bed, and the narration.
-- Optional 剪映/JianYing export: `--export-jianying` (or `EXPORT_JIANYING=1`) turns `timeline.json` into an editable 剪映 draft — original clips, separate audio tracks, and volume keyframes for the ducking. Fully decoupled and lazy-imported: the ffmpeg render never depends on it, and 剪映 need not be installed. In cut mode pass `--source-video <orig>` so the draft references the real clips. Point `--jianying-out` at 剪映's drafts root to open it in-app. Media is bundled into the draft folder by default (`--jianying-no-bundle-media` to reference in place) — this is **required on macOS**, where 剪映 is sandboxed and cannot read external paths. Note: the draft references the un-burned original, so the source's hardcoded subtitles are visible there (mask them in 剪映 if needed).
+- Optional 剪映/JianYing export: `--export-jianying` (or `EXPORT_JIANYING=1`) turns `timeline.json` into an editable 剪映 draft — original clips, separate audio tracks, and volume keyframes for the ducking. Fully decoupled and lazy-imported: the ffmpeg render never depends on it, and 剪映 need not be installed. In cut mode pass `--source-video <orig>` so the draft references the real clips. Point `--jianying-out` at 剪映's drafts root to open it in-app. If a draft folder with the same name already has files, export writes a numbered sibling instead of overwriting it. Media is bundled into the draft folder by default (`--jianying-no-bundle-media` to reference in place) — this is **required on macOS**, where 剪映 is sandboxed and cannot read external paths. Note: the draft references the un-burned original, so the source's hardcoded subtitles are visible there (mask them in 剪映 if needed).
 - Subtitle look: `SUBTITLE_FONT_SIZE`, `SUBTITLE_MARGIN_V`, `SUBTITLE_MAX_CHARS`, etc.
 - Ducking / loudness: the original swells to `IDLE_ORIG_VOLUME` in the gaps and ducks to `SPEECH_DUCKING_VOLUME` under narration (`DUCK_FADE_SECONDS` smooths the transition); also `DUCKING_MODE`, `ZONE_DUCKING_VOLUME`, `FINAL_LOUDNORM`, `TARGET_LUFS`.
 - BGM (optional): set `BGM_PATH` to any audio file; it loops to length and ducks under narration (`BGM_VOLUME` / `BGM_DUCKING_VOLUME`).

@@ -3,18 +3,20 @@
 
 Analyze a source video into a structured understanding index (scenes, ASR transcript,
 per-scene VLM analysis, silence windows, fused timeline) plus a narration-writing brief.
-Stateless: a stage is skipped only when its output artifact already exists and is newer
-than its input (use --force to recompute everything).
+Stateless: a semantic stage is skipped only when its output artifact and provenance
+sidecar match the current source video plus output-affecting settings (use --force
+to recompute everything).
 """
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
-from lib import CONFIG, log, get_video_duration, api_call
+from lib import CONFIG, log, get_video_duration, api_call, file_fingerprint, load_prompt
 from extract import extract_frames
 from detect import detect_scenes, detect_silence_periods
 from asr import transcribe_audio
-from vlm import analyze_scenes, analyze_video_overview
+from vlm import analyze_scenes, analyze_video_overview, mimo_video_overview_cache_fresh
 from brief import build_agent_brief, assess_understanding_substrate
 
 
@@ -26,6 +28,183 @@ def _fresh(out, *inputs):
     if not ins:
         return out.stat().st_size > 0
     return out.stat().st_mtime >= max(p.stat().st_mtime for p in ins)
+
+
+def _artifact_meta_path(artifact_path):
+    artifact_path = Path(artifact_path)
+    return artifact_path.with_name(f"{artifact_path.name}.meta.json")
+
+
+def _load_json(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _artifact_fingerprint(path):
+    path = Path(path)
+    return file_fingerprint(path) if path.exists() else None
+
+
+def _stage_cache_valid(artifact_path, expected_meta):
+    artifact_path = Path(artifact_path)
+    if not artifact_path.exists():
+        return False
+    meta_path = _artifact_meta_path(artifact_path)
+    if not meta_path.exists():
+        return False
+    try:
+        meta = _load_json(meta_path)
+    except (OSError, ValueError, TypeError):
+        return False
+    recorded = meta.get("artifact_fingerprint") if isinstance(meta, dict) else None
+    if not recorded or recorded != _artifact_fingerprint(artifact_path):
+        return False
+    expected = dict(expected_meta)
+    expected["artifact_fingerprint"] = recorded
+    return meta == expected
+
+
+def _write_stage_meta(artifact_path, meta):
+    meta_path = _artifact_meta_path(artifact_path)
+    payload = dict(meta)
+    payload["artifact_fingerprint"] = _artifact_fingerprint(artifact_path)
+    meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _remove_stage_meta(artifact_path):
+    _artifact_meta_path(artifact_path).unlink(missing_ok=True)
+
+
+def _scene_cache_payload(video_path):
+    return {
+        "schema_version": 1,
+        "stage": "scenes",
+        "source_video_fingerprint": file_fingerprint(video_path),
+        "settings": {
+            "scene_threshold": CONFIG.get("scene_threshold"),
+            "scene_junk_filter": CONFIG.get("scene_junk_filter"),
+            "scene_merge_min": CONFIG.get("scene_merge_min"),
+            "scene_junk_dark_luma": CONFIG.get("scene_junk_dark_luma"),
+            "scene_junk_bright_luma": CONFIG.get("scene_junk_bright_luma"),
+            "scene_junk_pixel_ratio": CONFIG.get("scene_junk_pixel_ratio"),
+        },
+    }
+
+
+def _asr_cache_payload(video_path, *, skip_asr=False):
+    return {
+        "schema_version": 1,
+        "stage": "asr",
+        "source_video_fingerprint": file_fingerprint(video_path),
+        "settings": {
+            "skip_asr": bool(skip_asr),
+            "mimo_asr_api_key_present": bool(CONFIG.get("mimo_asr_api_key")),
+            "mimo_asr_api_url": CONFIG.get("mimo_asr_api_url"),
+            "mimo_asr_model": CONFIG.get("mimo_asr_model"),
+            "mimo_asr_language": CONFIG.get("mimo_asr_language"),
+            "mimo_asr_base64_max_mb": CONFIG.get("mimo_asr_base64_max_mb"),
+            "asr_segment_seconds": CONFIG.get("asr_segment_seconds"),
+        },
+    }
+
+
+def _silence_cache_payload(video_path, asr_json):
+    return {
+        "schema_version": 1,
+        "stage": "silence",
+        "source_video_fingerprint": file_fingerprint(video_path),
+        "asr_result_fingerprint": _artifact_fingerprint(asr_json),
+        "asr_meta": _load_json(_artifact_meta_path(asr_json)) if _artifact_meta_path(asr_json).exists() else None,
+        "settings": {
+            "silence_noise_threshold": CONFIG.get("silence_noise_threshold"),
+            "silence_min_duration": CONFIG.get("silence_min_duration"),
+            "quiet_window_min": CONFIG.get("quiet_window_min"),
+            "silence_merge_gap": CONFIG.get("silence_merge_gap"),
+        },
+    }
+
+
+def _vlm_prompt_fingerprint():
+    prompt = load_prompt("VLM_DEPTH_PROMPT")
+    if not prompt:
+        prompt = (
+            "仔细观察这些视频帧。分两部分输出：\n"
+            "【描述】不超过80字，描述画面中正在发生什么。\n"
+            "【深层分析】不超过120字，分析角色情绪、关系动态、潜台词。"
+        )
+    context = CONFIG.get("context_info", "")
+    if context:
+        prompt = f"已知信息：{context}\n\n{prompt}"
+    return {
+        "prompt_text_fingerprint": _text_fingerprint(prompt),
+        "context_info_fingerprint": _text_fingerprint(context),
+    }
+
+
+def _text_fingerprint(value):
+    return hashlib.md5(str(value or "").encode("utf-8")).hexdigest()
+
+
+def _vlm_cache_payload(video_path, work_dir, scenes_json, frames):
+    return {
+        "schema_version": 1,
+        "stage": "vlm",
+        "source_video_fingerprint": file_fingerprint(video_path),
+        "scenes_fingerprint": _artifact_fingerprint(scenes_json),
+        "frames": _frame_cache_payload(video_path, CONFIG.get("fps"), frames),
+        "prompt": _vlm_prompt_fingerprint(),
+        "settings": {
+            "fps": CONFIG.get("fps"),
+            "vlm_model": CONFIG.get("vlm_model"),
+            "api_url": CONFIG.get("api_url"),
+            "mimo_disable_thinking": CONFIG.get("mimo_disable_thinking", True),
+            "mimo_media_resolution": CONFIG.get("mimo_media_resolution"),
+            "background_research_fingerprint": _artifact_fingerprint(Path(work_dir) / "background_research.json"),
+        },
+    }
+
+
+def _frames_manifest_path(work_dir):
+    return Path(work_dir) / "frames" / "frames_manifest.json"
+
+
+def _frame_cache_payload(video_path, fps, frames):
+    frame_names = [Path(frame).name for frame in frames]
+    return {
+        "schema_version": 1,
+        "source_video_fingerprint": file_fingerprint(video_path),
+        "fps": float(fps),
+        "frame_count": len(frames),
+        "frames": frame_names,
+        "frame_fingerprints": {
+            name: file_fingerprint(frame)
+            for name, frame in zip(frame_names, frames)
+        },
+    }
+
+
+def _write_frames_manifest(work_dir, video_path, fps, frames):
+    manifest_path = _frames_manifest_path(work_dir)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(_frame_cache_payload(video_path, fps, frames), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _frames_cache_valid(video_path, work_dir, fps):
+    frames_dir = Path(work_dir) / "frames"
+    frames = sorted(frames_dir.glob("frame_*.jpg"))
+    if not frames:
+        return False
+    manifest_path = _frames_manifest_path(work_dir)
+    if not manifest_path.exists():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        expected = _frame_cache_payload(video_path, fps, frames)
+    except (OSError, ValueError, TypeError):
+        return False
+    return manifest == expected
 
 
 def _research_context(work_dir):
@@ -69,6 +248,8 @@ def main():
     ap.add_argument("--context", default="", help="extra context (show name, character names, ...)")
     ap.add_argument("--scene-threshold", type=float, default=None)
     ap.add_argument("--style", default="纪录片")
+    ap.add_argument("--edit-mode", default=None, choices=["full", "cut"], help="recap mode to document in the writing brief")
+    ap.add_argument("--target-duration", default=None, help="cut-mode target duration to document in the writing brief")
     ap.add_argument("--skip-asr", action="store_true")
     ap.add_argument("--mimo-video-overview", action="store_true")
     ap.add_argument("--force", action="store_true", help="ignore cached artifacts and recompute")
@@ -89,6 +270,10 @@ def main():
         log(f"已并入 background_research.json 到理解上下文（{len(research_ctx)} 字）")
     if args.scene_threshold is not None:
         CONFIG["scene_threshold"] = args.scene_threshold
+    if args.edit_mode is not None:
+        CONFIG["edit_mode"] = args.edit_mode
+    if args.target_duration is not None:
+        CONFIG["target_duration"] = args.target_duration
     if args.mimo_video_overview:
         CONFIG["mimo_video_overview"] = True
     scene_threshold = CONFIG.get("scene_threshold")
@@ -105,45 +290,54 @@ def main():
     frames_dir = work_dir / "frames"
 
     # Step 1: frame extraction
-    if not args.force and frames_dir.exists() and any(frames_dir.glob("frame_*.jpg")):
+    if not args.force and _frames_cache_valid(video, work_dir, CONFIG["fps"]):
         frames = sorted(frames_dir.glob("frame_*.jpg"))
-        log(f"跳过帧提取（已存在 {len(frames)} 帧）")
+        log(f"跳过帧提取（缓存匹配 {len(frames)} 帧）")
     else:
         frames = extract_frames(video, work_dir)
+        _write_frames_manifest(work_dir, video, CONFIG["fps"], frames)
 
     # Step 2: scene detection
-    if not args.force and _fresh(scenes_json, video):
-        scenes = json.loads(scenes_json.read_text(encoding="utf-8"))
+    scenes_meta = _scene_cache_payload(video)
+    if not args.force and _stage_cache_valid(scenes_json, scenes_meta):
+        scenes = _load_json(scenes_json)
         log(f"跳过场景检测（已存在 {len(scenes)} 个场景）")
     else:
         scenes = detect_scenes(video, work_dir, scene_threshold)
+        _write_stage_meta(scenes_json, scenes_meta)
 
     # Step 3: ASR
+    asr_meta = _asr_cache_payload(video, skip_asr=args.skip_asr)
     if args.skip_asr:
         asr_result = []
         asr_json.write_text(json.dumps(asr_result, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_stage_meta(asr_json, asr_meta)
         log("跳过 ASR（--skip-asr）")
-    elif not args.force and _fresh(asr_json, video):
-        asr_result = json.loads(asr_json.read_text(encoding="utf-8"))
+    elif not args.force and _stage_cache_valid(asr_json, asr_meta):
+        asr_result = _load_json(asr_json)
         log(f"跳过 ASR（已存在 {len(asr_result)} 段）")
     else:
         try:
             asr_result = transcribe_audio(video, work_dir)
         except Exception as e:
-            log(f"ASR 失败（继续无 ASR）: {e}")
-            asr_result = []
-            asr_json.write_text(json.dumps(asr_result, ensure_ascii=False, indent=2), encoding="utf-8")
+            _remove_stage_meta(asr_json)
+            asr_json.unlink(missing_ok=True)
+            raise RuntimeError(f"ASR 失败；未写入可复用缓存，请修复后重试或显式使用 --skip-asr: {e}") from e
+        _write_stage_meta(asr_json, asr_meta)
 
     # Step 3.5: silence detection
-    if not args.force and _fresh(silence_json, asr_json):
-        silence_periods = json.loads(silence_json.read_text(encoding="utf-8"))
+    silence_meta = _silence_cache_payload(video, asr_json)
+    if not args.force and _stage_cache_valid(silence_json, silence_meta):
+        silence_periods = _load_json(silence_json)
         log(f"跳过静音检测（已存在 {len(silence_periods)} 个窗口）")
     else:
         silence_periods = detect_silence_periods(video, work_dir, asr_result)
+        _write_stage_meta(silence_json, silence_meta)
 
     # Step 4: VLM analysis (the only stage that requires the chat API key)
-    if not args.force and _fresh(vlm_json, scenes_json):
-        vlm_analysis = json.loads(vlm_json.read_text(encoding="utf-8"))
+    vlm_meta = _vlm_cache_payload(video, work_dir, scenes_json, frames)
+    if not args.force and _stage_cache_valid(vlm_json, vlm_meta):
+        vlm_analysis = _load_json(vlm_json)
         log(f"跳过 VLM 分析（已存在 {len(vlm_analysis)} 个场景）")
     else:
         if not CONFIG.get("api_key"):
@@ -153,18 +347,24 @@ def main():
         api_call({"model": CONFIG.get("vlm_model", ""),
                   "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5})
         vlm_analysis = analyze_scenes(scenes, frames, work_dir)
+        _write_stage_meta(vlm_json, vlm_meta)
 
     # Step 4.1: optional MiMo scene-chunk video understanding
+    overview_path = work_dir / "mimo_video_overview.json"
     if CONFIG.get("mimo_video_overview", False):
         if not CONFIG.get("mimo_video_api_key"):
             log("跳过 MiMo 分片视频概览：未设置 MIMO_API_KEY")
-        elif _fresh(work_dir / "mimo_video_overview.json", scenes_json):
-            log("跳过 MiMo 分片视频概览（已存在）")
+            overview_path.unlink(missing_ok=True)
+        elif mimo_video_overview_cache_fresh(overview_path, video, scenes):
+            log("跳过 MiMo 分片视频概览（缓存匹配）")
         else:
+            overview_path.unlink(missing_ok=True)
             try:
                 analyze_video_overview(video, work_dir, scenes)
             except Exception as e:
                 log(f"MiMo 分片视频概览失败（忽略）: {e}")
+    else:
+        overview_path.unlink(missing_ok=True)
 
     # optional consolidation (整理): build the understanding index before the brief folds it in
     if args.consolidate or args.consolidate_asr:
@@ -180,7 +380,11 @@ def main():
         banner = "理解素材为空" if substrate["level"] == "empty" else "理解素材偏薄"
         log(f"⚠️  {banner}：ASR {substrate['asr_chars']} 字 | 场景 {substrate['scene_count']} | "
             f"带 frame_facts 的场景 {substrate['scenes_with_frame_facts']} | 平均画面描述 {substrate['avg_description_len']} 字")
-    brief_path = build_agent_brief(vlm_analysis, asr_result, silence_periods, video_duration, work_dir, args.style)
+    brief_path = build_agent_brief(
+        vlm_analysis, asr_result, silence_periods, video_duration, work_dir, args.style,
+        mimo_overview_enabled=CONFIG.get("mimo_video_overview", False),
+        mimo_overview_video_path=video,
+    )
 
     log("=" * 50)
     log(f"理解完成。写作 brief: {brief_path}")

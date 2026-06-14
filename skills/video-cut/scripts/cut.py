@@ -1,5 +1,6 @@
 """Cut-style recap helpers for agent-selected source ranges."""
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -77,6 +78,76 @@ def _clip_value(raw, *names):
 def load_clip_plan(path):
     """Load `clip_plan.json`, accepting either a list or {"clips": [...]} object."""
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _stable_json_dumps(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def value_fingerprint(value):
+    """Return a stable fingerprint for JSON-serializable non-secret values."""
+    return hashlib.md5(_stable_json_dumps(value).encode("utf-8")).hexdigest()
+
+
+def cut_plan_fingerprint(validated_plan):
+    """Hash the exact normalized clip plan that determines edited_source.mp4 bytes."""
+    if isinstance(validated_plan, dict):
+        payload = dict(validated_plan)
+        # Provenance for raw-plan freshness is not part of the edited media bytes.
+        payload.pop("raw_plan_fingerprint", None)
+    else:
+        payload = validated_plan
+    return value_fingerprint(payload)
+
+
+def file_fingerprint(path, chunk_size=1024 * 1024):
+    """Full-content fingerprint for source media cache provenance."""
+    h = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _edited_source_meta_path(output_path):
+    return Path(str(output_path) + ".meta.json")
+
+
+def _load_edited_source_meta(output_path):
+    meta_path = _edited_source_meta_path(output_path)
+    if not meta_path.exists():
+        return None
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_edited_source_meta(output_path, validated_plan, input_video):
+    meta_path = _edited_source_meta_path(output_path)
+    meta_path.write_text(json.dumps({
+        "schema_version": 1,
+        "clip_plan_fingerprint": cut_plan_fingerprint(validated_plan),
+        "source_video_fingerprint": file_fingerprint(input_video),
+        "edited_source_fingerprint": file_fingerprint(output_path),
+        "total_duration": validated_plan.get("total_duration"),
+        "clip_count": len(validated_plan.get("clips", [])),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def should_reuse_edited_source(output_path, validated_plan, input_video):
+    """Return True only when edited_source.mp4 matches source media and cut params."""
+    output_path = Path(output_path)
+    if not output_path.exists():
+        return False
+    meta = _load_edited_source_meta(output_path)
+    return bool(
+        meta
+        and meta.get("clip_plan_fingerprint") == cut_plan_fingerprint(validated_plan)
+        and meta.get("source_video_fingerprint") == file_fingerprint(input_video)
+        and meta.get("edited_source_fingerprint") == file_fingerprint(output_path)
+    )
 
 
 def normalize_clip_plan(raw_plan, video_duration, target_duration=None, clip_padding=0.0, min_clip_duration=0.3, allow_overlap=False):
@@ -297,6 +368,7 @@ def build_edited_source_video(input_video, validated_plan, work_dir, output_path
     if result.returncode != 0:
         raise RuntimeError(f"剪辑源视频失败: {result.stderr}")
 
+    _write_edited_source_meta(output_path, validated_plan, input_video)
     duration = get_video_duration(output_path)
     log(f"剪辑源视频: {output_path} ({duration:.1f}s, {len(clips)} clips)")
     return output_path
@@ -328,11 +400,13 @@ def main():
         clip_padding=args.clip_padding,
         allow_overlap=args.allow_overlap,
     )
+    if isinstance(validated_plan, dict):
+        validated_plan["raw_plan_fingerprint"] = value_fingerprint(raw_plan)
     (work_dir / "clip_plan_validated.json").write_text(
         json.dumps(validated_plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
     edited_source_path = work_dir / "edited_source.mp4"
-    if edited_source_path.exists() and edited_source_path.stat().st_mtime >= clip_plan_path.stat().st_mtime:
+    if should_reuse_edited_source(edited_source_path, validated_plan, args.video):
         log(f"复用剪辑源视频: {edited_source_path}")
     else:
         build_edited_source_video(args.video, validated_plan, work_dir, edited_source_path)

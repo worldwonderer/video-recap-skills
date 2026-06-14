@@ -20,7 +20,8 @@ Turns a source video into an **understanding index** an agent (or a downstream s
 5. **VLM analysis** — `vlm_analysis.json` (per-scene description, depth analysis, `frame_facts`).
 6. **Timeline fusion + brief** — `timeline_fusion.json`, `asr_writing_chunks.json`, `agent_narration_brief.md`.
 
-Stateless: a stage is skipped only if its output exists and is newer than its input. `--force` recomputes.
+Stateless: reusable stages are skipped only when their output and provenance sidecar match
+the current source video plus output-affecting settings. `--force` recomputes.
 
 ## Requirements
 

@@ -127,19 +127,24 @@ def test_detect_silence_does_not_leave_partial_audio_on_failure(monkeypatch, tmp
 
 
 def test_detect_silence_returns_empty_on_silencedetect_nonzero(monkeypatch, tmp_path):
-    # audio.wav already exists → extraction skipped, but silencedetect fails
+    # audio.wav already exists for the same source → extraction skipped, but silencedetect fails
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"video")
     (tmp_path / "audio.wav").write_bytes(b"RIFFxxxx")
+    detect._write_audio_meta(tmp_path, video)
     logs = []
     monkeypatch.setattr("detect.log", lambda msg: logs.append(msg))
     monkeypatch.setattr("detect.run_cmd", lambda cmd, **kw: _fail("filter error"))
 
-    out = detect_silence_periods(tmp_path / "v.mp4", tmp_path)
+    out = detect_silence_periods(video, tmp_path)
     assert out == []
     assert any("静音检测失败" in m for m in logs)
 
 
 def test_detect_silence_extracts_to_temp_then_atomic_moves(monkeypatch, tmp_path):
     # happy path: extraction writes temp, silencedetect succeeds with no silence
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"video")
     calls = []
 
     def fake_run(cmd, **kw):
@@ -154,7 +159,7 @@ def test_detect_silence_extracts_to_temp_then_atomic_moves(monkeypatch, tmp_path
     monkeypatch.setattr("detect.run_cmd", fake_run)
     monkeypatch.setattr("detect.get_video_duration", lambda path: 10.0)
 
-    out = detect_silence_periods(tmp_path / "v.mp4", tmp_path)
+    out = detect_silence_periods(video, tmp_path)
     assert out == []
     # extraction targeted a .tmp path (atomic move pattern), not audio.wav directly
     assert any(any(p.endswith("audio.wav.tmp") for p in c) for c in calls)
@@ -168,6 +173,8 @@ def test_detect_silence_extracts_to_temp_then_atomic_moves(monkeypatch, tmp_path
 def test_silence_audio_extract_states_wav_format(monkeypatch, tmp_path):
     """BUG: extracting to audio.wav.tmp hides the format from ffmpeg (muxer 'Invalid argument').
     The extraction command must pass -f wav explicitly."""
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"video")
     cmds = []
 
     def fake(cmd, **kw):
@@ -177,7 +184,33 @@ def test_silence_audio_extract_states_wav_format(monkeypatch, tmp_path):
         return _ok()
 
     monkeypatch.setattr("detect.run_cmd", fake)
-    detect_silence_periods(tmp_path / "v.mp4", tmp_path, asr_result=[])
+    detect_silence_periods(video, tmp_path, asr_result=[])
     extract = next((c for c in cmds if any("audio.wav.tmp" in x for x in c)), None)
     assert extract is not None, "no audio extraction command issued"
     assert "-f" in extract and "wav" in extract, f"extract cmd missing -f wav: {extract}"
+
+
+def test_detect_silence_reextracts_audio_when_source_video_changes(monkeypatch, tmp_path):
+    """audio.wav reuse must be tied to the source video, not merely file existence."""
+    old_video = tmp_path / "old.mp4"
+    new_video = tmp_path / "new.mp4"
+    old_video.write_bytes(b"old")
+    new_video.write_bytes(b"new")
+    (tmp_path / "audio.wav").write_bytes(b"old-audio")
+    detect._write_audio_meta(tmp_path, old_video)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append([str(part) for part in cmd])
+        if any(str(part).endswith("audio.wav.tmp") for part in cmd):
+            (tmp_path / "audio.wav.tmp").write_bytes(b"new-audio")
+        return _ok(stderr="")
+
+    monkeypatch.setattr("detect.log", lambda msg: None)
+    monkeypatch.setattr("detect.run_cmd", fake_run)
+    monkeypatch.setattr("detect.get_video_duration", lambda path: 10.0)
+
+    detect_silence_periods(new_video, tmp_path, asr_result=[])
+
+    assert (tmp_path / "audio.wav").read_bytes() == b"new-audio"
+    assert any(any(part.endswith("audio.wav.tmp") for part in cmd) for cmd in calls)

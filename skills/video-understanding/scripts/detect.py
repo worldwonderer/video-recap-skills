@@ -2,9 +2,10 @@ import json
 import os
 import re
 import subprocess
+from pathlib import Path
 
 from lib import CONFIG
-from lib import log, run_cmd, get_video_duration
+from lib import log, run_cmd, get_video_duration, file_fingerprint
 
 # ── Step 2: 场景检测 ──────────────────────────────────────────────────
 
@@ -165,7 +166,9 @@ def _filter_junk_scenes(scenes, video_path):
 def detect_silence_periods(video_path, work_dir, asr_result=None):
     """用 ffmpeg silencedetect 检测安静时段，作为解说插入的候选窗口"""
     audio_path = work_dir / "audio.wav"
-    if not audio_path.exists():
+    if not _audio_cache_matches(audio_path, video_path):
+        if audio_path.exists():
+            audio_path.unlink()
         # 提取到临时文件，成功后原子移动到位，避免被中断的 -y 运行留下半截 audio.wav
         tmp_path = work_dir / "audio.wav.tmp"
         extract = run_cmd([
@@ -179,6 +182,7 @@ def detect_silence_periods(video_path, work_dir, asr_result=None):
                 tmp_path.unlink()
             return []
         os.replace(str(tmp_path), str(audio_path))
+        _write_audio_meta(work_dir, video_path)
 
     noise = CONFIG["silence_noise_threshold"]
     min_dur = CONFIG["silence_min_duration"]
@@ -256,3 +260,36 @@ def detect_silence_periods(video_path, work_dir, asr_result=None):
         flag = " [有语音]" if qp["has_speech"] else ""
         log(f"  {qp['start']:.1f}s-{qp['end']:.1f}s ({qp['duration']:.1f}s){flag}")
     return periods
+
+
+def _audio_meta_path(work_dir):
+    return Path(work_dir) / "audio.wav.meta.json"
+
+
+def _audio_cache_matches(audio_path, video_path):
+    audio_path = Path(audio_path)
+    if not audio_path.exists():
+        return False
+    meta_path = _audio_meta_path(audio_path.parent)
+    if not meta_path.exists():
+        return False
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    try:
+        expected = file_fingerprint(video_path)
+    except OSError:
+        return False
+    return meta.get("source_video_fingerprint") == expected
+
+
+def _write_audio_meta(work_dir, video_path):
+    _audio_meta_path(work_dir).write_text(
+        json.dumps({
+            "schema_version": 1,
+            "source_video_fingerprint": file_fingerprint(video_path),
+            "audio": "audio.wav",
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )

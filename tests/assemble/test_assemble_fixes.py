@@ -46,13 +46,14 @@ def test_resample_failure_degrades_instead_of_raising(monkeypatch, tmp_path):
     }
 
     out = tmp_path / "out.wav"
-    # Must not raise FileNotFoundError from wave.open on a missing tmp file.
-    _build_timed_narration([segment], out, 3.0, tmp_path)
+    # Must fail cleanly instead of leaving a reusable silent narration track.
+    import pytest
+    with pytest.raises(RuntimeError, match="全部 1 段解说均被跳过"):
+        _build_timed_narration([segment], out, 3.0, tmp_path)
 
-    # Degraded exactly like the deliberate skip paths.
     assert segment["actual_place_start"] == segment["start"]
     assert segment["actual_place_end"] == segment["start"]
-    assert out.exists()
+    assert not out.exists()
 
 
 def test_missing_wav_skip_sets_zero_width_window(monkeypatch, tmp_path):
@@ -67,7 +68,9 @@ def test_missing_wav_skip_sets_zero_width_window(monkeypatch, tmp_path):
     }
 
     out = tmp_path / "out.wav"
-    _build_timed_narration([segment], out, 4.0, tmp_path)
+    import pytest
+    with pytest.raises(RuntimeError, match="全部 1 段解说均被跳过"):
+        _build_timed_narration([segment], out, 4.0, tmp_path)
 
     assert segment["actual_place_start"] == segment["start"]
     assert segment["actual_place_end"] == segment["start"]
@@ -78,6 +81,7 @@ def test_missing_wav_skip_sets_zero_width_window(monkeypatch, tmp_path):
     # _seg_place_window yields a zero-width window -> no ducking over silence.
     s, e = _seg_place_window(segment)
     assert e - s < 0.1
+    assert not out.exists()
 
 
 def test_bad_wav_format_skip_sets_zero_width_window(monkeypatch, tmp_path):
@@ -95,13 +99,16 @@ def test_bad_wav_format_skip_sets_zero_width_window(monkeypatch, tmp_path):
     }
 
     out = tmp_path / "out.wav"
-    _build_timed_narration([segment], out, 4.0, tmp_path)
+    import pytest
+    with pytest.raises(RuntimeError, match="全部 1 段解说均被跳过"):
+        _build_timed_narration([segment], out, 4.0, tmp_path)
 
     assert segment["actual_place_start"] == segment["start"]
     assert segment["actual_place_end"] == segment["start"]
     assert _subtitle_entries([segment]) == []
     s, e = _seg_place_window(segment)
     assert e - s < 0.1
+    assert not out.exists()
 
 
 def test_all_skipped_logs_loud_warning(monkeypatch, tmp_path):
@@ -129,11 +136,11 @@ def test_all_skipped_logs_loud_warning(monkeypatch, tmp_path):
     ]
 
     out = tmp_path / "out.wav"
-    _build_timed_narration(segments, out, 5.0, tmp_path)
+    import pytest
+    with pytest.raises(RuntimeError, match="全部 2 段解说均被跳过"):
+        _build_timed_narration(segments, out, 5.0, tmp_path)
 
-    assert any("全部" in m and "跳过" in m for m in logs), logs
-    # Still best-effort: an (empty) narration track is produced.
-    assert out.exists()
+    assert not out.exists()
 
 
 def test_partial_skip_does_not_log_all_skipped_warning(monkeypatch, tmp_path):

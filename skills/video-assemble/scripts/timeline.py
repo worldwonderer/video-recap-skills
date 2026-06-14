@@ -66,6 +66,49 @@ def ducking_keyframes(windows, idle, duck, fade, span_start, span_end):
     return [_kf(t, g) for t, g in out]
 
 
+def variable_ducking_keyframes(windows, idle, fade, span_start, span_end):
+    """Volume automation with a per-window duck gain.
+
+    `windows` is [(start_s, end_s, duck_gain)]. Unlike `ducking_keyframes`,
+    this preserves the canonical renderer's speech-vs-quiet ducking levels for
+    timeline/JianYing export instead of flattening every narration beat to the
+    same target gain.
+    """
+    rel = sorted(
+        (max(span_start, float(w[0])), min(span_end, float(w[1])), float(w[2]))
+        for w in windows
+        if float(w[1]) > span_start and float(w[0]) < span_end and float(w[1]) > float(w[0])
+    )
+    if not rel:
+        return []
+
+    pts = [(span_start, idle)]
+    for idx, (s, e, gain) in enumerate(rel):
+        prev_end = rel[idx - 1][1] if idx else None
+        next_start = rel[idx + 1][0] if idx + 1 < len(rel) else None
+        close_to_prev = prev_end is not None and s - prev_end < 2 * fade
+        close_to_next = next_start is not None and next_start - e < 2 * fade
+
+        if not close_to_prev:
+            pts.append((max(span_start, s - fade), idle))
+        pts.append((s, gain))
+        pts.append((e, gain))
+        if not close_to_next:
+            pts.append((min(span_end, e + fade), idle))
+    pts.append((span_end, idle))
+
+    pts.sort(key=lambda p: p[0])
+    out = []
+    for t, g in pts:
+        if out and abs(out[-1][0] - t) < 1e-4:
+            # At adjacent windows, prefer the lower gain to avoid a one-frame
+            # swell between back-to-back narration beats.
+            out[-1] = (t, min(out[-1][1], g))
+        else:
+            out.append((t, g))
+    return [_kf(t, g) for t, g in out]
+
+
 def build_timeline(canvas, duration_s, video_clips, narration_segments,
                    bgm=None, ducking=None):
     """Assemble a Timeline dict from resolved placement data.
@@ -84,6 +127,15 @@ def build_timeline(canvas, duration_s, video_clips, narration_segments,
     windows = [(float(s["timeline_start"]), float(s["timeline_end"]))
                for s in narration_segments
                if s.get("timeline_end", 0) > s.get("timeline_start", 0)]
+    duck_windows = [
+        (
+            float(s["timeline_start"]),
+            float(s["timeline_end"]),
+            float((ducking or {}).get("speech" if s.get("overlaps_speech", True) else "quiet", 1.0)),
+        )
+        for s in narration_segments
+        if s.get("timeline_end", 0) > s.get("timeline_start", 0)
+    ]
 
     # --- video track: each clip carries its original audio + ducking automation
     video_clip_objs = []
@@ -91,8 +143,8 @@ def build_timeline(canvas, duration_s, video_clips, narration_segments,
         ts, te = float(c["timeline_start"]), float(c["timeline_end"])
         audio = {"role": "original", "volume_keyframes": []}
         if ducking is not None:
-            audio["volume_keyframes"] = ducking_keyframes(
-                windows, ducking["idle"], ducking["speech"], ducking["fade"], ts, te)
+            audio["volume_keyframes"] = variable_ducking_keyframes(
+                duck_windows, ducking["idle"], ducking["fade"], ts, te)
             audio["base_gain"] = round(float(ducking["idle"]), 4)
         else:
             audio["base_gain"] = 1.0

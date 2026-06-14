@@ -180,6 +180,18 @@ def test_content_fingerprint_cache_keys_ignore_path_and_mtime(tmp_path):
     assert step_cache_key(first, "vlm", {"model": "x"}) != step_cache_key(first, "vlm", {"model": "y"})
 
 
+def test_content_fingerprint_detects_middle_only_changes(tmp_path):
+    first = tmp_path / "a.mp4"
+    second = tmp_path / "b.mp4"
+    first.write_bytes(b"A" * 70000 + b"middle-one" + b"Z" * 70000)
+    second.write_bytes(b"A" * 70000 + b"middle-two" + b"Z" * 70000)
+
+    assert first.stat().st_size == second.stat().st_size
+    assert first.read_bytes()[:65536] == second.read_bytes()[:65536]
+    assert first.read_bytes()[-65536:] == second.read_bytes()[-65536:]
+    assert file_fingerprint(first) != file_fingerprint(second)
+
+
 def test_filter_junk_scenes_removes_black_or_white_transitions_but_keeps_fallback(monkeypatch):
     scenes = [
         {"start": 0.0, "end": 1.0},

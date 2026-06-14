@@ -3,11 +3,26 @@ import json
 from pathlib import Path
 
 from lib import CONFIG
-from lib import log, run_cmd, get_video_duration, mimo_asr_api_call
+from lib import log, run_cmd, get_video_duration, mimo_asr_api_call, file_fingerprint
 
 # ── Step 3: ASR 转录（MiMo mimo-v2.5-asr，云端 API）────────────────────────
 
 _ASR_AUDIO_MIME = "audio/wav"
+
+
+def _audio_meta_path(work_dir):
+    return Path(work_dir) / "audio.wav.meta.json"
+
+
+def _write_audio_meta(work_dir, video_path):
+    _audio_meta_path(work_dir).write_text(
+        json.dumps({
+            "schema_version": 1,
+            "source_video_fingerprint": file_fingerprint(video_path),
+            "audio": "audio.wav",
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def transcribe_audio(video_path, work_dir):
@@ -28,6 +43,7 @@ def transcribe_audio(video_path, work_dir):
     result = run_cmd(cmd)
     if result.returncode != 0:
         raise RuntimeError(f"音频提取失败: {result.stderr}")
+    _write_audio_meta(work_dir, video_path)
 
     # 获取音频时长
     duration = get_video_duration(video_path)
@@ -63,7 +79,8 @@ def _run_asr(wav_path):
     """用 MiMo ASR (mimo-v2.5-asr) 转录单个 wav 文件，返回纯文本。
 
     音频以 base64 data-URI 放进 OpenAI 风格的 chat/completions 消息里，转写文本回到
-    choices[0].message.content。单段失败只记日志返回空串（保留其它段），与本地 ASR 旧行为一致。
+    choices[0].message.content。API/响应结构失败会抛错，避免把瞬时失败缓存成空转写；
+    只有无音频、超体积等确定不可发送的片段返回空串。
     """
     try:
         raw = Path(wav_path).read_bytes()
@@ -94,13 +111,11 @@ def _run_asr(wav_path):
     try:
         resp = mimo_asr_api_call(payload)
     except Exception as e:
-        log(f"ASR 警告: MiMo ASR 调用失败: {e}")
-        return ""
+        raise RuntimeError(f"MiMo ASR 调用失败: {e}") from e
     try:
         return str(resp["choices"][0]["message"]["content"] or "").strip()
     except (KeyError, IndexError, TypeError):
-        log(f"ASR 警告: MiMo ASR 返回结构异常: {json.dumps(resp, ensure_ascii=False)[:200]}")
-        return ""
+        raise RuntimeError(f"MiMo ASR 返回结构异常: {json.dumps(resp, ensure_ascii=False)[:200]}")
 
 
 def _segment_and_transcribe(audio_wav, segments_dir, total_duration, segment_length=None):

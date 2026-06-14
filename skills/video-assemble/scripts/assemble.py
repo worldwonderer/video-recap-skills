@@ -1,5 +1,6 @@
+import hashlib
+import json
 import os
-import shutil
 import wave
 from pathlib import Path
 
@@ -8,6 +9,95 @@ from lib import log, run_cmd, get_video_duration
 from timeline import build_timeline, save_timeline
 
 SUBTITLE_RENDER_VERSION = 1
+ASSEMBLY_MANIFEST = "assembly_manifest.json"
+
+
+def _stable_json_dumps(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _value_fingerprint(value):
+    return hashlib.md5(_stable_json_dumps(value).encode("utf-8")).hexdigest()
+
+
+def _file_fingerprint(path, chunk_size=1024 * 1024):
+    h = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _artifact_fingerprint(path):
+    path = Path(path)
+    return _file_fingerprint(path) if path.exists() else None
+
+
+def _explicit_source_video():
+    """Return the cut-mode source video only when the caller opted in explicitly."""
+    if not CONFIG.get("source_video_explicit", False):
+        return ""
+    return str(CONFIG.get("source_video", "") or "").strip()
+
+
+def _source_video_identity():
+    source_video = _explicit_source_video()
+    if not source_video:
+        return None, None
+    path = Path(source_video)
+    return str(path.resolve()), _artifact_fingerprint(path)
+
+
+def _assembly_manifest_payload(input_video, tts_segments, work_dir, output_path,
+                               tts_meta_path=None, final_output=None):
+    """Slim render record. The orchestrator reads `final_output` to report the result;
+    `source_video` stays None unless cut mode explicitly passed --source-video, proving a
+    stale ambient SOURCE_VIDEO never leaked into a full-mode timeline / 剪映 export."""
+    input_video = Path(input_video)
+    output_path = Path(output_path)
+    source_video, source_video_fingerprint = _source_video_identity()
+    payload = {
+        "schema_version": 2,
+        "input_video": str(input_video.resolve()),
+        "source_video": source_video,
+        "source_video_fingerprint": source_video_fingerprint,
+        "tts_meta": str(Path(tts_meta_path).resolve()) if tts_meta_path else None,
+        "tts_segments": len(tts_segments or []),
+        "assembly_settings": assembly_settings_fingerprint(),
+        "output_path": str(output_path.resolve()),
+    }
+    if final_output is not None:
+        payload["final_output"] = str(Path(final_output).resolve())
+    return payload
+
+
+def _write_assembly_manifest(work_dir, manifest):
+    path = Path(work_dir) / ASSEMBLY_MANIFEST
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _resolve_final_output(base, stem):
+    """The recap output is the stable human alias recap_<stem>.mp4, overwritten in place
+    on every run so the iterate-on-narration loop always refreshes the same file."""
+    return Path(base) / f"recap_{stem}.mp4"
+
+
+def _load_cut_timeline_plan(work_dir):
+    raw_plan_path = Path(work_dir) / "clip_plan.json"
+    validated_plan_path = Path(work_dir) / "clip_plan_validated.json"
+    if not validated_plan_path.exists():
+        return json.loads(raw_plan_path.read_text(encoding="utf-8")) if raw_plan_path.exists() else None
+    if not raw_plan_path.exists():
+        return json.loads(validated_plan_path.read_text(encoding="utf-8"))
+    raw_plan = json.loads(raw_plan_path.read_text(encoding="utf-8"))
+    validated_plan = json.loads(validated_plan_path.read_text(encoding="utf-8"))
+    if (
+        isinstance(validated_plan, dict)
+        and validated_plan.get("raw_plan_fingerprint") == _value_fingerprint(raw_plan)
+    ):
+        return validated_plan
+    return raw_plan
 
 
 def _probe_canvas(video_path):
@@ -32,6 +122,15 @@ def _probe_canvas(video_path):
     return {"width": width, "height": height, "fps": fps}
 
 
+def _has_audio_stream(video_path):
+    """Return True when the input has an audio stream usable as [0:a]."""
+    result = run_cmd([
+        "ffprobe", "-v", "error", "-select_streams", "a:0",
+        "-show_entries", "stream=index", "-of", "csv=p=0", str(video_path),
+    ])
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
 def _build_video_clips(input_video, work_dir, duration_s):
     """Video-track clips for the timeline.
 
@@ -39,26 +138,36 @@ def _build_video_clips(input_video, work_dir, duration_s):
     becomes a clip referencing the ORIGINAL source range, so an editor sees the
     real cuts. Otherwise (or full mode) the rendered input is a single clip.
     """
-    source_video = CONFIG.get("source_video", "")
-    plan_path = Path(work_dir) / "clip_plan.json"
-    if source_video and os.path.exists(source_video) and plan_path.exists():
+    source_video = _explicit_source_video()
+    if source_video and os.path.exists(source_video):
         try:
-            import json
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan = _load_cut_timeline_plan(work_dir)
+            if plan is None:
+                raise ValueError("missing clip_plan.json")
             entries = plan.get("clips", plan) if isinstance(plan, dict) else plan
             clips, cursor = [], 0.0
             for c in entries:
-                ss, se = float(c["start"]), float(c["end"])
+                ss = float(c.get("source_start", c.get("start")))
+                se = float(c.get("source_end", c.get("end")))
+                timeline_start = c.get("output_start")
+                timeline_end = c.get("output_end")
                 dur = max(0.0, se - ss)
                 if dur <= 0:
                     continue
+                if timeline_start is None or timeline_end is None:
+                    timeline_start = cursor
+                    timeline_end = cursor + dur
+                    cursor += dur
+                else:
+                    timeline_start = float(timeline_start)
+                    timeline_end = float(timeline_end)
+                    cursor = max(cursor, timeline_end)
                 clips.append({"source_path": source_video, "source_start": ss,
-                              "source_end": se, "timeline_start": cursor,
-                              "timeline_end": cursor + dur})
-                cursor += dur
+                              "source_end": se, "timeline_start": timeline_start,
+                              "timeline_end": timeline_end})
             if clips:
                 return clips
-        except (ValueError, KeyError, OSError) as exc:
+        except (TypeError, ValueError, KeyError, OSError) as exc:
             log(f"  时间线: clip_plan 解析失败，回退单片 ({exc})")
     return [{"source_path": str(input_video), "source_start": 0.0,
              "source_end": float(duration_s), "timeline_start": 0.0,
@@ -66,48 +175,44 @@ def _build_video_clips(input_video, work_dir, duration_s):
 
 
 def _emit_timeline(input_video, tts_segments, work_dir, duration_s, has_bgm):
-    """Build and persist the backend-neutral multi-track timeline.json (best-effort)."""
-    try:
-        canvas = _probe_canvas(input_video)
-        video_clips = _build_video_clips(input_video, work_dir, duration_s)
-        narration_segments = []
-        for seg in tts_segments:
-            if not isinstance(seg, dict):
-                continue
-            s, e = _seg_place_window(seg)
-            if e <= s:
-                continue
-            narration_segments.append({
-                "source_path": seg.get("audio_path", ""),
-                "timeline_start": s, "timeline_end": e,
-                "text": seg.get("narration", ""),
-                "overlaps_speech": seg.get("overlaps_speech", True),
-                "gain": 1.0,
-            })
-        fade = CONFIG.get("duck_fade_seconds", 0.25)
-        bgm = None
-        if has_bgm:
-            bgm = {"source_path": CONFIG.get("bgm_path", ""),
-                   "volume": CONFIG.get("bgm_volume", 0.18),
-                   "ducking_volume": CONFIG.get("bgm_ducking_volume", 0.10),
+    """Build and persist the backend-neutral multi-track timeline.json."""
+    canvas = _probe_canvas(input_video)
+    video_clips = _build_video_clips(input_video, work_dir, duration_s)
+    narration_segments = []
+    for seg in tts_segments:
+        if not isinstance(seg, dict):
+            continue
+        s, e = _seg_place_window(seg)
+        if e <= s:
+            continue
+        narration_segments.append({
+            "source_path": seg.get("audio_path", ""),
+            "timeline_start": s, "timeline_end": e,
+            "text": seg.get("narration", ""),
+            "overlaps_speech": seg.get("overlaps_speech", True),
+            "gain": 1.0,
+        })
+    fade = CONFIG.get("duck_fade_seconds", 0.25)
+    bgm = None
+    if has_bgm:
+        bgm = {"source_path": CONFIG.get("bgm_path", ""),
+               "volume": CONFIG.get("bgm_volume", 0.18),
+               "ducking_volume": CONFIG.get("bgm_ducking_volume", 0.10),
+               "fade": fade}
+    # carry ducking automation whenever ducking is on at all; even under sidechain
+    # mode the draft gets editable volume keyframes (ffmpeg stays the canonical mix)
+    ducking = None
+    if CONFIG.get("ducking_mode", "fixed") != "none":
+        ducking = {"idle": CONFIG.get("idle_orig_volume", 0.85),
+                   "speech": CONFIG.get("speech_ducking_volume", 0.2),
+                   "quiet": CONFIG.get("zone_ducking_volume", 0.12),
                    "fade": fade}
-        # carry ducking automation whenever ducking is on at all; even under sidechain
-        # mode the draft gets editable volume keyframes (ffmpeg stays the canonical mix)
-        ducking = None
-        if CONFIG.get("ducking_mode", "fixed") != "none":
-            ducking = {"idle": CONFIG.get("idle_orig_volume", 0.85),
-                       "speech": CONFIG.get("speech_ducking_volume", 0.2),
-                       "quiet": CONFIG.get("zone_ducking_volume", 0.12),
-                       "fade": fade}
-        timeline = build_timeline(canvas, duration_s, video_clips,
-                                  narration_segments, bgm=bgm, ducking=ducking)
-        out = Path(work_dir) / "timeline.json"
-        save_timeline(timeline, out)
-        log(f"时间线模型: {out} ({len(timeline['tracks'])} 轨)")
-        return timeline
-    except Exception as exc:  # never let timeline emission break the render
-        log(f"  ⚠️ 时间线生成失败（不影响成片）: {exc}")
-        return None
+    timeline = build_timeline(canvas, duration_s, video_clips,
+                              narration_segments, bgm=bgm, ducking=ducking)
+    out = Path(work_dir) / "timeline.json"
+    save_timeline(timeline, out)
+    log(f"时间线模型: {out} ({len(timeline['tracks'])} 轨)")
+    return timeline
 
 
 def _seconds_to_srt_time(seconds):
@@ -156,19 +261,34 @@ def assembly_settings_fingerprint():
         "version": SUBTITLE_RENDER_VERSION,
         "burn_subtitles": bool(CONFIG.get("burn_subtitles", False)),
         "force_video_reencode": bool(CONFIG.get("force_video_reencode", False)),
+        "video_filters": {
+            "mask_source_subtitles": bool(CONFIG.get("mask_source_subtitles", False)),
+            "source_subtitle_mask_ratio": CONFIG.get("source_subtitle_mask_ratio", 0.14),
+        },
         "narration_timing": {
             "delay_seconds": CONFIG.get("narration_delay_seconds", 1.5),
             "tail_pad_seconds": CONFIG.get("narration_tail_pad_seconds", 0.1),
             "fade_ms": CONFIG.get("fade_ms", 300),
+            "narration_speed": CONFIG.get("narration_speed", 1.0),
         },
         "audio_mix": {
             "ducking_mode": CONFIG.get("ducking_mode", "fixed"),
+            "duck_fade_seconds": CONFIG.get("duck_fade_seconds", 0.25),
             "ducking_narr_weight": CONFIG.get("ducking_narr_weight", 1.5),
             "ducking_orig_volume": CONFIG.get("ducking_orig_volume", 0.5),
+            "idle_orig_volume": CONFIG.get("idle_orig_volume", 0.85),
             "speech_ducking_volume": CONFIG.get("speech_ducking_volume", 0.2),
             "zone_ducking_volume": CONFIG.get("zone_ducking_volume", 0.12),
-            "zone_fade_seconds": CONFIG.get("zone_fade_seconds", 0.5),
+            "ducking_threshold": CONFIG.get("ducking_threshold", 0.15),
+            "ducking_ratio": CONFIG.get("ducking_ratio", 3),
+            "ducking_attack": CONFIG.get("ducking_attack", 10),
+            "ducking_release": CONFIG.get("ducking_release", 300),
+            "ducking_level_sc": CONFIG.get("ducking_level_sc", 2.0),
+            "ducking_makeup": CONFIG.get("ducking_makeup", 1.2),
             "final_loudnorm": final_loudnorm_filter() or "off",
+            "bgm_path": CONFIG.get("bgm_path", ""),
+            "bgm_volume": CONFIG.get("bgm_volume", 0.18),
+            "bgm_ducking_volume": CONFIG.get("bgm_ducking_volume", 0.10),
         },
     }
     if fingerprint["burn_subtitles"]:
@@ -299,7 +419,7 @@ def _escape_subtitle_filter_path(path):
     for raw, escaped in (
         ("\\", "\\\\"),
         (":", "\\:"),
-        ("'", "\\'"),
+        ("'", "\\\\\\'"),
         (",", "\\,"),
         ("[", "\\["),
         ("]", "\\]"),
@@ -310,7 +430,7 @@ def _escape_subtitle_filter_path(path):
 
 def _subtitle_burn_filter(subtitle_path):
     """Build the ffmpeg video filter used for hard-sub rendering."""
-    return f"subtitles=filename='{_escape_subtitle_filter_path(subtitle_path)}'"
+    return f"subtitles=filename={_escape_subtitle_filter_path(subtitle_path)}"
 
 
 def final_loudnorm_filter():
@@ -387,6 +507,8 @@ def _amix_tail(narr_vol, bgm_chain=""):
 
 def _duck_ramp(s, e, fade):
     """A 0→1 trapezoid over [s,e] with `fade`-second ramps at each edge (no clicks)."""
+    if float(fade or 0) <= 0:
+        return f"between(t,{s:.2f},{e:.2f})"
     return f"min(1,max(0,min(t-{s:.2f},{e:.2f}-t)/{fade:.2f}))"
 
 
@@ -428,7 +550,13 @@ def _bgm_envelope(tts_segments, base, duck, fade):
     return f"max(0,min(1,{base}{''.join(terms)}))"
 
 
-def _build_audio_filter_complex(tts_segments, has_bgm=False):
+def _build_audio_filter_complex(
+    tts_segments,
+    has_bgm=False,
+    *,
+    original_audio_label="0:a",
+    bgm_audio_label=None,
+):
     """Compose the audio tracks into [aout], like a cut-software timeline.
 
     Tracks:
@@ -444,6 +572,8 @@ def _build_audio_filter_complex(tts_segments, has_bgm=False):
     ducking_mode = CONFIG.get("ducking_mode", "fixed")
     narr_vol = CONFIG.get("ducking_narr_weight", 1.5)
     fade = CONFIG.get("duck_fade_seconds", 0.25)
+    original_in = f"[{original_audio_label}]"
+    bgm_in = f"[{bgm_audio_label or '2:a'}]"
 
     # BGM bed (input [2:a]): ducked under each narration window when present.
     bgm_chain = ""
@@ -451,14 +581,14 @@ def _build_audio_filter_complex(tts_segments, has_bgm=False):
         base = CONFIG.get("bgm_volume", 0.18)
         bgm_expr = _bgm_envelope(tts_segments, base, CONFIG.get("bgm_ducking_volume", 0.10), fade)
         if bgm_expr:
-            bgm_chain = f"[2:a]volume='{bgm_expr}':eval=frame,aresample=48000[bgm];"
+            bgm_chain = f"{bgm_in}volume='{bgm_expr}':eval=frame,aresample=48000[bgm];"
         else:
-            bgm_chain = f"[2:a]volume={base},aresample=48000[bgm];"
+            bgm_chain = f"{bgm_in}volume={base},aresample=48000[bgm];"
 
     if ducking_mode == "sidechaincompress":
         # The narration keys the compressor; split it so it can also be mixed in.
         head = (
-            "[0:a]aresample=48000[o0];"
+            f"{original_in}aresample=48000[o0];"
             "[1:a]aresample=48000,asplit=2[sckey][scnarr];"
             f"[o0][sckey]sidechaincompress="
             f"threshold={CONFIG['ducking_threshold']}:ratio={CONFIG['ducking_ratio']}"
@@ -471,7 +601,7 @@ def _build_audio_filter_complex(tts_segments, has_bgm=False):
         return head + narr + "[orig][narr]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
 
     if ducking_mode == "none":
-        return "[0:a]aresample=48000[orig];" + _amix_tail(narr_vol, bgm_chain)
+        return f"{original_in}aresample=48000[orig];" + _amix_tail(narr_vol, bgm_chain)
 
     # fixed (default): gap-fill ducking envelope on the original track.
     idle = CONFIG.get("idle_orig_volume", 0.85)
@@ -482,19 +612,17 @@ def _build_audio_filter_complex(tts_segments, has_bgm=False):
         n_overlap = sum(1 for s in tts_segments if isinstance(s, dict) and s.get("overlaps_speech", True))
         n_quiet = sum(1 for s in tts_segments if isinstance(s, dict) and not s.get("overlaps_speech", True))
         log(f"gap-fill ducking: 间隙原声={idle}, 对白段={speech_vol}({n_overlap}), 安静段={quiet_vol}({n_quiet})")
-        orig = f"[0:a]volume='{expr}':eval=frame,aresample=48000[orig];"
+        orig = f"{original_in}volume='{expr}':eval=frame,aresample=48000[orig];"
     else:
         # No placement info at all: hold the original at a constant level.
-        orig = f"[0:a]volume={CONFIG.get('ducking_orig_volume', 0.3)},aresample=48000[orig];"
+        orig = f"{original_in}volume={CONFIG.get('ducking_orig_volume', 0.3)},aresample=48000[orig];"
     return orig + _amix_tail(narr_vol, bgm_chain)
 
 
 def assemble_video(input_video, tts_segments, work_dir, output_path):
     """组装最终视频"""
     if not tts_segments:
-        log("没有解说音频，直接复制原视频")
-        shutil.copy2(str(input_video), str(output_path))
-        return output_path
+        raise RuntimeError("tts_meta.json 没有有效解说音频，已中止以避免生成无解说视频")
 
     video_duration = get_video_duration(input_video)
 
@@ -523,7 +651,25 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
     _emit_timeline(input_video, tts_segments, work_dir, video_duration, has_bgm)
 
     # 混合原始音频 + 解说音频（+ 可选 BGM）
-    filter_complex = _build_audio_filter_complex(tts_segments, has_bgm)
+    source_has_audio = _has_audio_stream(input_video)
+    if source_has_audio:
+        original_audio_input = []
+        original_audio_label = "0:a"
+        bgm_audio_label = "2:a"
+    else:
+        log("源视频无音轨，使用静音原声音轨进行混音")
+        original_audio_input = [
+            "-f", "lavfi", "-t", str(video_duration),
+            "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+        ]
+        original_audio_label = "2:a"
+        bgm_audio_label = "3:a"
+    filter_complex = _build_audio_filter_complex(
+        tts_segments,
+        has_bgm,
+        original_audio_label=original_audio_label,
+        bgm_audio_label=bgm_audio_label,
+    )
 
     # 对于超长 volume 表达式（多段解说），使用 -filter_complex_script 避免命令行溢出
     # 末端整体响度归一：ducking 只管相对平衡，这一步统一成片绝对响度
@@ -547,6 +693,7 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
             "ffmpeg", "-y",
             "-i", str(input_video),
             "-i", str(narration_wav),
+            *original_audio_input,
             *bgm_input,
             "-filter_complex_script", str(fc_script),
             "-map", "0:v", "-map", aout_label,
@@ -556,6 +703,7 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
             "ffmpeg", "-y",
             "-i", str(input_video),
             "-i", str(narration_wav),
+            *original_audio_input,
             *bgm_input,
             "-filter_complex", filter_complex,
             "-map", "0:v", "-map", aout_label,
@@ -594,6 +742,7 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
 
 def _adjust_tts_speed(audio_path, target_duration, work_dir, tts_rate_offset=0.0):
     """如果 TTS 音频超过目标时长，用 ffmpeg atempo 温和加速"""
+    audio_path = Path(audio_path)
     current_dur = get_video_duration(audio_path)
     if current_dur <= target_duration or current_dur == 0:
         return str(audio_path), current_dur
@@ -606,7 +755,7 @@ def _adjust_tts_speed(audio_path, target_duration, work_dir, tts_rate_offset=0.0
 
     if ratio > effective_max:
         # 实际截断到目标时长，加 fade-out 防止爆音
-        truncated_path = Path(str(audio_path).replace(".wav", "_cut.wav"))
+        truncated_path = audio_path.with_name(f"{audio_path.stem}_cut{audio_path.suffix}")
         fade_out = min(0.15, target_duration * 0.1)
         cmd = ["ffmpeg", "-y", "-i", str(audio_path),
                "-t", f"{target_duration:.3f}",
@@ -622,7 +771,7 @@ def _adjust_tts_speed(audio_path, target_duration, work_dir, tts_rate_offset=0.0
 
     # 温和加速
     tempo = min(ratio, effective_max)
-    adjusted_path = Path(str(audio_path).replace(".wav", "_adj.wav"))
+    adjusted_path = audio_path.with_name(f"{audio_path.stem}_adj{audio_path.suffix}")
     cmd = ["ffmpeg", "-y", "-i", str(audio_path),
            "-filter:a", f"atempo={tempo:.3f}",
            "-ar", "44100", "-ac", "1", str(adjusted_path)]
@@ -642,6 +791,7 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
     last_written_end = 0  # 追踪已写入位置，防止重叠
     prev_pause_samples = 0  # 前一段的 pause_after_ms，控制段间间隔
     skipped_count = 0  # 因 WAV 缺失/损坏/重采样失败而被跳过的段数
+    placed_count = 0  # 真正写入音频的段数；防止“成功”生成全静音旁白
 
     for seg in tts_segments:
         wav_path = seg["audio_path"]
@@ -776,6 +926,7 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         seg["actual_place_end"] = (actual_start + write_samples) / sample_rate
         last_written_end = actual_start + write_samples
         prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
+        placed_count += 1
 
     with wave.open(str(output_wav), "wb") as wf:
         wf.setnchannels(1)
@@ -783,8 +934,13 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         wf.setframerate(sample_rate)
         wf.writeframes(bytes(buffer))
 
-    if tts_segments and skipped_count >= len(tts_segments):
-        log(f"  ⚠️ 严重警告: 全部 {len(tts_segments)} 段解说均被跳过（WAV 缺失/损坏/重采样失败），成片将没有解说音频")
+    if tts_segments and placed_count == 0:
+        output_wav.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"全部 {len(tts_segments)} 段解说均被跳过或未能写入"
+            f"（WAV 缺失/损坏/重采样失败/无可用时间；跳过 {skipped_count} 段），"
+            "已中止以避免生成无解说视频"
+        )
 
     log(f"解说音轨: {video_duration:.1f}s, {len(tts_segments)} 段")
 
@@ -817,6 +973,13 @@ def main():
         CONFIG["burn_subtitles"] = True
     if args.source_video:
         CONFIG["source_video"] = args.source_video
+        CONFIG["source_video_explicit"] = True
+    else:
+        # SOURCE_VIDEO is an ambient env var in lib.CONFIG. Do not let a stale
+        # shell value silently bind full-mode/direct timeline.json or JianYing
+        # exports to an unrelated original; cut mode must pass --source-video.
+        CONFIG["source_video"] = ""
+        CONFIG["source_video_explicit"] = False
     if args.export_jianying:
         CONFIG["export_jianying"] = True
     if args.jianying_bundle_media:
@@ -829,9 +992,14 @@ def main():
     assemble_video(args.video, tts_segments, work_dir, output_path)
     stem = args.recap_stem or Path(args.video).stem
     base = Path(args.output_dir) if args.output_dir else work_dir.parent
-    final_output = base / f"recap_{stem}.mp4"
-    if final_output != output_path:
-        shutil.copy2(str(output_path), str(final_output))
+    base.mkdir(parents=True, exist_ok=True)
+    final_output = _resolve_final_output(base, stem)
+    shutil.copy2(str(output_path), str(final_output))
+    manifest = _assembly_manifest_payload(
+        args.video, tts_segments, work_dir, output_path,
+        tts_meta_path=tts_meta, final_output=final_output,
+    )
+    _write_assembly_manifest(work_dir, manifest)
     log(f"组装完成: {final_output}")
 
     # OPTIONAL, decoupled: export a 剪映 draft from the timeline (lazy import; never

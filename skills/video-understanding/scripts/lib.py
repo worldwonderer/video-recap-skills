@@ -320,32 +320,20 @@ def stable_hash(value):
     """Return an md5 digest for deterministic JSON-serializable values."""
     return hashlib.md5(stable_json_dumps(value).encode("utf-8")).hexdigest()
 
-def file_fingerprint(path, sample_bytes=65536):
-    """Return a fast content fingerprint based on file size plus head/tail bytes.
+def file_fingerprint(path, chunk_size=1024 * 1024):
+    """Return a full-content fingerprint for cache-correct identity checks.
 
     This intentionally avoids mtime/path so copied videos or JSON artifacts can
-    be reused when their bytes are identical, while changed bytes invalidate the
-    cache even if timestamps are misleading.
+    be reused when their bytes are identical, while any byte change invalidates
+    the cache even if timestamps, size, head, or tail bytes are misleading.
     """
-    path = os.fspath(path)
-    size = os.path.getsize(path)
-    h = hashlib.md5()
-    h.update(str(size).encode("ascii"))
-    h.update(b"\0")
-    with open(path, "rb") as f:
-        head = f.read(sample_bytes)
-        if size > sample_bytes:
-            f.seek(max(0, size - sample_bytes))
-            tail = f.read(sample_bytes)
-        else:
-            tail = b""
-    h.update(head)
-    h.update(b"\0")
-    h.update(tail)
+    h = hashlib.sha256()
+    with open(os.fspath(path), "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
     return h.hexdigest()
-
 def video_fingerprint(video_path):
-    """Fast video content fingerprint used as the root pipeline asset print."""
+    """Full video content fingerprint used as the root pipeline asset print."""
     return file_fingerprint(video_path)
 
 def step_cache_key(video_path, step_name, params_fingerprint=""):

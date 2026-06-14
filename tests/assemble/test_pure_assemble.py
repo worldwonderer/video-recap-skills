@@ -1,10 +1,180 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-assemble' / 'scripts'))
+import json
 import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
-from assemble import _apply_narration_speed, _build_audio_filter_complex, _build_timed_narration, _escape_ass_text, _generate_ass, _generate_srt, _seconds_to_ass_time, _seconds_to_srt_time, _source_subtitle_mask_filter, _subtitle_burn_filter, assemble_video, assembly_settings_fingerprint, final_loudnorm_filter
+from assemble import _adjust_tts_speed, _apply_narration_speed, _assembly_manifest_payload, _build_audio_filter_complex, _build_timed_narration, _build_video_clips, _emit_timeline, _resolve_final_output, _value_fingerprint, _escape_ass_text, _generate_ass, _generate_srt, _seconds_to_ass_time, _seconds_to_srt_time, _source_subtitle_mask_filter, _subtitle_burn_filter, assemble_video, assembly_settings_fingerprint, final_loudnorm_filter
 from lib import CONFIG
+
+
+def test_adjust_tts_speed_derives_outputs_from_audio_name_only(monkeypatch, tmp_path):
+    """Parent dirs containing .wav must not redirect adjusted files outside the audio dir."""
+    wav_parent = tmp_path / "episode.wav-cache"
+    wav_parent.mkdir()
+    src = wav_parent / "narr_000.wav"
+    src.write_bytes(b"wav")
+    commands = []
+
+    def fake_run_cmd(cmd, **kw):
+        commands.append(cmd)
+        Path(cmd[-1]).write_bytes(b"adjusted")
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("assemble.get_video_duration", lambda path: 2.2 if Path(path) == src else 2.0)
+    monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
+
+    adjusted, actual_dur = _adjust_tts_speed(src, target_duration=2.0, work_dir=tmp_path)
+
+    assert actual_dur == 2.0
+    assert Path(adjusted) == wav_parent / "narr_000_adj.wav"
+    assert commands[-1][-1] == str(wav_parent / "narr_000_adj.wav")
+
+
+def test_adjust_tts_speed_truncation_keeps_output_next_to_audio(monkeypatch, tmp_path):
+    wav_parent = tmp_path / "episode.wav-cache"
+    wav_parent.mkdir()
+    src = wav_parent / "narr_000.wav"
+    src.write_bytes(b"wav")
+    commands = []
+
+    def fake_run_cmd(cmd, **kw):
+        commands.append(cmd)
+        Path(cmd[-1]).write_bytes(b"cut")
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("assemble.get_video_duration", lambda path: 10.0 if Path(path) == src else 1.0)
+    monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
+
+    adjusted, actual_dur = _adjust_tts_speed(src, target_duration=1.0, work_dir=tmp_path)
+
+    assert actual_dur == 1.0
+    assert Path(adjusted) == wav_parent / "narr_000_cut.wav"
+    assert commands[-1][-1] == str(wav_parent / "narr_000_cut.wav")
+
+
+def test_build_video_clips_prefers_fingerprint_matched_validated_cut_plan(monkeypatch, tmp_path):
+    original = tmp_path / "original.mp4"
+    edited = tmp_path / "edited_source.mp4"
+    original.write_bytes(b"orig")
+    edited.write_bytes(b"edited")
+    import json
+    raw_payload = {"clips": [{"source_start": 99.0, "source_end": 100.0}]}
+    (tmp_path / "clip_plan.json").write_text(json.dumps(raw_payload), encoding="utf-8")
+    (tmp_path / "clip_plan_validated.json").write_text(json.dumps({
+        "raw_plan_fingerprint": _value_fingerprint(raw_payload),
+        "clips": [
+            {"clip_id": 0, "source_start": 10.0, "source_end": 20.0, "output_start": 0.0, "output_end": 10.0},
+            {"clip_id": 1, "source_start": 40.0, "source_end": 45.0, "output_start": 10.0, "output_end": 15.0},
+        ],
+    }), encoding="utf-8")
+    monkeypatch.setitem(CONFIG, "source_video", str(original))
+    monkeypatch.setitem(CONFIG, "source_video_explicit", True)
+
+    clips = _build_video_clips(edited, tmp_path, duration_s=15.0)
+
+    assert clips == [
+        {"source_path": str(original), "source_start": 10.0, "source_end": 20.0, "timeline_start": 0.0, "timeline_end": 10.0},
+        {"source_path": str(original), "source_start": 40.0, "source_end": 45.0, "timeline_start": 10.0, "timeline_end": 15.0},
+    ]
+
+
+def test_build_video_clips_ignores_ambient_source_video_without_explicit_opt_in(monkeypatch, tmp_path):
+    original = tmp_path / "ambient_original.mp4"
+    edited = tmp_path / "edited_source.mp4"
+    original.write_bytes(b"orig")
+    edited.write_bytes(b"edited")
+    (tmp_path / "clip_plan.json").write_text(
+        json.dumps({"clips": [{"start": 10.0, "end": 20.0}]}), encoding="utf-8"
+    )
+    monkeypatch.setitem(CONFIG, "source_video", str(original))
+    monkeypatch.setitem(CONFIG, "source_video_explicit", False)
+
+    clips = _build_video_clips(edited, tmp_path, duration_s=15.0)
+    manifest = _assembly_manifest_payload(edited, [], tmp_path, tmp_path / "output.mp4")
+
+    assert clips == [{
+        "source_path": str(edited),
+        "source_start": 0.0,
+        "source_end": 15.0,
+        "timeline_start": 0.0,
+        "timeline_end": 15.0,
+    }]
+    assert manifest["source_video"] is None
+    assert manifest["source_video_fingerprint"] is None
+
+
+def test_build_video_clips_ignores_stale_validated_cut_plan(monkeypatch, tmp_path):
+    import os
+
+    original = tmp_path / "original.mp4"
+    edited = tmp_path / "edited_source.mp4"
+    original.write_bytes(b"orig")
+    edited.write_bytes(b"edited")
+    (tmp_path / "clip_plan.json").write_text(
+        '{"clips":[{"start":40.0,"end":45.0}]}', encoding="utf-8"
+    )
+    (tmp_path / "clip_plan_validated.json").write_text(
+        '{"clips":[{"clip_id":0,"source_start":0.0,"source_end":10.0,"output_start":0.0,"output_end":10.0}]}',
+        encoding="utf-8",
+    )
+    os.utime(tmp_path / "clip_plan_validated.json", (1_000, 1_000))
+    os.utime(tmp_path / "clip_plan.json", (1_000, 1_000))
+    monkeypatch.setitem(CONFIG, "source_video", str(original))
+    monkeypatch.setitem(CONFIG, "source_video_explicit", True)
+
+    clips = _build_video_clips(edited, tmp_path, duration_s=5.0)
+
+    assert clips == [
+        {"source_path": str(original), "source_start": 40.0, "source_end": 45.0, "timeline_start": 0.0, "timeline_end": 5.0},
+    ]
+
+
+def test_assemble_main_creates_missing_output_dir(monkeypatch, tmp_path):
+    import sys
+    import assemble
+
+    video = tmp_path / "input.mp4"
+    video.write_bytes(b"video")
+    stale_source = tmp_path / "stale_source.mp4"
+    stale_source.write_bytes(b"stale")
+    monkeypatch.setitem(CONFIG, "source_video", str(stale_source))
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "tts_meta.json").write_text(json.dumps({"segments": []}), encoding="utf-8")
+    (work / "timeline.json").write_text("{}", encoding="utf-8")
+    (work / "narration.wav").write_bytes(b"narration")
+    (work / "subtitles.srt").write_text("", encoding="utf-8")
+    missing_out = tmp_path / "missing" / "nested"
+
+    def fake_assemble(input_video, tts_segments, work_dir, output_path):
+        Path(output_path).write_bytes(b"mp4")
+        return output_path
+
+    monkeypatch.setattr("assemble.assemble_video", fake_assemble)
+    monkeypatch.setattr(sys, "argv", [
+        "assemble.py", str(video), "--work-dir", str(work),
+        "--output-dir", str(missing_out), "--recap-stem", "demo",
+    ])
+
+    assemble.main()
+
+    assert (missing_out / "recap_demo.mp4").read_bytes() == b"mp4"
+    manifest = json.loads((work / "assembly_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["source_video"] is None
+    assert manifest["source_video_fingerprint"] is None
+    assert manifest["final_output"].endswith("recap_demo.mp4")
+
+
+def test_resolve_final_output_overwrites_stable_alias(tmp_path):
+    """The recap output is always the stable alias recap_<stem>.mp4 (overwritten in
+    place), so the iterate-on-narration loop refreshes one file instead of spawning
+    fingerprint-suffixed copies of every render."""
+    (tmp_path / "recap_clip.mp4").write_bytes(b"previous-render")
+
+    resolved = _resolve_final_output(tmp_path, "clip")
+
+    assert resolved == tmp_path / "recap_clip.mp4"
 
 
 def test_source_subtitle_mask_filter_toggles_with_config(monkeypatch):
@@ -130,11 +300,59 @@ def test_build_timed_narration_clamps_delay_to_slot(monkeypatch, tmp_path):
 
 
 def test_subtitle_burn_filter_escapes_path():
-    path = Path("/tmp/video recap/a:b,c[1].ass")
+    path = Path("/tmp/video recap/o'hara/a:b,c[1].ass")
     filt = _subtitle_burn_filter(path)
     assert filt.startswith("subtitles=")
     assert "video recap" in filt
+    assert r"o\\\'hara" in filt
     assert r"a\:b\,c\[1\].ass" in filt
+    assert "filename='" not in filt
+
+
+def test_subtitle_burn_filter_accepts_apostrophe_path_with_ffmpeg(tmp_path):
+    import subprocess
+
+    video = tmp_path / "input.mp4"
+    ass_dir = tmp_path / "video recap"
+    ass_dir.mkdir()
+    ass = ass_dir / "o'hara.ass"
+    ass.write_text(
+        "\n".join([
+            "[Script Info]",
+            "ScriptType: v4.00+",
+            "[V4+ Styles]",
+            (
+                "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+                "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+                "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+                "Alignment, MarginL, MarginR, MarginV, Encoding"
+            ),
+            (
+                "Style: Default,Arial,12,&H00FFFFFF,&H000000FF,&H00000000,"
+                "&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,1"
+            ),
+            "[Events]",
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+            "Dialogue: 0,0:00:00.00,0:00:00.10,Default,,0,0,0,,Hi",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    create = subprocess.run([
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "color=c=black:s=16x16:d=0.1",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(video),
+    ], capture_output=True, text=True)
+    if create.returncode != 0:
+        pytest.skip(f"ffmpeg unavailable for subtitle smoke test: {create.stderr}")
+
+    burn = subprocess.run([
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(video), "-vf", _subtitle_burn_filter(ass),
+        "-frames:v", "1", "-f", "null", "-",
+    ], capture_output=True, text=True)
+
+    assert burn.returncode == 0, burn.stderr
 
 
 def test_assemble_video_burns_ass_subtitles(monkeypatch, tmp_path):
@@ -173,6 +391,37 @@ def test_assemble_video_burns_ass_subtitles(monkeypatch, tmp_path):
     assert any(str(arg).startswith("subtitles=") for arg in ffmpeg_cmd)
     assert "-c:v" in ffmpeg_cmd
     assert "libx264" in ffmpeg_cmd
+
+
+def test_assemble_video_rejects_empty_tts_segments(tmp_path):
+    video = tmp_path / "input.mp4"
+    video.write_bytes(b"video")
+
+    with pytest.raises(RuntimeError, match="没有有效解说音频"):
+        assemble_video(video, [], tmp_path, tmp_path / "output.mp4")
+
+
+def test_emit_timeline_failure_is_not_swallowed(monkeypatch, tmp_path):
+    def boom(*args, **kwargs):
+        raise RuntimeError("timeline schema failure")
+
+    monkeypatch.setattr("assemble._probe_canvas", lambda path: {"width": 1280, "height": 720, "fps": 30.0})
+    monkeypatch.setattr(
+        "assemble._build_video_clips",
+        lambda input_video, work_dir, duration_s: [{
+            "source_path": str(input_video),
+            "source_start": 0.0,
+            "source_end": 1.0,
+            "timeline_start": 0.0,
+            "timeline_end": 1.0,
+        }],
+    )
+    monkeypatch.setattr("assemble.build_timeline", boom)
+
+    with pytest.raises(RuntimeError, match="timeline schema failure"):
+        _emit_timeline(tmp_path / "input.mp4", [{"start": 0.0, "end": 1.0}], tmp_path, 1.0, False)
+
+    assert not (tmp_path / "timeline.json").exists()
 
 
 def test_assemble_video_without_burn_keeps_video_copy(monkeypatch, tmp_path):
@@ -346,3 +595,69 @@ def test_final_loudnorm_filter_and_fingerprint(monkeypatch):
     monkeypatch.setitem(CONFIG, "final_loudnorm", False)
     assert final_loudnorm_filter() is None
     assert assembly_settings_fingerprint()["audio_mix"]["final_loudnorm"] == "off"
+
+
+def test_assembly_settings_fingerprint_tracks_render_affecting_settings(monkeypatch):
+    monkeypatch.setitem(CONFIG, "burn_subtitles", False)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_ratio", 0.14)
+    monkeypatch.setitem(CONFIG, "narration_speed", 1.0)
+    monkeypatch.setitem(CONFIG, "bgm_path", "")
+    monkeypatch.setitem(CONFIG, "bgm_volume", 0.18)
+    monkeypatch.setitem(CONFIG, "duck_fade_seconds", 0.25)
+    base = assembly_settings_fingerprint()
+
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", True)
+    assert assembly_settings_fingerprint() != base
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_ratio", 0.20)
+    assert assembly_settings_fingerprint() != base
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_ratio", 0.14)
+    monkeypatch.setitem(CONFIG, "narration_speed", 1.2)
+    assert assembly_settings_fingerprint() != base
+    monkeypatch.setitem(CONFIG, "narration_speed", 1.0)
+    monkeypatch.setitem(CONFIG, "bgm_path", "/tmp/bgm.mp3")
+    assert assembly_settings_fingerprint() != base
+    monkeypatch.setitem(CONFIG, "bgm_path", "")
+    monkeypatch.setitem(CONFIG, "bgm_volume", 0.30)
+    assert assembly_settings_fingerprint() != base
+    monkeypatch.setitem(CONFIG, "bgm_volume", 0.18)
+    monkeypatch.setitem(CONFIG, "duck_fade_seconds", 0.50)
+    assert assembly_settings_fingerprint() != base
+
+
+
+def test_assemble_video_uses_silent_original_track_when_source_has_no_audio(monkeypatch, tmp_path):
+    video = tmp_path / "silent.mp4"
+    video.write_bytes(b"video")
+    output = tmp_path / "output.mp4"
+    commands = []
+
+    def fake_run_cmd(cmd):
+        commands.append(cmd)
+        output.write_bytes(b"mp4")
+        return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setitem(CONFIG, "burn_subtitles", False)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)
+    monkeypatch.setitem(CONFIG, "final_loudnorm", False)
+    monkeypatch.setattr("assemble.get_video_duration", lambda path: 4.0)
+    monkeypatch.setattr("assemble._has_audio_stream", lambda path: False)
+    monkeypatch.setattr("assemble._build_timed_narration", lambda segments, out, duration, wd: Path(out).write_bytes(b"narration"))
+    monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
+
+    assemble_video(video, [{
+        "start": 0.0,
+        "end": 3.0,
+        "actual_place_start": 0.2,
+        "actual_place_end": 2.0,
+        "narration": "无原声音轨也应能混音。",
+        "audio_path": str(tmp_path / "narr.wav"),
+        "audio_duration": 1.0,
+    }], tmp_path, output)
+
+    ffmpeg_cmd = commands[-1]
+    joined = " ".join(str(part) for part in ffmpeg_cmd)
+    assert "anullsrc=channel_layout=stereo:sample_rate=48000" in joined
+    assert "[2:a]volume=" in joined
+    assert output.exists()

@@ -84,3 +84,29 @@ def test_assemble_video_runs_with_loudnorm_disabled_and_quiet_branch(tmp_path, m
     assemble_video(src, segs, work, out)
     assert out.exists()
     assert "audio" in _stream_types(out)
+
+
+
+def _make_silent_source_video(path, seconds=3):
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", f"color=c=red:s=320x240:d={seconds}:r=25",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        str(path),
+    ], check=True, capture_output=True)
+
+
+def test_assemble_video_runs_when_source_has_no_audio_stream(tmp_path, monkeypatch):
+    monkeypatch.setitem(CONFIG, "final_loudnorm", False)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)
+    work = tmp_path / "silent_work"
+    work.mkdir()
+    src = tmp_path / "silent_src.mp4"
+    _make_silent_source_video(src, seconds=3)
+    segs = _segment(work, 0.5, 2.5, overlaps=False, dur=1.0)
+    out = work / "silent_out.mp4"
+
+    assemble_video(src, segs, work, out)
+
+    assert out.exists() and out.stat().st_size > 0
+    assert "audio" in _stream_types(out)

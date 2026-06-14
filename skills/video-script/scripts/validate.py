@@ -6,6 +6,7 @@ understanding index produced by video-understanding. Writes narration_lint.json 
 in full mode, rewrites narration.json with quiet-window alignment applied.
 """
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -20,6 +21,32 @@ from narration import (
 def _load(path):
     path = Path(path)
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+
+def _value_fingerprint(value):
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()
+
+
+def _load_cut_clip_plan(work_dir):
+    raw_plan = Path(work_dir) / "clip_plan.json"
+    validated_plan = Path(work_dir) / "clip_plan_validated.json"
+    if not validated_plan.exists():
+        return _load(raw_plan)
+    if not raw_plan.exists():
+        return _load(validated_plan)
+
+    raw = _load(raw_plan)
+    validated = _load(validated_plan)
+    if (
+        isinstance(validated, dict)
+        and validated.get("raw_plan_fingerprint") == _value_fingerprint(raw)
+    ):
+        return validated
+    # The orchestrator validates before video-cut refreshes clip_plan_validated.json.
+    # Without a matching raw-plan provenance fingerprint, lint against the current
+    # raw plan even when mtimes are equal or misleading.
+    return raw
 
 
 def main():
@@ -38,7 +65,7 @@ def main():
     silence_periods = _load(work_dir / "silence_periods.json") or []
     clip_plan = None
     if args.mode == "cut":
-        clip_plan = _load(work_dir / "clip_plan_validated.json") or _load(work_dir / "clip_plan.json")
+        clip_plan = _load_cut_clip_plan(work_dir)
 
     validate_narration_or_raise(narration, vlm_analysis, clip_plan=clip_plan,
                                 mode=args.mode, work_dir=work_dir)

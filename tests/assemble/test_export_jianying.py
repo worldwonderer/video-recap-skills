@@ -97,6 +97,21 @@ def test_export_writes_three_files(tmp_path):
     assert meta["draft_name"] == "recap_demo" and meta["tm_duration"] == 15_000_000
 
 
+def test_export_uses_collision_safe_draft_folder(tmp_path):
+    existing = tmp_path / "recap_demo"
+    existing.mkdir()
+    (existing / "draft_content.json").write_text("manual edit", encoding="utf-8")
+
+    draft_dir, notes = export_timeline_to_jianying(
+        _sample_timeline(), str(tmp_path), draft_name="recap_demo",
+        new_id=_counter_ids(), probe=_fake_probe)
+
+    assert Path(draft_dir).name == "recap_demo_2"
+    assert (existing / "draft_content.json").read_text(encoding="utf-8") == "manual edit"
+    assert any("避免覆盖" in note for note in notes)
+    assert (Path(draft_dir) / "draft_content.json").exists()
+
+
 def test_exporter_handles_timeline_without_bgm():
     tl = build_timeline({"width": 100, "height": 100, "fps": 30}, 5.0,
                         [{"source_path": "/s.mp4", "source_start": 0.0, "source_end": 5.0,
@@ -149,3 +164,49 @@ def test_core_assemble_does_not_import_exporter():
             "assert 'export_jianying' not in sys.modules, 'core imported the 剪映 exporter'")
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+
+def test_exporter_repeats_looped_bgm_to_cover_timeline(tmp_path):
+    bgm = tmp_path / "bgm.mp3"
+    bgm.write_bytes(b"bgm")
+
+    def short_bgm_probe(path):
+        if str(path).endswith("bgm.mp3"):
+            return 5_000_000, 0, 0
+        return 15_000_000, 1920, 1080
+
+    timeline = _sample_timeline()
+    for track in timeline["tracks"]:
+        if track.get("role") == "bgm":
+            track["segments"][0]["source_path"] = str(bgm)
+    content, _meta, notes = build_draft(timeline, new_id=_counter_ids(), probe=short_bgm_probe)
+    bgm_track = next(t for t in content["tracks"] if t["type"] == "audio" and t["name"] == "bgm")
+    starts = [seg["target_timerange"]["start"] for seg in bgm_track["segments"]]
+    durations = [seg["target_timerange"]["duration"] for seg in bgm_track["segments"]]
+
+    assert starts == [0, 5_000_000, 10_000_000]
+    assert durations == [5_000_000, 5_000_000, 5_000_000]
+    assert sum(durations) == 15_000_000
+    assert not any("BGM 素材" in note for note in notes)
+
+
+def test_looped_bgm_keyframes_are_windowed_per_repeated_piece(tmp_path):
+    bgm = tmp_path / "bgm.mp3"
+    bgm.write_bytes(b"bgm")
+
+    def short_bgm_probe(path):
+        if str(path).endswith("bgm.mp3"):
+            return 5_000_000, 0, 0
+        return 15_000_000, 1920, 1080
+
+    timeline = _sample_timeline()
+    for track in timeline["tracks"]:
+        if track.get("role") == "bgm":
+            track["segments"][0]["source_path"] = str(bgm)
+    content, _meta, _notes = build_draft(timeline, new_id=_counter_ids(), probe=short_bgm_probe)
+    bgm_track = next(t for t in content["tracks"] if t["type"] == "audio" and t["name"] == "bgm")
+    keyframe_counts = [len(seg["common_keyframes"]) for seg in bgm_track["segments"]]
+
+    assert keyframe_counts[0] == 1
+    assert keyframe_counts[1:] == [0, 0]

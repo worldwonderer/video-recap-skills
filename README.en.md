@@ -103,14 +103,16 @@ python3 skills/video-recap/scripts/recap.py --doctor
 
 Each skill ships its own `lib.py`; there is no shared code file, and the JSON artifacts are the only interface. See each skill's `SKILL.md` for its full options.
 
+Run tests with `python3 scripts/test.py`. Do not run bare `pytest` at the repository root: skills intentionally keep same-named top-level modules (for example `lib.py`), so the test runner isolates skill groups in separate processes.
+
 ## Output
 
-- `recap_<video>.mp4`: the final recap. `subtitles.srt` (plus `subtitles.ass` with `--burn-subtitles`)
+- `recap_<video>.mp4`: the final recap; a stable output alias overwritten in place on every run, so iterating on the narration refreshes the same file. `subtitles.srt` (plus `subtitles.ass` with `--burn-subtitles`)
 - `work_dir/narration.json`: the narration script (`narration_lint.json` timing diagnostics, `narration_review.md` review notes)
 - `work_dir/agent_narration_brief.md`: timing and scene brief for the agent
 - `work_dir/vlm_analysis.json` · `asr_result.json` · `silence_periods.json` · `timeline_fusion.json`: understanding artifacts
 - `work_dir/clip_plan.json` · `edited_source.mp4` · `narration_mapped.json`: cut-mode artifacts
-- `work_dir/timeline.json` · `tts_segments/` · `tts_meta.json`: multi-track timeline and TTS audio
+- `work_dir/timeline.json` · `work_dir/assembly_manifest.json` · `tts_segments/` · `tts_meta.json`: multi-track timeline, slim render record, and TTS audio
 
 ## References
 

@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-script' / 'scripts'))
 import json
+import narration
 import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
 from lib import CONFIG
@@ -31,6 +32,14 @@ def test_lint_narration_reports_warnings_and_errors(tmp_path, monkeypatch):
     assert "slot_too_short" in codes
     assert "empty_narration" in codes
     assert "incomplete_sentence" in codes
+    assert (tmp_path / "narration_lint.json").exists()
+
+
+def test_lint_narration_rejects_empty_file(tmp_path):
+    report = lint_narration([], work_dir=tmp_path)
+
+    assert report["ok"] is False
+    assert any(issue["code"] == "empty_narration_file" for issue in report["errors"])
     assert (tmp_path / "narration_lint.json").exists()
 
 
@@ -143,8 +152,21 @@ def test_post_dedup_keeps_distinct_short_beats(monkeypatch):
 
 
 def test_agent_brief_includes_mimo_video_overview(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "mimo_video_overview", True)
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_max_seconds", 20.0)
+    monkeypatch.setitem(CONFIG, "mimo_video_chunk_min_seconds", 1.0)
+    chunks = [{"chunk_id": 0, "scene_id": 0, "start": 0.0, "end": 3.0, "content": "这是 MiMo 对分片汇总的故事线概览。"}]
+    overview = {
+        "input": "scene_chunks",
+        "content": "这是 MiMo 对分片汇总的故事线概览。",
+        "reasoning_content": "内部推理",
+        "chunks": chunks,
+        "chunks_fingerprint": narration._mimo_cached_chunks_fingerprint(chunks),
+        "settings": narration._mimo_video_settings_fingerprint(),
+    }
+    overview["overview_fingerprint"] = narration._mimo_overview_payload_fingerprint(overview)
     (tmp_path / "mimo_video_overview.json").write_text(
-        '{"input":"scene_chunks","content":"这是 MiMo 对分片汇总的故事线概览。","reasoning_content":"内部推理"}',
+        json.dumps(overview, ensure_ascii=False),
         encoding="utf-8",
     )
     monkeypatch.setitem(CONFIG, "edit_mode", "full")
@@ -239,3 +261,47 @@ def test_assess_understanding_substrate_levels():
         [{"start": 0.0, "end": 3.0, "text": "对白" * 60}],
     )
     assert rich["level"] == "rich"
+
+
+def test_cut_validate_prefers_raw_plan_when_validated_is_stale(tmp_path):
+    import sys
+    import importlib.util
+
+    validate_path = Path(__file__).resolve().parents[2] / "skills" / "video-script" / "scripts" / "validate.py"
+    spec = importlib.util.spec_from_file_location("video_script_validate_under_test", validate_path)
+    validate = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = validate
+    spec.loader.exec_module(validate)
+
+    raw = tmp_path / "clip_plan.json"
+    validated = tmp_path / "clip_plan_validated.json"
+    raw.write_text(json.dumps({"clips": [{"start": 40.0, "end": 50.0}]}), encoding="utf-8")
+    validated.write_text(json.dumps({"clips": [{"clip_id": 0, "source_start": 0.0, "source_end": 10.0}]}), encoding="utf-8")
+
+    plan = validate._load_cut_clip_plan(tmp_path)
+
+    assert plan["clips"][0]["start"] == 40.0
+
+
+def test_cut_validate_uses_validated_plan_when_raw_fingerprint_matches(tmp_path):
+    import sys
+    import importlib.util
+
+    validate_path = Path(__file__).resolve().parents[2] / "skills" / "video-script" / "scripts" / "validate.py"
+    spec = importlib.util.spec_from_file_location("video_script_validate_fresh_under_test", validate_path)
+    validate = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = validate
+    spec.loader.exec_module(validate)
+
+    raw_payload = {"clips": [{"start": 40.0, "end": 50.0}]}
+    raw = tmp_path / "clip_plan.json"
+    validated = tmp_path / "clip_plan_validated.json"
+    raw.write_text(json.dumps(raw_payload), encoding="utf-8")
+    validated.write_text(json.dumps({
+        "raw_plan_fingerprint": validate._value_fingerprint(raw_payload),
+        "clips": [{"clip_id": 0, "source_start": 40.0, "source_end": 50.0}],
+    }), encoding="utf-8")
+
+    plan = validate._load_cut_clip_plan(tmp_path)
+
+    assert plan["clips"][0]["source_start"] == 40.0

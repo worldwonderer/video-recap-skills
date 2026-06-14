@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-assemble' / 'scripts'))
 import json  # noqa: E402
-from timeline import build_timeline, ducking_keyframes, save_timeline, load_timeline  # noqa: E402
+from timeline import build_timeline, ducking_keyframes, load_timeline, save_timeline, variable_ducking_keyframes  # noqa: E402
 
 
 def test_ducking_keyframes_holds_idle_and_dips_under_window():
@@ -86,3 +86,35 @@ def test_timeline_round_trips(tmp_path):
     save_timeline(tl, p)
     assert load_timeline(p) == tl
     assert json.loads(p.read_text(encoding="utf-8")) == tl
+
+
+
+def test_build_timeline_uses_quiet_ducking_gain_for_quiet_segments():
+    tl = build_timeline(
+        {"width": 1280, "height": 720, "fps": 25},
+        10.0,
+        [{"source_path": "/src.mp4", "source_start": 0.0, "source_end": 10.0,
+          "timeline_start": 0.0, "timeline_end": 10.0}],
+        [{"source_path": "/n0.wav", "timeline_start": 2.0, "timeline_end": 4.0,
+          "text": "quiet", "overlaps_speech": False}],
+        ducking={"idle": 0.85, "speech": 0.2, "quiet": 0.12, "fade": 0.25},
+    )
+
+    keyframes = tl["tracks"][0]["clips"][0]["audio"]["volume_keyframes"]
+    gains = [kf["gain"] for kf in keyframes]
+    assert 0.12 in gains
+    assert 0.2 not in gains
+
+
+def test_variable_ducking_keyframes_do_not_release_to_idle_between_close_windows():
+    keyframes = variable_ducking_keyframes(
+        [(1.0, 4.0, 0.2), (4.1, 5.0, 0.12)],
+        idle=0.85,
+        fade=0.25,
+        span_start=0.0,
+        span_end=8.0,
+    )
+
+    between = [kf for kf in keyframes if 4.0 < kf["t"] < 5.0]
+    assert between
+    assert all(kf["gain"] != 0.85 for kf in between)

@@ -3,12 +3,14 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from lib import CONFIG
 from lib import log, mimo_tts_api_call, get_video_duration
-from lib import _truncate_at_sentence
+from lib import _truncate_at_sentence, stable_hash, file_fingerprint
 
 SUPPORTED_TTS_ENGINES = {"mimo-tts"}
+TTS_CACHE_VERSION = 1
 
 
 def _parse_rate_offset(rate_str):
@@ -78,23 +80,13 @@ def _clean_narration_text(text):
 
 def _synthesize_segment(i, seg, narration, tts_dir, engine):
     """合成单个 TTS 段（线程安全），支持 resume 跳过已有文件"""
-    text = _clean_narration_text(seg["narration"])
-    if not text or not text.strip():
+    prepared = _prepare_tts_segment(i, seg, narration, tts_dir, engine)
+    if prepared is None:
         return None
-
-    output_wav = tts_dir / f"narr_{i:03d}.wav"
-
-    # Resume: 已有 WAV 文件直接复用（narration 在 step 5 后不变）
-    if output_wav.exists():
-        existing_dur = _get_audio_duration(output_wav)
-        if existing_dur > 0:
-            log(f"  段 {i+1}: 复用已有 ({existing_dur:.1f}s)")
-            return _build_tts_segment_result(i, seg, text, output_wav, existing_dur, 0.0)
-
-    if CONFIG.get("tts_dynamic_params", True):
-        rate, pitch = _compute_tts_params(text, narration, i)
-    else:
-        rate, pitch = "+0%", "+0Hz"
+    text, output_wav, rate, pitch, cache_key = prepared
+    cached = _reuse_tts_segment_cache(i, seg, output_wav, text, rate, cache_key)
+    if cached:
+        return cached
 
     _run_tts_engine(engine, text, output_wav, rate=rate, pitch=pitch)
 
@@ -112,6 +104,7 @@ def _synthesize_segment(i, seg, narration, tts_dir, engine):
             _run_tts_engine(engine, text, output_wav, rate=rate, pitch=pitch)
             dur = _get_audio_duration(output_wav)
 
+    _write_tts_segment_cache(output_wav, cache_key, text, dur, _parse_rate_offset(rate))
     return _build_tts_segment_result(i, seg, text, output_wav, dur, _parse_rate_offset(rate))
 
 
@@ -138,14 +131,37 @@ def synthesize_tts(narration, work_dir):
     tts_dir = work_dir / "tts_segments"
     tts_dir.mkdir(exist_ok=True)
 
+    if not narration:
+        raise RuntimeError("narration.json 没有可配音的解说段，已中止以避免生成无解说视频")
+
+    cache_engine = "mimo-tts"
+    cached_segments = []
+    needs_fresh = False
+    prepared_count = 0
+    for i, seg in enumerate(narration):
+        prepared = _prepare_tts_segment(i, seg, narration, tts_dir, cache_engine)
+        if prepared is None:
+            continue
+        prepared_count += 1
+        text, output_wav, rate, _pitch, cache_key = prepared
+        cached = _reuse_tts_segment_cache(i, seg, output_wav, text, rate, cache_key)
+        if not cached:
+            needs_fresh = True
+            break
+        cached_segments.append(cached)
+    if prepared_count == 0:
+        raise RuntimeError("narration.json 没有可配音的有效文本，已中止以避免生成无解说视频")
+    if not needs_fresh:
+        cached_segments.sort(key=lambda x: x["index"])
+        log(f"TTS 引擎: {cache_engine} (cache)")
+        return cached_segments, cache_engine
+
     engine = resolve_tts_engine()
     if engine == "mimo-tts" and not CONFIG.get("mimo_tts_api_key"):
         key_name = CONFIG.get("mimo_tts_api_key_source", "MIMO_API_KEY")
         raise RuntimeError(f"请设置 {key_name} 环境变量用于 MiMo TTS")
 
     log(f"TTS 引擎: {engine}")
-    if not narration:
-        return [], engine
 
     segments = []
     failures = []
@@ -177,6 +193,8 @@ def synthesize_tts(narration, work_dir):
         )
     if failures:
         log(f"警告: TTS 部分失败 {len(failures)}/{len(narration)} 段，继续生成部分解说")
+    if not segments:
+        raise RuntimeError("TTS 没有生成任何有效解说音频，已中止以避免生成无解说视频")
     return segments, engine
 
 
@@ -212,14 +230,108 @@ def _run_tts_engine(engine, text, output_wav, rate="+0%", pitch="+0Hz"):
 
 def _cleanup_partial_tts_outputs(output_wav):
     """Remove stale partial media files before/after a failed TTS attempt."""
-    wav_path = str(output_wav)
-    mp3_path = wav_path.replace(".wav", ".mp3")
-    for path in (wav_path, mp3_path):
+    wav_path = Path(output_wav)
+    mp3_path = wav_path.with_suffix(".mp3")
+    cache_path = str(_tts_segment_cache_path(output_wav))
+    for path in (str(wav_path), str(mp3_path), cache_path):
         try:
             if os.path.exists(path):
                 os.remove(path)
         except OSError:
             pass
+
+
+def _tts_segment_cache_path(output_wav):
+    return Path(str(output_wav) + ".cache.json")
+
+
+def _prepare_tts_segment(index, seg, narration, tts_dir, engine):
+    text = _clean_narration_text(seg["narration"])
+    if not text or not text.strip():
+        return None
+    output_wav = tts_dir / f"narr_{index:03d}.wav"
+    if CONFIG.get("tts_dynamic_params", True):
+        rate, pitch = _compute_tts_params(text, narration, index)
+    else:
+        rate, pitch = "+0%", "+0Hz"
+    cache_key = _tts_segment_cache_key(engine, index, seg, text, rate, pitch)
+    return text, output_wav, rate, pitch, cache_key
+
+
+def _reuse_tts_segment_cache(index, seg, output_wav, source_text, rate, cache_key):
+    cached = _load_tts_segment_cache(output_wav, cache_key)
+    if not cached:
+        return None
+    existing_dur = _get_audio_duration(output_wav)
+    if existing_dur <= 0:
+        return None
+    spoken_text = str(cached.get("spoken_text") or source_text)
+    rate_offset = float(cached.get("tts_rate_offset", _parse_rate_offset(rate)) or 0.0)
+    log(f"  段 {index+1}: 复用已有 ({existing_dur:.1f}s)")
+    return _build_tts_segment_result(index, seg, spoken_text, output_wav, existing_dur, rate_offset)
+
+
+def _tts_segment_cache_key(engine, index, seg, source_text, rate, pitch):
+    """Fingerprint the exact inputs that make a cached segment safe to reuse."""
+    pause = seg.get("pause_after_ms", CONFIG.get("breath_ms", 250))
+    try:
+        pause = int(pause)
+    except (TypeError, ValueError):
+        pause = CONFIG.get("breath_ms", 250)
+    payload = {
+        "version": TTS_CACHE_VERSION,
+        "engine": engine,
+        "source_text": source_text,
+        "segment_index": int(index),
+        "start": round(float(seg.get("start", 0.0)), 3),
+        "end": round(float(seg.get("end", 0.0)), 3),
+        "pause_after_ms": pause,
+        "rate": rate,
+        "pitch": pitch,
+        "settings": tts_settings_fingerprint(engine),
+    }
+    return stable_hash(payload)
+
+
+def _load_tts_segment_cache(output_wav, cache_key):
+    """Return cache metadata only when the sidecar proves the WAV matches narration."""
+    if not output_wav.exists():
+        return None
+    cache_path = _tts_segment_cache_path(output_wav)
+    if not cache_path.exists():
+        return None
+    try:
+        import json
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("cache_key") != cache_key:
+        return None
+    try:
+        if data.get("audio_fingerprint") != file_fingerprint(output_wav):
+            return None
+    except OSError:
+        return None
+    return data
+
+
+def _write_tts_segment_cache(output_wav, cache_key, spoken_text, duration, rate_offset):
+    """Persist non-secret provenance for safe per-segment TTS reuse."""
+    try:
+        import json
+        _tts_segment_cache_path(output_wav).write_text(
+            json.dumps({
+                "version": TTS_CACHE_VERSION,
+                "cache_key": cache_key,
+                "audio_fingerprint": file_fingerprint(output_wav),
+                "spoken_text": spoken_text,
+                "audio_duration": duration,
+                "tts_rate_offset": rate_offset,
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        log(f"  TTS 缓存元数据写入失败（忽略）: {exc}")
 
 
 def _detect_tts_engine():
@@ -312,13 +424,20 @@ def main():
     ap.add_argument("--narration", default=None,
                     help="narration json (default: narration_mapped.json if present, else narration.json)")
     ap.add_argument("--mimo-voice", default=None, help="MiMo TTS voice name")
+    ap.add_argument("--allow-partial-tts", action="store_true",
+                    help="allow output when some narration segments fail TTS")
     args = ap.parse_args()
     work_dir = Path(args.work_dir)
     if args.mimo_voice:
         CONFIG["mimo_tts_voice"] = args.mimo_voice
+    if args.allow_partial_tts:
+        CONFIG["allow_partial_tts"] = True
     if args.narration:
         narration_path = Path(args.narration)
     else:
+        # Cut mode remaps narration to the output timeline (narration_mapped.json);
+        # prefer it when present so a direct run in a cut work_dir voices the right
+        # timestamps. The orchestrator always passes --narration explicitly.
         mapped = work_dir / "narration_mapped.json"
         narration_path = mapped if mapped.exists() else work_dir / "narration.json"
     narration = json.loads(narration_path.read_text(encoding="utf-8"))

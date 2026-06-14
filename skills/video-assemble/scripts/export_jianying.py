@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import uuid
 
 DRAFT_VERSION = 360000
@@ -89,6 +90,48 @@ def _volume_keyframes(keyframes, seg_start_s, new_id):
              "property_type": "KFTypeVolume"}]
 
 
+def _windowed_volume_keyframes(keyframes, seg_start_s, seg_end_s, default_gain, new_id):
+    """Keyframes that affect one split segment, without leaking earlier beats.
+
+    The timeline stores absolute keyframes. When a looped BGM bed is split into
+    several JianYing segments, each piece must receive only the automation for
+    its target window. If a duck spans a piece boundary, seed the piece with the
+    gain active at its start; otherwise leave flat/default pieces keyframe-free.
+    """
+    if not keyframes:
+        return []
+    start = float(seg_start_s)
+    end = float(seg_end_s)
+    default_gain = float(default_gain)
+    ordered = sorted((
+        {"t": float(kf["t"]), "gain": float(kf["gain"])}
+        for kf in keyframes
+        if "t" in kf and "gain" in kf
+    ), key=lambda kf: kf["t"])
+    if not ordered or end <= start:
+        return []
+
+    start_gain = default_gain
+    for kf in ordered:
+        if kf["t"] <= start:
+            start_gain = kf["gain"]
+        else:
+            break
+    inner = [kf for kf in ordered if start <= kf["t"] <= end]
+    if not inner and abs(start_gain - default_gain) < 1e-4:
+        return []
+
+    selected = [{"t": start, "gain": start_gain}]
+    for kf in inner:
+        if abs(kf["t"] - start) < 1e-4:
+            selected[-1] = {"t": start, "gain": kf["gain"]}
+        else:
+            selected.append(kf)
+    if all(abs(kf["gain"] - default_gain) < 1e-4 for kf in selected):
+        return []
+    return _volume_keyframes(selected, start, new_id)
+
+
 def _base_segment(material_id, target_start_us, target_dur_us, render_index,
                   volume, keyframes, new_id):
     return {
@@ -104,6 +147,17 @@ def _base_segment(material_id, target_start_us, target_dur_us, render_index,
         "speed": 1.0, "volume": round(float(volume), 4),
         "is_tone_modify": False, "render_index": render_index,
     }
+
+
+def _audio_segment_piece(material_id, target_start_us, target_dur_us, source_start_us,
+                         source_dur_us, render_index, volume, keyframes, new_id):
+    seg = _base_segment(material_id, target_start_us, target_dur_us, render_index,
+                        volume, keyframes, new_id)
+    seg["source_timerange"] = _timerange(source_start_us, source_dur_us)
+    seg["extra_material_refs"] = []
+    seg["clip"] = None
+    seg["hdr_settings"] = None
+    return seg
 
 
 def _clip_default():
@@ -188,8 +242,11 @@ def build_draft(timeline, new_id=None, probe=None):
                 want_us = _us(te - ts)
                 place_us = want_us
                 if mat_dur_us and want_us > mat_dur_us:
-                    place_us = mat_dur_us
-                    if role == "bgm":  # looping a bed matters; a beat clamp is sub-frame rounding
+                    if role == "bgm" and track.get("loop"):
+                        place_us = want_us
+                    else:
+                        place_us = mat_dur_us
+                    if role == "bgm" and not track.get("loop"):  # looping a bed matters; a beat clamp is sub-frame rounding
                         notes.append(f"BGM 素材({mat_dur_us/1e6:.1f}s) 短于时间线({(te - ts):.1f}s)，剪映中未循环铺满（可在剪映里手动复制延长）")
                 mat_id = new_id()
                 materials["audios"].append({
@@ -199,16 +256,34 @@ def build_draft(timeline, new_id=None, probe=None):
                     "formula_id": "", "id": mat_id, "local_material_id": mat_id,
                     "music_id": mat_id, "name": os.path.basename(path), "path": path,
                     "source_platform": 0, "type": "extract_music", "wave_points": []})
-                speed = _speed_material(new_id)
-                materials["speeds"].append(speed)
                 kfs = _volume_keyframes(s.get("volume_keyframes"), ts, new_id)
                 vol = s.get("gain", 1.0) if not kfs else 1.0
-                seg = _base_segment(mat_id, _us(ts), place_us, ri, vol, kfs, new_id)
-                seg["source_timerange"] = _timerange(0, place_us)
-                seg["extra_material_refs"] = [speed["id"]]
-                seg["clip"] = None
-                seg["hdr_settings"] = None
-                segs.append(seg)
+                if role == "bgm" and track.get("loop") and mat_dur_us and want_us > mat_dur_us:
+                    cursor = 0
+                    while cursor < want_us:
+                        piece = min(mat_dur_us, want_us - cursor)
+                        if piece <= 0:
+                            break
+                        piece_start_s = ts + (cursor / 1_000_000)
+                        piece_end_s = ts + ((cursor + piece) / 1_000_000)
+                        speed = _speed_material(new_id)
+                        materials["speeds"].append(speed)
+                        piece_kfs = _windowed_volume_keyframes(
+                            s.get("volume_keyframes"), piece_start_s, piece_end_s,
+                            s.get("gain", 1.0), new_id)
+                        piece_vol = s.get("gain", 1.0) if not piece_kfs else 1.0
+                        seg = _audio_segment_piece(
+                            mat_id, _us(ts) + cursor, piece, 0, piece, ri, piece_vol, piece_kfs, new_id)
+                        seg["extra_material_refs"] = [speed["id"]]
+                        segs.append(seg)
+                        cursor += piece
+                else:
+                    speed = _speed_material(new_id)
+                    materials["speeds"].append(speed)
+                    seg = _audio_segment_piece(
+                        mat_id, _us(ts), place_us, 0, place_us, ri, vol, kfs, new_id)
+                    seg["extra_material_refs"] = [speed["id"]]
+                    segs.append(seg)
             tracks.append({"attribute": 0, "flag": 0, "id": new_id(),
                            "is_default_name": False, "name": role,
                            "segments": segs, "type": "audio"})
@@ -347,6 +422,40 @@ def _bundle_media(content, draft_dir):
     return notes
 
 
+def _draft_dir_has_user_content(draft_dir):
+    """Return True when writing here could overwrite an existing draft/material."""
+    if not os.path.exists(draft_dir):
+        return False
+    try:
+        return any(os.scandir(draft_dir))
+    except OSError:
+        return True
+
+
+def _collision_safe_draft_dir(out_dir, draft_name):
+    """Pick a fresh draft folder instead of overwriting an existing non-empty one."""
+    base = os.path.join(out_dir, draft_name)
+    if not _draft_dir_has_user_content(base):
+        return base, draft_name
+    idx = 2
+    while True:
+        candidate_name = f"{draft_name}_{idx}"
+        candidate = os.path.join(out_dir, candidate_name)
+        if not _draft_dir_has_user_content(candidate):
+            return candidate, candidate_name
+        idx += 1
+
+
+def _rewrite_material_prefix(content, old_prefix, new_prefix):
+    old_prefix = os.path.abspath(old_prefix)
+    new_prefix = os.path.abspath(new_prefix)
+    for arr in (content["materials"]["videos"], content["materials"]["audios"]):
+        for material in arr:
+            path = material.get("path")
+            if path and os.path.abspath(path).startswith(old_prefix + os.sep):
+                material["path"] = new_prefix + os.path.abspath(path)[len(old_prefix):]
+
+
 def export_timeline_to_jianying(timeline, out_dir, draft_name="recap", new_id=None,
                                 probe=None, bundle_media=False):
     """Write a 剪映 draft folder under out_dir/draft_name. Returns (folder, notes).
@@ -354,19 +463,37 @@ def export_timeline_to_jianying(timeline, out_dir, draft_name="recap", new_id=No
     bundle_media=True copies the referenced media into the draft folder so it is
     self-contained and portable to another machine."""
     content, meta, notes = build_draft(timeline, new_id=new_id, probe=probe)
-    draft_dir = os.path.join(out_dir, draft_name)
-    os.makedirs(draft_dir, exist_ok=True)
-    if bundle_media:
-        notes = notes + _bundle_media(content, draft_dir)
-    meta["draft_name"] = draft_name
-    meta["draft_fold_path"] = draft_dir
-    content["name"] = draft_name
-    # write both filenames for cross-version compatibility (5.9 reads draft_info.json)
-    for fname in ("draft_content.json", "draft_info.json"):
-        with open(os.path.join(draft_dir, fname), "w", encoding="utf-8") as f:
-            json.dump(content, f, ensure_ascii=False, indent=2)
-    with open(os.path.join(draft_dir, "draft_meta_info.json"), "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
+    out_dir = os.path.abspath(out_dir)
+    os.makedirs(out_dir, exist_ok=True)
+    draft_dir, actual_name = _collision_safe_draft_dir(out_dir, draft_name)
+    if actual_name != draft_name:
+        notes.append(f"草稿目录已存在，改写为 {actual_name} 以避免覆盖")
+
+    tmp_parent = tempfile.mkdtemp(prefix=f".{actual_name}.", dir=out_dir)
+    tmp_dir = os.path.join(tmp_parent, actual_name)
+    try:
+        os.makedirs(tmp_dir, exist_ok=False)
+        if bundle_media:
+            notes = notes + _bundle_media(content, tmp_dir)
+            _rewrite_material_prefix(content, tmp_dir, draft_dir)
+        meta["draft_name"] = actual_name
+        meta["draft_fold_path"] = draft_dir
+        content["name"] = actual_name
+        # write both filenames for cross-version compatibility (5.9 reads draft_info.json)
+        for fname in ("draft_content.json", "draft_info.json"):
+            with open(os.path.join(tmp_dir, fname), "w", encoding="utf-8") as f:
+                json.dump(content, f, ensure_ascii=False, indent=2)
+        with open(os.path.join(tmp_dir, "draft_meta_info.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        if os.path.isdir(draft_dir) and not _draft_dir_has_user_content(draft_dir):
+            os.rmdir(draft_dir)
+        os.replace(tmp_dir, draft_dir)
+    except Exception:
+        shutil.rmtree(tmp_parent, ignore_errors=True)
+        raise
+    finally:
+        if os.path.exists(tmp_parent):
+            shutil.rmtree(tmp_parent, ignore_errors=True)
     return draft_dir, notes
 
 

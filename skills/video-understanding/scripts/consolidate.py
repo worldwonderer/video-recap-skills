@@ -172,6 +172,47 @@ def _asr_source_md5(work_dir):
     return hashlib.md5(path.read_bytes()).hexdigest() if path.exists() else ""
 
 
+def _vlm_source_md5(work_dir):
+    """Provenance: md5 of the on-disk vlm_analysis.json bytes."""
+    path = Path(work_dir) / "vlm_analysis.json"
+    return hashlib.md5(path.read_bytes()).hexdigest() if path.exists() else ""
+
+
+def _index_meta_path(work_dir):
+    return Path(work_dir) / "understanding_index.json.meta.json"
+
+
+def _prompt_fingerprint(prompt):
+    return hashlib.md5(str(prompt or "").encode("utf-8")).hexdigest()
+
+
+def _write_index_meta(work_dir, vlm_analysis):
+    _index_meta_path(work_dir).write_text(json.dumps({
+        "schema_version": 1,
+        "source_md5": _vlm_source_md5(work_dir),
+        "scene_count": len([s for s in (vlm_analysis or []) if isinstance(s, dict)]),
+        "model": CONFIG.get("vlm_model", ""),
+        "prompt_md5": _prompt_fingerprint(INDEX_PROMPT),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _index_cache_matches(work_dir, vlm_analysis):
+    meta_path = _index_meta_path(work_dir)
+    if not meta_path.exists():
+        return False
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    return (
+        isinstance(meta, dict)
+        and meta.get("source_md5") == _vlm_source_md5(work_dir)
+        and meta.get("scene_count") == len([s for s in (vlm_analysis or []) if isinstance(s, dict)])
+        and meta.get("model") == CONFIG.get("vlm_model", "")
+        and meta.get("prompt_md5") == _prompt_fingerprint(INDEX_PROMPT)
+    )
+
+
 # ── thin drivers (I/O + api_call) ─────────────────────────────────────────────
 
 def _load(work_dir, name):
@@ -193,7 +234,11 @@ def consolidate_transcript(work_dir):
     out_path = work_dir / "asr_clean.json"
     if _fresh(out_path, work_dir / "asr_result.json"):
         existing = _load(work_dir, "asr_clean.json") or {}
-        if existing.get("source_md5") == _asr_source_md5(work_dir):
+        if (
+            existing.get("source_md5") == _asr_source_md5(work_dir)
+            and existing.get("model") == CONFIG.get("vlm_model", "")
+            and existing.get("prompt_md5") == _prompt_fingerprint(CLEAN_PROMPT)
+        ):
             log("consolidate(asr): asr_clean.json 已最新，跳过")
             return existing
     resp = api_call({"model": CONFIG.get("vlm_model", ""),
@@ -201,7 +246,12 @@ def consolidate_transcript(work_dir):
                      "max_tokens": 4000, "temperature": 0.2})
     content = _response_text(resp)
     segments = parse_clean_response(content, asr_result)
-    payload = {"source_md5": _asr_source_md5(work_dir), "segments": segments}
+    payload = {
+        "source_md5": _asr_source_md5(work_dir),
+        "model": CONFIG.get("vlm_model", ""),
+        "prompt_md5": _prompt_fingerprint(CLEAN_PROMPT),
+        "segments": segments,
+    }
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     log(f"consolidate(asr): 写出 asr_clean.json（{len(segments)} 段）")
     return payload
@@ -214,7 +264,7 @@ def consolidate_index(work_dir):
         log("consolidate(index): 无 vlm_analysis.json，跳过")
         return None
     out_path = work_dir / "understanding_index.json"
-    if _fresh(out_path, work_dir / "vlm_analysis.json"):
+    if _fresh(out_path, work_dir / "vlm_analysis.json") and _index_cache_matches(work_dir, vlm_analysis):
         log("consolidate(index): understanding_index.json 已最新，跳过")
         return _load(work_dir, "understanding_index.json")
     resp = api_call({"model": CONFIG.get("vlm_model", ""),
@@ -222,6 +272,7 @@ def consolidate_index(work_dir):
                      "max_tokens": 2500, "temperature": 0.2})
     index = parse_index_response(_response_text(resp))
     out_path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_index_meta(work_dir, vlm_analysis)
     (work_dir / "understanding_index.md").write_text(format_index_md(index), encoding="utf-8")
     log(f"consolidate(index): 写出 understanding_index.json（角色 {len(index['characters'])}）")
     return index
