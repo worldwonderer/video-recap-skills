@@ -34,7 +34,7 @@ jobs:
           echo "All SKILL.md have frontmatter"
       - name: plugin.json has exactly the 4 Anthropic keys
         run: |
-          python -c "import json; m=json.load(open('.claude-plugin/plugin.json')); assert set(m)=={'name','version','description','author'}, m; print('plugin.json OK')"
+          python -c "import json; m=json.load(open('.claude-plugin/plugin.json', encoding='utf-8')); assert set(m)=={'name','version','description','author'}, m; print('plugin.json OK')"
       - name: VLM prompt anchors resolve
         shell: bash
         run: |
@@ -42,9 +42,9 @@ jobs:
           import re, glob
           anchors = set()
           for f in glob.glob('skills/video-understanding/scripts/*.py'):
-              for m in re.finditer(r'load_prompt\([\"\\x27](.+?)[\"\\x27]\)', open(f).read()):
+              for m in re.finditer(r'load_prompt\([\"\\x27](.+?)[\"\\x27]\)', open(f, encoding='utf-8').read()):
                   anchors.add(m.group(1))
-          content = open('skills/video-understanding/references/prompt-templates.md').read()
+          content = open('skills/video-understanding/references/prompt-templates.md', encoding='utf-8').read()
           missing = [a for a in anchors if f'### {a}' not in content]
           assert not missing, f'MISSING prompt anchors: {missing}'
           print(f'All {len(anchors)} prompt anchors OK')
