@@ -6,7 +6,7 @@ from subprocess import CompletedProcess  # noqa: F401
 import asr as asr_module
 from detect import _filter_junk_scenes, detect_scenes
 from extract import extract_frames
-from lib import CONFIG, _api_headers, _prepare_api_payload, _provider_uses_mimo, _retry_after_seconds, default_mimo_api_url, env_bool, env_float, env_int, file_fingerprint, get_video_duration, normalize_api_url, step_cache_key
+from lib import CONFIG, _api_headers, _prepare_api_payload, _retry_after_seconds, default_mimo_api_url, env_bool, env_float, env_int, file_fingerprint, get_video_duration, normalize_api_url, step_cache_key
 from vlm import _mimo_video_chunks, _video_data_url, analyze_scenes, analyze_video_overview
 
 
@@ -77,29 +77,24 @@ def test_analyze_scenes_rejects_empty_frames(tmp_path):
 
 
 def test_mimo_api_headers_and_payload_mapping(monkeypatch):
-    monkeypatch.setitem(CONFIG, "api_provider", "mimo")
-    monkeypatch.setitem(CONFIG, "api_url", "https://api.xiaomimimo.com/v1/chat/completions")
     monkeypatch.setitem(CONFIG, "api_key", "secret")
 
-    assert _provider_uses_mimo() is True
+    # MiMo is the only provider: always an api-key header, never Bearer.
     headers = _api_headers()
     assert headers["api-key"] == "secret"
     assert "Authorization" not in headers
+
     payload = _prepare_api_payload({"model": "mimo-v2.5", "max_tokens": 7})
     assert payload["max_completion_tokens"] == 7
     assert payload["thinking"] == {"type": "disabled"}
     assert "max_tokens" not in payload
 
+    # TTS and ASR models must NOT get a `thinking` field (no text-reasoning budget).
     tts_payload = _prepare_api_payload({"model": "mimo-v2.5-tts", "max_tokens": 7})
     assert tts_payload["max_completion_tokens"] == 7
     assert "thinking" not in tts_payload
-
-    monkeypatch.setitem(CONFIG, "api_provider", "openai")
-    monkeypatch.setitem(CONFIG, "api_url", "https://api.openai.com/v1/chat/completions")
-    headers = _api_headers()
-    assert headers["Authorization"] == "Bearer secret"
-    assert "api-key" not in headers
-    assert _prepare_api_payload({"max_tokens": 7})["max_tokens"] == 7
+    asr_payload = _prepare_api_payload({"model": "mimo-v2.5-asr"})
+    assert "thinking" not in asr_payload
 
 
 def test_mimo_video_overview_uses_scene_chunks(monkeypatch, tmp_path):
@@ -119,8 +114,6 @@ def test_mimo_video_overview_uses_scene_chunks(monkeypatch, tmp_path):
         output_path.write_bytes(b"tiny-chunk")
         return output_path
 
-    monkeypatch.setitem(CONFIG, "api_provider", "openai")
-    monkeypatch.setitem(CONFIG, "vlm_model", "doubao-seed-2-0-lite-260428")
     monkeypatch.setitem(CONFIG, "mimo_video_api_key", "mimo-secret")
     monkeypatch.setitem(CONFIG, "mimo_video_model", "mimo-v2.5")
     monkeypatch.setitem(CONFIG, "mimo_video_overview", True)

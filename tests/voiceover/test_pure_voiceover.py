@@ -30,11 +30,11 @@ def test_build_tts_segment_result_preserves_source_trace(tmp_path):
 
 
 def test_synthesize_tts_handles_empty_narration(monkeypatch, tmp_path):
-    monkeypatch.setitem(__import__("lib").CONFIG, "tts_engine", "edge-tts")
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "tp-test")
     segments, engine = synthesize_tts([], tmp_path)
 
     assert segments == []
-    assert engine == "edge-tts"
+    assert engine == "mimo-tts"
 
 
 def test_synthesize_tts_raises_on_failed_segment_by_default(monkeypatch, tmp_path):
@@ -55,7 +55,7 @@ def test_synthesize_tts_raises_on_failed_segment_by_default(monkeypatch, tmp_pat
             "audio_duration": 0.5,
         }
 
-    monkeypatch.setitem(CONFIG, "tts_engine", "edge-tts")
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "tp-test")
     monkeypatch.setitem(CONFIG, "tts_workers", 2)
     monkeypatch.setitem(CONFIG, "allow_partial_tts", False)
     monkeypatch.setattr("voiceover._synthesize_segment", fake_synthesize_segment)
@@ -82,42 +82,44 @@ def test_synthesize_tts_allows_partial_when_configured(monkeypatch, tmp_path):
             "audio_duration": 0.5,
         }
 
-    monkeypatch.setitem(CONFIG, "tts_engine", "edge-tts")
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "tp-test")
     monkeypatch.setitem(CONFIG, "tts_workers", 2)
     monkeypatch.setitem(CONFIG, "allow_partial_tts", True)
     monkeypatch.setattr("voiceover._synthesize_segment", fake_synthesize_segment)
 
     segments, engine = synthesize_tts(narration, tmp_path)
 
-    assert engine == "edge-tts"
+    assert engine == "mimo-tts"
     assert [s["index"] for s in segments] == [0]
 
 
-def test_detect_tts_engine_prefers_edge_tts(monkeypatch):
-    monkeypatch.setattr("voiceover.shutil.which", lambda cmd: "/usr/bin/edge-tts" if cmd == "edge-tts" else None)
+def test_detect_tts_engine_requires_mimo_key(monkeypatch):
+    """MiMo TTS is the only engine; with no key configured it must raise (no edge fallback)."""
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "")
+    with pytest.raises(RuntimeError, match="没有可用的 TTS 引擎|MiMo"):
+        _detect_tts_engine()
 
-    assert _detect_tts_engine() == "edge-tts"
+
+def test_detect_tts_engine_returns_mimo_when_key_set(monkeypatch):
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "tp-secret")
+    assert _detect_tts_engine() == "mimo-tts"
 
 
-def test_resolve_tts_engine_prefers_mimo_in_auto_and_allows_explicit_edge(monkeypatch):
-    monkeypatch.setitem(CONFIG, "tts_engine", "auto")
-    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "mimo-secret")
-    monkeypatch.setattr("voiceover.shutil.which", lambda cmd: "/usr/bin/edge-tts" if cmd == "edge-tts" else None)
-
+def test_resolve_tts_engine_returns_mimo_and_rejects_unknown(monkeypatch):
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "tp-secret")
+    monkeypatch.setitem(CONFIG, "tts_engine", "mimo-tts")
     assert resolve_tts_engine() == "mimo-tts"
 
-    monkeypatch.setitem(CONFIG, "tts_engine", "edge-tts")
-    assert resolve_tts_engine() == "edge-tts"
+    monkeypatch.setitem(CONFIG, "tts_engine", "edge-tts")  # removed engine
+    with pytest.raises(RuntimeError, match="不支持的 TTS 引擎"):
+        resolve_tts_engine()
 
 
-def test_detect_tts_engine_does_not_fallback_to_removed_say(monkeypatch):
-    monkeypatch.setitem(CONFIG, "api_provider", "openai")
-    monkeypatch.setitem(CONFIG, "api_url", "https://api.openai.com/v1/chat/completions")
-    monkeypatch.setitem(CONFIG, "api_key", "")
-    monkeypatch.setattr("voiceover.shutil.which", lambda cmd: "/usr/bin/say" if cmd == "say" else None)
-
-    with pytest.raises(RuntimeError, match="edge-tts|MiMo"):
-        _detect_tts_engine()
+def test_resolve_tts_engine_prefers_existing_when_no_key(monkeypatch):
+    """Assemble-only reruns may reuse already-generated audio even without a fresh key."""
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "")
+    monkeypatch.setitem(CONFIG, "tts_engine", "mimo-tts")
+    assert resolve_tts_engine(prefer_existing="mimo-tts") == "mimo-tts"
 
 
 def test_run_tts_engine_supports_mimo_branch(monkeypatch, tmp_path):
@@ -141,7 +143,7 @@ def test_run_tts_engine_rejects_removed_engines(monkeypatch, tmp_path):
     monkeypatch.setattr("voiceover._get_audio_duration", lambda path: 0.0)
 
     with pytest.raises(RuntimeError, match="不支持的 TTS 引擎"):
-        _run_tts_engine("say", "测试。", tmp_path / "out.wav")
+        _run_tts_engine("edge-tts", "测试。", tmp_path / "out.wav")
 
 
 def test_mimo_tts_writes_decoded_audio(monkeypatch, tmp_path):
@@ -166,13 +168,3 @@ def test_mimo_tts_writes_decoded_audio(monkeypatch, tmp_path):
     assert payload["audio"] == {"format": "wav", "voice": "冰糖"}
     assert payload["messages"][1] == {"role": "assistant", "content": "这是小米 MiMo 配音。"}
     assert "语速略慢" in payload["messages"][0]["content"]
-
-
-def test_detect_tts_engine_prefers_mimo_when_provider_configured(monkeypatch):
-    monkeypatch.setitem(CONFIG, "api_provider", "openai")
-    monkeypatch.setitem(CONFIG, "api_url", "https://example.com/v1/chat/completions")
-    monkeypatch.setitem(CONFIG, "api_key", "doubao-secret")
-    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "mimo-secret")
-    monkeypatch.setattr("voiceover.shutil.which", lambda cmd: "/usr/bin/edge-tts" if cmd == "edge-tts" else None)
-
-    assert _detect_tts_engine() == "mimo-tts"

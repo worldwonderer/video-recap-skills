@@ -35,7 +35,7 @@ def test_null_content_falls_back_to_reasoning(monkeypatch, tmp_path):
     scenes = [{"start": 0.0, "end": 1.0}]
 
     monkeypatch.setitem(CONFIG, "fps", 1.0)
-    monkeypatch.setitem(CONFIG, "vlm_model", "doubao")
+    monkeypatch.setitem(CONFIG, "vlm_model", "mimo-v2.5")
     monkeypatch.setitem(CONFIG, "vlm_workers", 1)
     monkeypatch.setitem(CONFIG, "context_info", "")
 
@@ -62,7 +62,7 @@ def test_null_content_and_null_reasoning_coerce_to_empty_then_retry(monkeypatch,
     scenes = [{"start": 0.0, "end": 1.0}]
 
     monkeypatch.setitem(CONFIG, "fps", 1.0)
-    monkeypatch.setitem(CONFIG, "vlm_model", "doubao")
+    monkeypatch.setitem(CONFIG, "vlm_model", "mimo-v2.5")
     monkeypatch.setitem(CONFIG, "vlm_workers", 1)
     monkeypatch.setitem(CONFIG, "context_info", "")
 
@@ -91,7 +91,7 @@ def test_retry_text_keeps_frame_timestamp_header(monkeypatch, tmp_path):
     scenes = [{"start": 0.0, "end": 1.0}]
 
     monkeypatch.setitem(CONFIG, "fps", 1.0)
-    monkeypatch.setitem(CONFIG, "vlm_model", "doubao")
+    monkeypatch.setitem(CONFIG, "vlm_model", "mimo-v2.5")
     monkeypatch.setitem(CONFIG, "vlm_workers", 1)
     monkeypatch.setitem(CONFIG, "context_info", "")
 
@@ -145,7 +145,7 @@ def test_failed_chunk_preserves_completed_chunks_and_resume_skips(monkeypatch, t
     monkeypatch.setitem(CONFIG, "mimo_video_overview", True)
     monkeypatch.setitem(CONFIG, "mimo_video_api_key", "secret")
     monkeypatch.setitem(CONFIG, "mimo_video_model", "mimo-v2.5")
-    monkeypatch.setitem(CONFIG, "vlm_model", "doubao")
+    monkeypatch.setitem(CONFIG, "vlm_model", "mimo-v2.5")
     monkeypatch.setitem(CONFIG, "mimo_video_fps", 2)
     monkeypatch.setitem(CONFIG, "mimo_video_chunk_max_seconds", 2)
     monkeypatch.setitem(CONFIG, "mimo_video_chunk_min_seconds", 0.5)
@@ -231,7 +231,7 @@ def test_full_success_writes_canonical_file_without_partial(monkeypatch, tmp_pat
     monkeypatch.setitem(CONFIG, "mimo_video_overview", True)
     monkeypatch.setitem(CONFIG, "mimo_video_api_key", "secret")
     monkeypatch.setitem(CONFIG, "mimo_video_model", "mimo-v2.5")
-    monkeypatch.setitem(CONFIG, "vlm_model", "doubao")
+    monkeypatch.setitem(CONFIG, "vlm_model", "mimo-v2.5")
     monkeypatch.setitem(CONFIG, "mimo_video_chunk_max_seconds", 2)
     monkeypatch.setitem(CONFIG, "mimo_video_chunk_min_seconds", 0.5)
 
@@ -270,7 +270,7 @@ def test_all_rejected_chunks_skip_overview(monkeypatch, tmp_path):
     monkeypatch.setitem(CONFIG, "mimo_video_overview", True)
     monkeypatch.setitem(CONFIG, "mimo_video_api_key", "secret")
     monkeypatch.setitem(CONFIG, "mimo_video_model", "mimo-v2.5")
-    monkeypatch.setitem(CONFIG, "vlm_model", "doubao")
+    monkeypatch.setitem(CONFIG, "vlm_model", "mimo-v2.5")
     monkeypatch.setitem(CONFIG, "mimo_video_chunk_max_seconds", 2)
     monkeypatch.setitem(CONFIG, "mimo_video_chunk_min_seconds", 0.5)
 

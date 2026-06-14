@@ -46,6 +46,7 @@ def test_zero_duration_does_not_fabricate_180s_timestamps(monkeypatch, tmp_path)
         # 音频提取这一步成功，其余不应被调用
         return CompletedProcess(cmd, 0, stdout="", stderr="")
 
+    monkeypatch.setitem(asr.CONFIG, "mimo_asr_api_key", "tp-test")  # 跳过无 key 提前返回，测真正的零时长分支
     monkeypatch.setattr("asr.run_cmd", fake_run_cmd)
     monkeypatch.setattr("asr.get_video_duration", lambda path: 0.0)
 
@@ -62,6 +63,60 @@ def test_zero_duration_does_not_fabricate_180s_timestamps(monkeypatch, tmp_path)
     assert saved == []
     # 绝不应出现伪造的 0-180s 时间戳
     assert not any(s.get("end") == 180.0 for s in saved)
+
+
+def test_run_asr_builds_mimo_payload_and_parses_content(monkeypatch, tmp_path):
+    """_run_asr base64-encodes the wav into a MiMo input_audio message and reads content."""
+    wav = tmp_path / "seg.wav"
+    wav.write_bytes(b"RIFFfake-wav-bytes")
+    monkeypatch.setitem(asr.CONFIG, "mimo_asr_api_key", "tp-test")
+    monkeypatch.setitem(asr.CONFIG, "mimo_asr_model", "mimo-v2.5-asr")
+    monkeypatch.setitem(asr.CONFIG, "mimo_asr_language", "auto")
+
+    seen = {}
+
+    def fake_call(payload):
+        seen["payload"] = payload
+        return {"choices": [{"message": {"content": "  你好，世界。 "}}]}
+
+    monkeypatch.setattr("asr.mimo_asr_api_call", fake_call)
+    text = asr._run_asr(wav)
+
+    assert text == "你好，世界。"
+    payload = seen["payload"]
+    assert payload["model"] == "mimo-v2.5-asr"
+    assert payload["asr_options"] == {"language": "auto"}
+    audio = payload["messages"][0]["content"][0]
+    assert audio["type"] == "input_audio"
+    assert audio["input_audio"]["data"].startswith("data:audio/wav;base64,")
+
+
+def test_run_asr_skips_oversize_segment(monkeypatch, tmp_path):
+    """A segment whose base64 exceeds the MiMo cap is skipped, not sent (10MB API limit)."""
+    wav = tmp_path / "big.wav"
+    wav.write_bytes(b"x" * (2 * 1024 * 1024))  # ~2.7MB base64 > 1MB cap
+    monkeypatch.setitem(asr.CONFIG, "mimo_asr_api_key", "tp-test")
+    monkeypatch.setitem(asr.CONFIG, "mimo_asr_base64_max_mb", 1.0)
+
+    def boom(payload):
+        raise AssertionError("oversize segment must not hit the API")
+
+    monkeypatch.setattr("asr.mimo_asr_api_call", boom)
+    assert asr._run_asr(wav) == ""
+
+
+def test_transcribe_audio_without_key_returns_empty(monkeypatch, tmp_path):
+    """No MiMo ASR key -> skip cleanly (write []), never extract or call the API."""
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"")
+    monkeypatch.setitem(asr.CONFIG, "mimo_asr_api_key", "")
+
+    def boom(*a, **k):
+        raise AssertionError("must not run ffmpeg/ASR without a key")
+
+    monkeypatch.setattr("asr.run_cmd", boom)
+    assert asr.transcribe_audio(video, tmp_path) == []
+    assert json.loads((tmp_path / "asr_result.json").read_text()) == []
 
 
 def test_extract_frames_returns_only_current_run_frames(monkeypatch, tmp_path):

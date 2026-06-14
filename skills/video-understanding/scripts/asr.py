@@ -1,13 +1,25 @@
+import base64
 import json
-import re
+from pathlib import Path
 
 from lib import CONFIG
-from lib import log, run_cmd, get_video_duration
+from lib import log, run_cmd, get_video_duration, mimo_asr_api_call
 
-# ── Step 3: ASR 转录 ──────────────────────────────────────────────────
+# ── Step 3: ASR 转录（MiMo mimo-v2.5-asr，云端 API）────────────────────────
+
+_ASR_AUDIO_MIME = "audio/wav"
+
 
 def transcribe_audio(video_path, work_dir):
-    """提取音频并使用 qwen3-asr-rs 转录，通过分段合成时间戳"""
+    """提取音频并用 MiMo ASR 分段转录，通过分段合成时间戳。"""
+    asr_file = work_dir / "asr_result.json"
+
+    if not CONFIG.get("mimo_asr_api_key"):
+        key_name = CONFIG.get("mimo_asr_api_key_source", "MIMO_API_KEY")
+        log(f"ASR 跳过：未设置 {key_name}（MiMo ASR 需要）。如不需要对白可加 --skip-asr")
+        asr_file.write_text(json.dumps([], ensure_ascii=False, indent=2))
+        return []
+
     # 提取音频
     audio_wav = work_dir / "audio.wav"
     cmd = ["ffmpeg", "-y", "-i", str(video_path), "-vn",
@@ -21,10 +33,8 @@ def transcribe_audio(video_path, work_dir):
     if duration <= 0:
         # ffprobe 失败时不再伪造 180s 时长，否则会向 asr_result.json 写入虚构时间戳
         log("ASR 警告: 无法获取音频时长（ffprobe 失败），跳过 ASR 转录")
-        asr_result = []
-        asr_file = work_dir / "asr_result.json"
-        asr_file.write_text(json.dumps(asr_result, ensure_ascii=False, indent=2))
-        return asr_result
+        asr_file.write_text(json.dumps([], ensure_ascii=False, indent=2))
+        return []
 
     segments_dir = work_dir / "audio_segments"
     segments_dir.mkdir(exist_ok=True)
@@ -39,7 +49,6 @@ def transcribe_audio(video_path, work_dir):
         asr_result = _segment_and_transcribe(audio_wav, segments_dir, duration, segment_length)
 
     # 保存
-    asr_file = work_dir / "asr_result.json"
     asr_file.write_text(json.dumps(asr_result, ensure_ascii=False, indent=2))
 
     total_text = " ".join(s["text"] for s in asr_result if s["text"])
@@ -48,22 +57,47 @@ def transcribe_audio(video_path, work_dir):
 
 
 def _run_asr(wav_path):
-    """调用 qwen3-asr-rs 转录单个音频文件"""
-    cmd = [CONFIG["asr_bin"], CONFIG["asr_model_dir"], str(wav_path)]
-    result = run_cmd(cmd, timeout=600)
-    if result.returncode != 0:
-        log(f"ASR 警告: {result.stderr}")
+    """用 MiMo ASR (mimo-v2.5-asr) 转录单个 wav 文件，返回纯文本。
+
+    音频以 base64 data-URI 放进 OpenAI 风格的 chat/completions 消息里，转写文本回到
+    choices[0].message.content。单段失败只记日志返回空串（保留其它段），与本地 ASR 旧行为一致。
+    """
+    try:
+        raw = Path(wav_path).read_bytes()
+    except OSError as e:
+        log(f"ASR 警告: 无法读取音频 {wav_path}: {e}")
+        return ""
+    if not raw:
         return ""
 
-    # 解析输出 - 格式: Language : xxx\nText     : 实际文本
-    text = ""
-    for line in result.stdout.strip().split("\n"):
-        m = re.match(r"Text\s*:\s*(.*)", line.strip())
-        if m:
-            text = m.group(1).strip()
-            break
+    b64 = base64.b64encode(raw).decode("ascii")
+    max_b64_bytes = int(float(CONFIG.get("mimo_asr_base64_max_mb", 10.0)) * 1024 * 1024)
+    if len(b64) > max_b64_bytes:
+        log(f"ASR 警告: 分片 base64 体积 {len(b64) / 1024 / 1024:.1f}MB 超过 MiMo 上限 "
+            f"{CONFIG.get('mimo_asr_base64_max_mb')}MB，跳过该段；可调小 ASR_SEGMENT_SECONDS")
+        return ""
 
-    return text
+    payload = {
+        "model": CONFIG.get("mimo_asr_model", "mimo-v2.5-asr"),
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "input_audio",
+                "input_audio": {"data": f"data:{_ASR_AUDIO_MIME};base64,{b64}"},
+            }],
+        }],
+        "asr_options": {"language": CONFIG.get("mimo_asr_language", "auto")},
+    }
+    try:
+        resp = mimo_asr_api_call(payload)
+    except Exception as e:
+        log(f"ASR 警告: MiMo ASR 调用失败: {e}")
+        return ""
+    try:
+        return str(resp["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        log(f"ASR 警告: MiMo ASR 返回结构异常: {json.dumps(resp, ensure_ascii=False)[:200]}")
+        return ""
 
 
 def _segment_and_transcribe(audio_wav, segments_dir, total_duration, segment_length=None):

@@ -43,9 +43,7 @@ def main():
     ap.add_argument("--mimo-video-overview", action="store_true")
     ap.add_argument("--consolidate", action="store_true", help="build understanding index (Pass B)")
     ap.add_argument("--consolidate-asr", action="store_true", help="also clean ASR (Pass A)")
-    ap.add_argument("--voice", default=None, help="edge-tts voice")
     ap.add_argument("--mimo-tts-voice", default=None, help="MiMo TTS voice")
-    ap.add_argument("--tts-engine", default=None, help="auto | edge-tts | mimo-tts")
     ap.add_argument("--burn-subtitles", action="store_true")
     ap.add_argument("--output-dir", default=None)
     ap.add_argument("--doctor", action="store_true")
@@ -103,10 +101,6 @@ def main():
         assemble_video_path = work_dir / "edited_source.mp4"
 
     vargs = ["--work-dir", str(work_dir)]
-    if args.tts_engine:
-        vargs += ["--engine", args.tts_engine]
-    if args.voice:
-        vargs += ["--voice", args.voice]
     if args.mimo_tts_voice:
         vargs += ["--mimo-voice", args.mimo_tts_voice]
     _run("video-voiceover", "voiceover.py", *vargs)

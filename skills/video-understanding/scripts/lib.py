@@ -15,7 +15,6 @@ from email.utils import parsedate_to_datetime
 
 # ── 配置 ──────────────────────────────────────────────────────────────
 
-DEFAULT_OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_MIMO_API_URL = "https://api.xiaomimimo.com/v1"
 DEFAULT_MIMO_TOKEN_PLAN_CLUSTER = "cn"
 MIMO_TOKEN_PLAN_API_URLS = {
@@ -23,13 +22,14 @@ MIMO_TOKEN_PLAN_API_URLS = {
     "sgp": "https://token-plan-sgp.xiaomimimo.com/v1",
     "ams": "https://token-plan-ams.xiaomimimo.com/v1",
 }
-DEFAULT_VLM_MODEL = "doubao-seed-2-0-lite-260428"
-DEFAULT_MIMO_MODEL = "mimo-v2.5"
+DEFAULT_MIMO_MODEL = "mimo-v2.5"          # VLM / chat (vision understanding)
+DEFAULT_MIMO_ASR_MODEL = "mimo-v2.5-asr"  # speech-to-text
+DEFAULT_MIMO_TTS_MODEL = "mimo-v2.5-tts"  # text-to-speech
 
 
 def normalize_api_url(raw_url):
-    """Accept either an OpenAI-compatible base URL or chat/completions endpoint."""
-    url = (raw_url or DEFAULT_OPENAI_CHAT_URL).rstrip("/")
+    """Normalize a MiMo (OpenAI-compatible) base URL or chat/completions endpoint."""
+    url = (raw_url or DEFAULT_MIMO_API_URL).rstrip("/")
     if url.endswith("/chat/completions"):
         return url
     return f"{url}/chat/completions"
@@ -90,91 +90,79 @@ def env_float(name, default, *, minimum=None):
     return value
 
 
-_api_provider = os.environ.get("API_PROVIDER", "").strip().lower()
+# Single MiMo credential powers ASR + VLM + TTS. Per-capability overrides
+# (MIMO_VIDEO_API_KEY / MIMO_TTS_API_KEY / MIMO_ASR_API_KEY and their *_API_URL forms)
+# are optional and fall back to MIMO_API_KEY / MIMO_API_URL. Token-Plan keys (tp-*) auto-
+# route to the Token-Plan cluster base URL; pay-as-you-go keys use api.xiaomimimo.com.
 _mimo_api_key = os.environ.get("MIMO_API_KEY", "")
 _mimo_video_api_key = os.environ.get("MIMO_VIDEO_API_KEY", "") or _mimo_api_key
 _mimo_tts_api_key = os.environ.get("MIMO_TTS_API_KEY", "") or _mimo_api_key
-_openai_api_key = os.environ.get("OPENAI_API_KEY", "")
-_main_api_provider = _api_provider or ("mimo" if _mimo_api_key and not _openai_api_key else "openai")
-_configured_api_key = (_mimo_api_key or _openai_api_key) if _main_api_provider == "mimo" else _openai_api_key
-_using_mimo_env = _main_api_provider == "mimo"
-_mimo_key_for_defaults = _mimo_api_key or _mimo_video_api_key or _mimo_tts_api_key or (
-    _openai_api_key if _using_mimo_env else ""
-)
-_raw_mimo_api_url = os.environ.get("MIMO_API_URL") or default_mimo_api_url(_mimo_key_for_defaults)
+_mimo_asr_api_key = os.environ.get("MIMO_ASR_API_KEY", "") or _mimo_api_key
+_raw_api_url = os.environ.get("MIMO_API_URL") or default_mimo_api_url(_mimo_api_key)
 _raw_mimo_video_api_url = (
     os.environ.get("MIMO_VIDEO_API_URL")
     or os.environ.get("MIMO_API_URL")
-    or default_mimo_api_url(_mimo_video_api_key or _mimo_key_for_defaults)
+    or default_mimo_api_url(_mimo_video_api_key)
 )
 _raw_mimo_tts_api_url = (
     os.environ.get("MIMO_TTS_API_URL")
     or os.environ.get("MIMO_API_URL")
-    or default_mimo_api_url(_mimo_tts_api_key or _mimo_key_for_defaults)
+    or default_mimo_api_url(_mimo_tts_api_key)
 )
-if _using_mimo_env:
-    _openai_api_url_for_mimo = os.environ.get("OPENAI_API_URL", "")
-    if "xiaomimimo.com" not in _openai_api_url_for_mimo:
-        _openai_api_url_for_mimo = ""
-    _raw_api_url = (
-        _raw_mimo_api_url
-        or _openai_api_url_for_mimo
-        or default_mimo_api_url(_configured_api_key)
-    )
-else:
-    _raw_api_url = os.environ.get("OPENAI_API_URL")
+_raw_mimo_asr_api_url = (
+    os.environ.get("MIMO_ASR_API_URL")
+    or os.environ.get("MIMO_API_URL")
+    or default_mimo_api_url(_mimo_asr_api_key)
+)
 
 CONFIG = {
-    "api_provider": _main_api_provider,
-    "api_provider_source": "env" if _api_provider else "default",
+    "api_provider": "mimo",
+    "api_provider_source": "default",
     "api_url": normalize_api_url(_raw_api_url),
-    "api_url_source": "env" if os.environ.get("OPENAI_API_URL") else "default",
-    "api_key": _configured_api_key,
-    "api_key_source": "MIMO_API_KEY" if _using_mimo_env and _mimo_api_key else "OPENAI_API_KEY",
-    "mimo_api_url": normalize_api_url(_raw_mimo_api_url),
+    "api_url_source": "env" if os.environ.get("MIMO_API_URL") else "default",
+    "api_key": _mimo_api_key,
+    "api_key_source": "MIMO_API_KEY",
+    "mimo_api_url": normalize_api_url(_raw_api_url),
     "mimo_api_url_source": "env" if os.environ.get("MIMO_API_URL") else "default",
-    "mimo_api_key": _mimo_api_key or (_openai_api_key if _using_mimo_env else ""),
-    "mimo_api_key_source": "MIMO_API_KEY" if _mimo_api_key else ("OPENAI_API_KEY" if _using_mimo_env else "MIMO_API_KEY"),
+    "mimo_api_key": _mimo_api_key,
+    "mimo_api_key_source": "MIMO_API_KEY",
     "mimo_video_api_url": normalize_api_url(_raw_mimo_video_api_url),
     "mimo_video_api_url_source": "env" if (
         os.environ.get("MIMO_VIDEO_API_URL") or os.environ.get("MIMO_API_URL")
     ) else "default",
-    "mimo_video_api_key": _mimo_video_api_key or (_openai_api_key if _using_mimo_env else ""),
-    "mimo_video_api_key_source": "MIMO_VIDEO_API_KEY" if os.environ.get("MIMO_VIDEO_API_KEY") else (
-        "MIMO_API_KEY" if _mimo_api_key else ("OPENAI_API_KEY" if _using_mimo_env else "MIMO_VIDEO_API_KEY")
-    ),
+    "mimo_video_api_key": _mimo_video_api_key,
+    "mimo_video_api_key_source": "MIMO_VIDEO_API_KEY" if os.environ.get("MIMO_VIDEO_API_KEY") else "MIMO_API_KEY",
     "mimo_tts_api_url": normalize_api_url(_raw_mimo_tts_api_url),
     "mimo_tts_api_url_source": "env" if (
         os.environ.get("MIMO_TTS_API_URL") or os.environ.get("MIMO_API_URL")
     ) else "default",
-    "mimo_tts_api_key": _mimo_tts_api_key or (_openai_api_key if _using_mimo_env else ""),
-    "mimo_tts_api_key_source": "MIMO_TTS_API_KEY" if os.environ.get("MIMO_TTS_API_KEY") else (
-        "MIMO_API_KEY" if _mimo_api_key else ("OPENAI_API_KEY" if _using_mimo_env else "MIMO_TTS_API_KEY")
-    ),
+    "mimo_tts_api_key": _mimo_tts_api_key,
+    "mimo_tts_api_key_source": "MIMO_TTS_API_KEY" if os.environ.get("MIMO_TTS_API_KEY") else "MIMO_API_KEY",
+    "mimo_asr_api_url": normalize_api_url(_raw_mimo_asr_api_url),
+    "mimo_asr_api_url_source": "env" if (
+        os.environ.get("MIMO_ASR_API_URL") or os.environ.get("MIMO_API_URL")
+    ) else "default",
+    "mimo_asr_api_key": _mimo_asr_api_key,
+    "mimo_asr_api_key_source": "MIMO_ASR_API_KEY" if os.environ.get("MIMO_ASR_API_KEY") else "MIMO_API_KEY",
     "mimo_model": os.environ.get("MIMO_MODEL", DEFAULT_MIMO_MODEL),
     "mimo_model_source": "env" if os.environ.get("MIMO_MODEL") else "default",
     "mimo_video_model": os.environ.get("MIMO_VIDEO_MODEL") or os.environ.get("MIMO_MODEL", DEFAULT_MIMO_MODEL),
     "mimo_video_model_source": "env" if (
         os.environ.get("MIMO_VIDEO_MODEL") or os.environ.get("MIMO_MODEL")
     ) else "default",
-    "vlm_model": (os.environ.get("MIMO_MODEL") if _using_mimo_env else None) or os.environ.get("OPENAI_MODEL") or (
-        DEFAULT_MIMO_MODEL if _using_mimo_env else DEFAULT_VLM_MODEL
-    ),
-    "vlm_model_source": "env" if (
-        os.environ.get("OPENAI_MODEL") or (_using_mimo_env and os.environ.get("MIMO_MODEL"))
-    ) else "default",
-    "asr_bin": os.environ.get("ASR_BIN", "local_transcribe"),
-    "asr_model_dir": os.environ.get("ASR_MODEL_DIR", ""),
+    "vlm_model": os.environ.get("MIMO_MODEL", DEFAULT_MIMO_MODEL),
+    "vlm_model_source": "env" if os.environ.get("MIMO_MODEL") else "default",
+    "mimo_asr_model": os.environ.get("MIMO_ASR_MODEL", DEFAULT_MIMO_ASR_MODEL),
+    "mimo_asr_model_source": "env" if os.environ.get("MIMO_ASR_MODEL") else "default",
+    "mimo_asr_language": os.environ.get("MIMO_ASR_LANGUAGE", "auto"),  # auto | zh | en
+    "mimo_asr_base64_max_mb": env_float("MIMO_ASR_BASE64_MAX_MB", 10.0, minimum=1.0),
     # ASR 分段窗口秒数。越小 → 长视频的对白时间戳越精细（默认 30s）。旧值 180s 会把 >3min
     # 视频的对白塌缩成一个时间戳，既让 brief 无法定位对白，又触发 detect.py 的粗粒度跳过，
     # 使 overlaps_speech/安静窗口判断失真。代价是更多 ASR 调用；ASR 慢时可调大。
     "asr_segment_seconds": env_float("ASR_SEGMENT_SECONDS", 30.0, minimum=5.0),
     "scene_threshold": 0.1,
     "scene_threshold_source": "default",
-    "tts_engine": os.environ.get("TTS_ENGINE", "auto"),  # auto | edge-tts | mimo-tts
-    "tts_engine_source": "env" if os.environ.get("TTS_ENGINE") else "default",
-    "edge_tts_voice": "zh-CN-YunxiNeural",
-    "mimo_tts_model": os.environ.get("MIMO_TTS_MODEL", "mimo-v2.5-tts"),
+    "mimo_tts_model": os.environ.get("MIMO_TTS_MODEL", DEFAULT_MIMO_TTS_MODEL),
     "mimo_tts_model_source": "env" if os.environ.get("MIMO_TTS_MODEL") else "default",
     "mimo_tts_voice": os.environ.get("MIMO_TTS_VOICE", "冰糖"),
     "mimo_tts_voice_source": "env" if os.environ.get("MIMO_TTS_VOICE") else "default",
@@ -201,7 +189,7 @@ CONFIG = {
     "mimo_disable_thinking": env_bool("MIMO_DISABLE_THINKING", True),
     "mimo_disable_thinking_source": "env" if os.environ.get("MIMO_DISABLE_THINKING") else "default",
     "fps": 0,  # 0 = 自动（≤60s→2fps, ≤5min→1.5fps, >5min→1fps）
-    # TTS 语速（字符/秒），由校准得出。edge-tts YunxiNeural 约 3.5 字/秒
+    # TTS 语速（字符/秒），由校准得出。MiMo TTS 中文约 3.5 字/秒
     # 生成解说时使用 speech_rate * safety_margin 作为约束
     "speech_rate": 3.5,
     "speech_safety_margin": 0.85,  # 保守系数：TTS 实际语速有 ±20% 波动
@@ -372,67 +360,48 @@ def _retry_after_seconds(value, fallback):
     except (TypeError, ValueError, IndexError, OverflowError):
         return fallback
 
-def _provider_uses_mimo(api_provider=None, api_url=None):
-    """Return True when the active API endpoint should use Xiaomi MiMo conventions."""
-    provider = str(api_provider if api_provider is not None else CONFIG.get("api_provider") or "").strip().lower()
-    url = str(api_url if api_url is not None else CONFIG.get("api_url") or "")
-    return provider == "mimo" or "xiaomimimo.com" in url
-
 def _api_headers(api_provider=None, api_url=None, api_key=None):
-    """Build auth headers for OpenAI-compatible providers and Xiaomi MiMo."""
-    headers = {
+    """Build MiMo auth headers (OpenAI-compatible chat/completions with an api-key header)."""
+    del api_provider, api_url  # MiMo is the only provider; signature kept for call sites
+    key = CONFIG.get("api_key", "") if api_key is None else api_key
+    return {
         "Content-Type": "application/json",
         "User-Agent": "video-recap/1.0",
+        "api-key": key,
     }
-    key = CONFIG.get("api_key", "") if api_key is None else api_key
-    if _provider_uses_mimo(api_provider=api_provider, api_url=api_url):
-        headers["api-key"] = key
-    else:
-        headers["Authorization"] = f"Bearer {key}"
-    return headers
 
 def _prepare_api_payload(payload, api_provider=None, api_url=None):
-    """Normalize payload fields for the active OpenAI-compatible provider."""
+    """Normalize payload fields for MiMo's OpenAI-compatible chat/completions API."""
+    del api_provider, api_url
     normalized = dict(payload)
-    uses_mimo = _provider_uses_mimo(api_provider=api_provider, api_url=api_url)
-    if uses_mimo and "max_tokens" in normalized and "max_completion_tokens" not in normalized:
+    if "max_tokens" in normalized and "max_completion_tokens" not in normalized:
         normalized["max_completion_tokens"] = normalized.pop("max_tokens")
     model = str(normalized.get("model") or "")
     if (
-        uses_mimo
-        and CONFIG.get("mimo_disable_thinking", True)
-        and not model.endswith("-tts")
+        CONFIG.get("mimo_disable_thinking", True)
+        and not model.endswith(("-tts", "-asr"))
         and "thinking" not in normalized
     ):
-        # MiMo V2.5 may spend small max_completion_tokens budgets on
-        # reasoning_content. The recap pipeline needs visible scene text, so
-        # disable thinking by default unless the caller explicitly sets it.
+        # MiMo V2.5 may spend small max_completion_tokens budgets on reasoning_content.
+        # The recap pipeline needs visible text, so disable thinking unless set explicitly.
         normalized["thinking"] = {"type": "disabled"}
     return normalized
 
-def _mimo_api_key():
-    """Return the MiMo key, falling back to the main key for legacy MiMo-only runs."""
-    if CONFIG.get("mimo_api_key"):
-        return CONFIG.get("mimo_api_key", "")
-    if _provider_uses_mimo():
-        return CONFIG.get("api_key", "")
-    return ""
-
 def _mimo_endpoint(kind):
-    """Return per-capability MiMo endpoint settings for video understanding or TTS."""
-    if kind == "video":
-        return {
-            "api_url": CONFIG.get("mimo_video_api_url") or CONFIG.get("mimo_api_url"),
-            "api_key": CONFIG.get("mimo_video_api_key") or _mimo_api_key(),
-            "api_key_source": CONFIG.get("mimo_video_api_key_source", "MIMO_VIDEO_API_KEY"),
-        }
-    if kind == "tts":
-        return {
-            "api_url": CONFIG.get("mimo_tts_api_url") or CONFIG.get("mimo_api_url"),
-            "api_key": CONFIG.get("mimo_tts_api_key") or _mimo_api_key(),
-            "api_key_source": CONFIG.get("mimo_tts_api_key_source", "MIMO_TTS_API_KEY"),
-        }
-    raise ValueError(f"Unsupported MiMo endpoint kind: {kind}")
+    """Return per-capability MiMo endpoint settings (video understanding / TTS / ASR)."""
+    by_kind = {
+        "video": ("mimo_video_api_url", "mimo_video_api_key", "mimo_video_api_key_source"),
+        "tts": ("mimo_tts_api_url", "mimo_tts_api_key", "mimo_tts_api_key_source"),
+        "asr": ("mimo_asr_api_url", "mimo_asr_api_key", "mimo_asr_api_key_source"),
+    }
+    if kind not in by_kind:
+        raise ValueError(f"Unsupported MiMo endpoint kind: {kind}")
+    url_key, key_key, src_key = by_kind[kind]
+    return {
+        "api_url": CONFIG.get(url_key) or CONFIG.get("mimo_api_url"),
+        "api_key": CONFIG.get(key_key) or CONFIG.get("mimo_api_key"),
+        "api_key_source": CONFIG.get(src_key, "MIMO_API_KEY"),
+    }
 
 def _call_mimo_endpoint(kind, payload, max_retries=5):
     settings = _mimo_endpoint(kind)
@@ -452,6 +421,10 @@ def mimo_video_api_call(payload, max_retries=5):
 def mimo_tts_api_call(payload, max_retries=5):
     """Call the MiMo TTS endpoint."""
     return _call_mimo_endpoint("tts", payload, max_retries=max_retries)
+
+def mimo_asr_api_call(payload, max_retries=5):
+    """Call the MiMo speech-recognition (ASR) endpoint."""
+    return _call_mimo_endpoint("asr", payload, max_retries=max_retries)
 
 def api_call(payload, max_retries=5, *, api_provider=None, api_url=None, api_key=None, api_key_source=None):
     """调用 OpenAI-compatible API，带重试"""
@@ -473,7 +446,7 @@ def api_call(payload, max_retries=5, *, api_provider=None, api_url=None, api_key
                 wait = _retry_after_seconds(retry_after, wait)
                 log(f"API 速率限制 (尝试 {attempt+1}/{max_retries}), 等待 {wait}s")
             elif e.code == 401:
-                key_name = api_key_source or CONFIG.get("api_key_source", "OPENAI_API_KEY")
+                key_name = api_key_source or CONFIG.get("api_key_source", "MIMO_API_KEY")
                 raise RuntimeError(f"API 认证失败 (401)。请检查 {key_name} 和 API URL 是否匹配。")
             elif e.code == 403:
                 hint = "API 访问被拒绝 (403)。"

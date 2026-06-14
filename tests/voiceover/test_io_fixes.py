@@ -1,37 +1,43 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-voiceover' / 'scripts'))
-import json  # noqa: F401
-import subprocess  # noqa: F401
-from subprocess import CompletedProcess
 import pytest
 import voiceover as tts
-from voiceover import _tts_edge
+from voiceover import _run_tts_engine, _tts_mimo
 
 
-def test_edge_mp3_to_wav_failure_surfaces_error_and_keeps_mp3(monkeypatch, tmp_path):
-    """mp3->wav 转换非零退出应抛错，且不应删除 mp3 源。"""
-    output_wav = tmp_path / "narr_000.wav"
-    mp3_path = tmp_path / "narr_000.mp3"
+def test_mimo_tts_missing_audio_data_raises(monkeypatch, tmp_path):
+    """A MiMo TTS response without audio.data must raise, not write a silent wav."""
+    monkeypatch.setattr("voiceover.mimo_tts_api_call", lambda payload: {"choices": [{"message": {}}]})
+    with pytest.raises(RuntimeError, match="缺少 audio.data"):
+        _tts_mimo("测试文本", tmp_path / "out.wav")
 
-    monkeypatch.setitem(tts.CONFIG, "edge_tts_voice", "zh-CN-YunxiNeural")
-    monkeypatch.setitem(tts.CONFIG, "tts_timeout", 90)
 
-    def fake_run_cmd(cmd, **kwargs):
-        if cmd[0] == "edge-tts":
-            # 模拟 edge-tts 成功写出 mp3
-            Path(mp3_path).write_bytes(b"fake-mp3")
-            return CompletedProcess(cmd, 0, stdout="", stderr="")
-        # ffmpeg 转换失败
-        return CompletedProcess(cmd, 1, stdout="", stderr="conversion broke")
+def test_mimo_tts_invalid_base64_raises(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "voiceover.mimo_tts_api_call",
+        lambda payload: {"choices": [{"message": {"audio": {"data": "!!!not-base64!!!"}}}]},
+    )
+    with pytest.raises(RuntimeError, match="base64"):
+        _tts_mimo("测试文本", tmp_path / "out.wav")
 
-    removed = []
-    monkeypatch.setattr("voiceover.run_cmd", fake_run_cmd)
-    monkeypatch.setattr("voiceover.os.remove", lambda p: removed.append(p))
 
-    with pytest.raises(RuntimeError, match="mp3 转 WAV 失败"):
-        _tts_edge("测试文本", output_wav)
+def test_run_tts_engine_retries_then_raises_and_cleans_partial(monkeypatch, tmp_path):
+    """Repeated MiMo failures: retry up to tts_retries, remove partial output, surface the error."""
+    output = tmp_path / "narr_000.wav"
+    output.write_bytes(b"stale-partial")
+    calls = []
 
-    # mp3 源不能在转换成功前被删除
-    assert removed == []
-    assert mp3_path.exists()
+    def boom(text, path, rate="+0%", pitch="+0Hz"):
+        calls.append(1)
+        raise RuntimeError("mimo down")
+
+    monkeypatch.setitem(tts.CONFIG, "tts_retries", 2)
+    monkeypatch.setattr("voiceover._tts_mimo", boom)
+    monkeypatch.setattr("voiceover.time.sleep", lambda s: None)
+
+    with pytest.raises(RuntimeError, match="mimo down|合成失败"):
+        _run_tts_engine("mimo-tts", "测试", output)
+
+    assert len(calls) == 2          # retried tts_retries times
+    assert not output.exists()      # partial output cleaned up

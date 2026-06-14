@@ -1,15 +1,14 @@
 import base64
 import os
 import re
-import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from lib import CONFIG
-from lib import log, mimo_tts_api_call, run_cmd, get_video_duration
+from lib import log, mimo_tts_api_call, get_video_duration
 from lib import _truncate_at_sentence
 
-SUPPORTED_TTS_ENGINES = {"edge-tts", "mimo-tts"}
+SUPPORTED_TTS_ENGINES = {"mimo-tts"}
 
 
 def _parse_rate_offset(rate_str):
@@ -189,13 +188,11 @@ def _run_tts_engine(engine, text, output_wav, rate="+0%", pitch="+0Hz"):
     for attempt in range(1, retries + 1):
         try:
             _cleanup_partial_tts_outputs(output_wav)
-            if engine == "edge-tts":
-                _tts_edge(text, output_wav, rate=rate, pitch=pitch)
-            elif engine == "mimo-tts":
+            if engine == "mimo-tts":
                 _tts_mimo(text, output_wav, rate=rate, pitch=pitch)
             else:
                 raise RuntimeError(
-                    f"不支持的 TTS 引擎: {engine}。当前仅支持 auto / edge-tts / mimo-tts。"
+                    f"不支持的 TTS 引擎: {engine}。当前仅支持 mimo-tts。"
                 )
 
             dur = _get_audio_duration(output_wav)
@@ -226,53 +223,41 @@ def _cleanup_partial_tts_outputs(output_wav):
 
 
 def _detect_tts_engine():
-    """自动检测可用的 TTS 引擎"""
+    """MiMo TTS is the only engine; require a MiMo key."""
     if CONFIG.get("mimo_tts_api_key"):
         return "mimo-tts"
-
-    # 优先使用 edge-tts：无需 API key，默认 Yunxi 音色，跨平台更稳定。
-    if shutil.which("edge-tts"):
-        return "edge-tts"
-
-    raise RuntimeError("没有可用的 TTS 引擎。请安装 edge-tts，或配置 MiMo 并使用 mimo-tts。")
+    key_name = CONFIG.get("mimo_tts_api_key_source", "MIMO_API_KEY")
+    raise RuntimeError(f"没有可用的 TTS 引擎：请设置 {key_name}（MiMo TTS 需要）。")
 
 
 def resolve_tts_engine(prefer_existing=None):
-    """Resolve CONFIG["tts_engine"], preferring MiMo TTS in auto mode.
+    """Resolve the TTS engine. MiMo TTS (mimo-tts) is the only engine.
 
-    `prefer_existing` is for assemble-only cache checks: an already-generated
-    artifact may still be assembled even if no fresh TTS engine is available.
+    `prefer_existing` is for assemble-only cache checks: already-generated audio
+    may still be assembled even if no fresh TTS key is configured.
     """
-    engine = CONFIG.get("tts_engine", "auto")
-    if engine == "auto":
+    engine = CONFIG.get("tts_engine", "mimo-tts")
+    if engine in ("auto", "mimo-tts"):
         try:
             return _detect_tts_engine()
         except RuntimeError:
             if prefer_existing in SUPPORTED_TTS_ENGINES:
                 return prefer_existing
             raise
-    if engine not in SUPPORTED_TTS_ENGINES:
-        raise RuntimeError(f"不支持的 TTS 引擎: {engine}。当前仅支持 auto / edge-tts / mimo-tts。")
-    return engine
+    raise RuntimeError(f"不支持的 TTS 引擎: {engine}。当前仅支持 mimo-tts。")
 
 
 def tts_settings_fingerprint(engine=None):
     """Return non-secret TTS settings that materially affect generated audio."""
     resolved = engine or resolve_tts_engine()
-    settings = {
+    return {
         "engine": resolved,
         "tts_dynamic_params": bool(CONFIG.get("tts_dynamic_params", True)),
+        "mimo_tts_api_url": CONFIG.get("mimo_tts_api_url"),
+        "mimo_tts_model": CONFIG.get("mimo_tts_model"),
+        "mimo_tts_voice": CONFIG.get("mimo_tts_voice"),
+        "mimo_tts_style": CONFIG.get("mimo_tts_style"),
     }
-    if resolved == "mimo-tts":
-        settings.update({
-            "mimo_tts_api_url": CONFIG.get("mimo_tts_api_url"),
-            "mimo_tts_model": CONFIG.get("mimo_tts_model"),
-            "mimo_tts_voice": CONFIG.get("mimo_tts_voice"),
-            "mimo_tts_style": CONFIG.get("mimo_tts_style"),
-        })
-    elif resolved == "edge-tts":
-        settings["edge_tts_voice"] = CONFIG.get("edge_tts_voice")
-    return settings
 
 
 def _mimo_tts_style_instruction(rate="+0%", pitch="+0Hz"):
@@ -312,26 +297,6 @@ def _tts_mimo(text, output_path, rate="+0%", pitch="+0Hz"):
         raise RuntimeError("MiMo-TTS 返回的 audio.data 不是有效 base64") from exc
 
 
-def _tts_edge(text, output_path, rate="+0%", pitch="+0Hz"):
-    """使用 Edge-TTS 合成"""
-    mp3_path = str(output_path).replace(".wav", ".mp3")
-    cmd = ["edge-tts", "--voice", CONFIG["edge_tts_voice"],
-           "--text", text, "--rate", rate, "--pitch", pitch,
-           "--write-media", mp3_path]
-    result = run_cmd(cmd, timeout=CONFIG.get("tts_timeout", 90))
-    if result.returncode != 0:
-        raise RuntimeError(f"Edge-TTS 失败: {result.stderr}")
-
-    # 转为 WAV + highpass 去除低频隆隆声
-    cmd = ["ffmpeg", "-y", "-i", mp3_path,
-           "-af", "highpass=f=80", "-ar", "44100", "-ac", "1", str(output_path)]
-    conv = run_cmd(cmd)
-    if conv.returncode != 0:
-        # 转换失败时保留 mp3 源，并向上抛错让调用方重试看到真实原因
-        raise RuntimeError(f"Edge-TTS mp3 转 WAV 失败: {conv.stderr}")
-    os.remove(mp3_path)
-
-
 def _get_audio_duration(audio_path):
     """获取音频文件时长（复用 common.get_video_duration 的 ffprobe 探测）。"""
     return get_video_duration(audio_path)
@@ -349,15 +314,12 @@ def main():
     ap.add_argument("--work-dir", required=True)
     ap.add_argument("--narration", default=None,
                     help="narration json (default: narration_mapped.json if present, else narration.json)")
-    ap.add_argument("--engine", default=None, help="auto | edge-tts | mimo-tts")
-    ap.add_argument("--voice", default=None, help="edge-tts voice name")
+    ap.add_argument("--engine", default=None, help="mimo-tts (the only supported engine)")
     ap.add_argument("--mimo-voice", default=None, help="MiMo TTS voice name")
     args = ap.parse_args()
     work_dir = Path(args.work_dir)
     if args.engine:
         CONFIG["tts_engine"] = args.engine
-    if args.voice:
-        CONFIG["edge_tts_voice"] = args.voice
     if args.mimo_voice:
         CONFIG["mimo_tts_voice"] = args.mimo_voice
     if args.narration:

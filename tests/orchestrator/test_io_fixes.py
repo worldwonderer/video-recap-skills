@@ -1,44 +1,58 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-recap' / 'scripts'))
-import json  # noqa: F401
-import subprocess
-from subprocess import CompletedProcess  # noqa: F401
 import pytest  # noqa: F401
 import doctor
 
 
-def test_doctor_smoke_timeout_is_handled_not_raised(monkeypatch):
-    """edge-tts 网络挂起（TimeoutExpired）应被吞掉转为 skipped，而不是抛出 traceback。"""
-    monkeypatch.setattr("doctor._command_path", lambda name: f"/usr/bin/{name}")
-
-    def fake_run(cmd, *, timeout=20):
-        raise subprocess.TimeoutExpired(cmd, timeout)
-
-    monkeypatch.setattr("doctor._run", fake_run)
-
-    result = doctor._check_tts_smoke("zh-CN-YunxiNeural")
-
-    assert result.get("skipped") is True
-    assert result.get("ok") is False
-
-
-def test_doctor_skipped_smoke_not_marked_as_failure(monkeypatch):
-    """跳过的冒烟测试应记为 warning，doctor 不应因此判为 FAILED。"""
-    # 系统工具齐备，TTS 可用，仅冒烟测试被跳过
+def _tools_present(monkeypatch):
     monkeypatch.setattr("doctor._ffmpeg_filters", lambda: {"subtitles", "ass"})
     monkeypatch.setattr(
         "doctor._command_path",
         lambda name: f"/usr/bin/{name}" if name in ("ffmpeg", "ffprobe") else None,
     )
-    monkeypatch.setitem(doctor.CONFIG, "mimo_tts_api_key", "tp-test-key")
-    monkeypatch.setattr(
-        "doctor._check_tts_smoke",
-        lambda voice: {"ok": False, "skipped": True, "reason": "edge-tts not found"},
-    )
 
-    report = doctor.build_report(tts_smoke=True)
+
+def test_doctor_ok_when_tools_and_mimo_key_present(monkeypatch):
+    _tools_present(monkeypatch)
+    for k in ("api_key", "mimo_asr_api_key", "mimo_tts_api_key", "mimo_video_api_key"):
+        monkeypatch.setitem(doctor.CONFIG, k, "tp-test-key")
+
+    report = doctor.build_report()
 
     assert report["ok"] is True
-    assert "edge-tts smoke test failed" not in report["failures"]
-    assert any("smoke test skipped" in w for w in report["warnings"])
+    assert report["failures"] == []
+
+
+def test_doctor_fails_without_mimo_key(monkeypatch):
+    _tools_present(monkeypatch)
+    monkeypatch.setitem(doctor.CONFIG, "api_key", "")
+    monkeypatch.setitem(doctor.CONFIG, "mimo_asr_api_key", "")
+
+    report = doctor.build_report()
+
+    assert report["ok"] is False
+    assert any("MIMO_API_KEY" in f for f in report["failures"])
+
+
+def test_doctor_missing_ffmpeg_is_failure(monkeypatch):
+    monkeypatch.setattr("doctor._ffmpeg_filters", lambda: set())
+    monkeypatch.setattr("doctor._command_path", lambda name: None)
+    monkeypatch.setitem(doctor.CONFIG, "api_key", "tp-x")
+
+    report = doctor.build_report()
+
+    assert report["ok"] is False
+    assert any("ffmpeg" in f for f in report["failures"])
+
+
+def test_doctor_warns_when_asr_unconfigured_but_key_present(monkeypatch):
+    """api_key powers VLM/TTS; an empty ASR key is only a warning (use --skip-asr)."""
+    _tools_present(monkeypatch)
+    monkeypatch.setitem(doctor.CONFIG, "api_key", "tp-x")
+    monkeypatch.setitem(doctor.CONFIG, "mimo_asr_api_key", "")
+
+    report = doctor.build_report()
+
+    assert report["ok"] is True
+    assert any("ASR not configured" in w for w in report["warnings"])

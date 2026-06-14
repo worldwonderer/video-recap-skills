@@ -107,7 +107,7 @@ def main():
         log(f"跳过 VLM 分析（已存在 {len(vlm_analysis)} 个场景）")
     else:
         if not CONFIG.get("api_key"):
-            key_name = CONFIG.get("api_key_source", "OPENAI_API_KEY")
+            key_name = CONFIG.get("api_key_source", "MIMO_API_KEY")
             raise SystemExit(f"请设置 {key_name} 环境变量（VLM 画面分析需要）")
         log("VLM API 连通性预检...")
         api_call({"model": CONFIG.get("vlm_model", ""),
