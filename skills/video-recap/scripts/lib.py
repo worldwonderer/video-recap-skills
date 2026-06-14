@@ -197,11 +197,16 @@ CONFIG = {
     "ducking_level_sc": 2.0,
     "ducking_makeup": 1.2,
     "ducking_narr_weight": 1.5,
-    "ducking_orig_volume": env_float("DUCKING_ORIG_VOLUME", 0.5, minimum=0.0),  # 解说时原声基准音量
+    "ducking_orig_volume": env_float("DUCKING_ORIG_VOLUME", 0.3, minimum=0.0),  # 解说时原声基准音量
     "zone_ducking_volume": 0.12,    # 解说时原声压低到的音量
     "zone_fade_seconds": 0.5,      # 解说/原声切换的淡入淡出时长(秒)
-    "narration_speed": env_float("NARRATION_SPEED", 1.0, minimum=0.5),  # 解说整体提速(atempo)，1.1~1.2 更适合短视频
-    "mask_source_subtitles": env_bool("MASK_SOURCE_SUBTITLES", False),  # 遮挡原片烧录字幕
+    "idle_orig_volume": env_float("IDLE_ORIG_VOLUME", 0.85, minimum=0.0),  # 解说间隙(无旁白)时的原声音量，铺底避免顿挫
+    "duck_fade_seconds": env_float("DUCK_FADE_SECONDS", 0.25, minimum=0.0),  # 原声 ducking 过渡淡入淡出(秒)
+    "bgm_path": os.environ.get("BGM_PATH", "").strip(),  # 背景音乐文件(可选)，留空则不加 BGM
+    "bgm_volume": env_float("BGM_VOLUME", 0.18, minimum=0.0),  # BGM 铺底音量
+    "bgm_ducking_volume": env_float("BGM_DUCKING_VOLUME", 0.10, minimum=0.0),  # 旁白时 BGM 压低到的音量
+    "narration_speed": env_float("NARRATION_SPEED", 1.2, minimum=0.5),  # 解说整体提速(atempo)，默认偏快适配短视频；长片可设 1.0
+    "mask_source_subtitles": env_bool("MASK_SOURCE_SUBTITLES", True),  # 遮挡原片烧录字幕（默认开；无烧录字幕素材设 false）
     "source_subtitle_mask_ratio": env_float("SOURCE_SUBTITLE_MASK_RATIO", 0.14, minimum=0.0),  # 底部遮挡比例
     "narration_delay_seconds": 1.5,  # 解说延迟放置秒数，让画面先出现再解说
     "narration_tail_pad_seconds": 0.1,  # 解说尾部最少留白；短 slot 会自动压低 delay 避免截断

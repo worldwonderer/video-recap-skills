@@ -37,8 +37,10 @@ python3 scripts/assemble.py <video> --work-dir <work_dir> \
 - `subtitles.srt` — narration subtitles; `subtitles.ass` when `--burn-subtitles` is used.
 
 ## Notes
+- Audio is mixed as tracks (like a cut-software timeline): the original audio, an optional BGM bed, and the narration.
 - Subtitle look: `SUBTITLE_FONT_SIZE`, `SUBTITLE_MARGIN_V`, `SUBTITLE_MAX_CHARS`, etc.
-- Ducking / loudness: `DUCKING_MODE`, `ZONE_DUCKING_VOLUME`, `FINAL_LOUDNORM`, `TARGET_LUFS`.
+- Ducking / loudness: the original swells to `IDLE_ORIG_VOLUME` in the gaps and ducks to `SPEECH_DUCKING_VOLUME` under narration (`DUCK_FADE_SECONDS` smooths the transition); also `DUCKING_MODE`, `ZONE_DUCKING_VOLUME`, `FINAL_LOUDNORM`, `TARGET_LUFS`.
+- BGM (optional): set `BGM_PATH` to any audio file; it loops to length and ducks under narration (`BGM_VOLUME` / `BGM_DUCKING_VOLUME`).
 - Burning subtitles requires an ffmpeg with `subtitles`/libass support.
 
 ## What this skill does NOT do

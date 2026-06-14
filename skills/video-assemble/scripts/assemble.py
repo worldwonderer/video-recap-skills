@@ -275,94 +275,117 @@ def _seg_place_window(seg):
     return s, e
 
 
-def _amix_tail(narr_vol):
-    """Original [orig] + boosted narration [narr] -> [aout]; shared by every mode."""
-    return (
-        f"[1:a]volume={narr_vol},aresample=48000[narr];"
-        "[orig][narr]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
-    )
+def _amix_tail(narr_vol, bgm_chain=""):
+    """Mix the prepared original track [orig] (+ optional BGM bed) with the boosted
+    narration [narr] into [aout]. bgm_chain, when given, defines [bgm] from input [2:a]."""
+    narr = f"[1:a]volume={narr_vol},aresample=48000[narr];"
+    if bgm_chain:
+        return bgm_chain + narr + "[orig][bgm][narr]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[aout]"
+    return narr + "[orig][narr]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
 
 
-def _build_audio_filter_complex(tts_segments):
-    """Build the ffmpeg filter_complex that ducks the original audio under narration.
+def _duck_ramp(s, e, fade):
+    """A 0→1 trapezoid over [s,e] with `fade`-second ramps at each edge (no clicks)."""
+    return f"min(1,max(0,min(t-{s:.2f},{e:.2f}-t)/{fade:.2f}))"
 
-    CONFIG["ducking_mode"] (default "fixed") selects the strategy:
-      - sidechaincompress: classic auto-duck keyed off the narration track.
-      - none: no ducking; just boost narration and mix.
-      - fixed (the default): a per-segment volume envelope on the original track,
-        whose shape is chosen by the beats' overlaps_speech flags — lower under
-        speech-overlapping beats, lower still under beats in quiet windows,
-        otherwise an idle level. When every beat is quiet, a smooth trapezoid
-        fade is used instead of hard switches; with no overlap info at all it
-        falls back to a constant level.
-    The narration's placed timing comes from actual_place_start/end.
+
+def _duck_envelope(tts_segments, idle, speech_vol, quiet_vol, fade):
+    """Per-beat ducking automation for the ORIGINAL track.
+
+    Holds the original at `idle` in the gaps (no narration) so the source audio keeps
+    the recap from going dead-air between sentences, and ramps it down under each
+    placed narration window — to speech_vol where the beat overlaps source dialogue,
+    quiet_vol where it sits in a quiet window. Returns a volume= expression, or None
+    when no beat carries placement info (caller falls back to a constant)."""
+    terms = []
+    for seg in tts_segments:
+        if not isinstance(seg, dict):
+            continue
+        s, e = _seg_place_window(seg)
+        if e - s <= 0:
+            continue
+        level = speech_vol if seg.get("overlaps_speech", True) else quiet_vol
+        terms.append(f"+({level - idle:.3f})*{_duck_ramp(s, e, fade)}")
+    if not terms:
+        return None
+    return f"max(0,min(1,{idle}{''.join(terms)}))"
+
+
+def _bgm_envelope(tts_segments, base, duck, fade):
+    """Per-beat ducking automation for the BGM track: hold the bed at `base`, dip to
+    `duck` under every narration window so the voice stays clear. None if no beats."""
+    terms = []
+    for seg in tts_segments:
+        if not isinstance(seg, dict):
+            continue
+        s, e = _seg_place_window(seg)
+        if e - s <= 0:
+            continue
+        terms.append(f"+({duck - base:.3f})*{_duck_ramp(s, e, fade)}")
+    if not terms:
+        return None
+    return f"max(0,min(1,{base}{''.join(terms)}))"
+
+
+def _build_audio_filter_complex(tts_segments, has_bgm=False):
+    """Compose the audio tracks into [aout], like a cut-software timeline.
+
+    Tracks:
+      - original (input [0:a], the video's own audio): ducked under each narration
+        window by a per-beat volume envelope, but held up at `idle_orig_volume` in
+        the gaps so the recap never drops to dead air between sentences.
+      - bgm (input [2:a], optional): a looped music bed, gently ducked under narration.
+      - narration (input [1:a]): the TTS, boosted and laid on top.
+    CONFIG["ducking_mode"] (default "fixed") selects the original-track strategy:
+    fixed = the gap-fill envelope above; sidechaincompress = auto-duck keyed off the
+    narration; none = no ducking. Placement comes from actual_place_start/end.
     """
     ducking_mode = CONFIG.get("ducking_mode", "fixed")
     narr_vol = CONFIG.get("ducking_narr_weight", 1.5)
-    has_overlaps = any(seg.get("overlaps_speech") for seg in tts_segments if isinstance(seg, dict))
-    has_quiet = any(not seg.get("overlaps_speech", True) for seg in tts_segments if isinstance(seg, dict))
+    fade = CONFIG.get("duck_fade_seconds", 0.25)
+
+    # BGM bed (input [2:a]): ducked under each narration window when present.
+    bgm_chain = ""
+    if has_bgm:
+        base = CONFIG.get("bgm_volume", 0.18)
+        bgm_expr = _bgm_envelope(tts_segments, base, CONFIG.get("bgm_ducking_volume", 0.10), fade)
+        if bgm_expr:
+            bgm_chain = f"[2:a]volume='{bgm_expr}':eval=frame,aresample=48000[bgm];"
+        else:
+            bgm_chain = f"[2:a]volume={base},aresample=48000[bgm];"
 
     if ducking_mode == "sidechaincompress":
-        return (
-            "[0:a]aresample=48000[orig];"
-            "[1:a]aresample=48000[narr];"
-            f"[orig][narr]sidechaincompress="
+        # The narration keys the compressor; split it so it can also be mixed in.
+        head = (
+            "[0:a]aresample=48000[o0];"
+            "[1:a]aresample=48000,asplit=2[sckey][scnarr];"
+            f"[o0][sckey]sidechaincompress="
             f"threshold={CONFIG['ducking_threshold']}:ratio={CONFIG['ducking_ratio']}"
             f":attack={CONFIG['ducking_attack']}:release={CONFIG['ducking_release']}"
-            f":knee=2.5:makeup={CONFIG['ducking_makeup']}:level_sc={CONFIG['ducking_level_sc']}"
-            f"[ducked];"
-            f"[ducked][narr]amix=inputs=2:duration=first:dropout_transition=0"
-            f":weights=1 {CONFIG['ducking_narr_weight']}:normalize=0[aout]"
+            f":knee=2.5:makeup={CONFIG['ducking_makeup']}:level_sc={CONFIG['ducking_level_sc']}[orig];"
         )
+        narr = f"[scnarr]volume={narr_vol}[narr];"
+        if bgm_chain:
+            return head + bgm_chain + narr + "[orig][bgm][narr]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[aout]"
+        return head + narr + "[orig][narr]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
 
     if ducking_mode == "none":
-        return "[0:a]aresample=48000[orig];" + _amix_tail(narr_vol)
+        return "[0:a]aresample=48000[orig];" + _amix_tail(narr_vol, bgm_chain)
 
+    # fixed (default): gap-fill ducking envelope on the original track.
+    idle = CONFIG.get("idle_orig_volume", 0.85)
+    speech_vol = CONFIG.get("speech_ducking_volume", 0.2)
     quiet_vol = CONFIG.get("zone_ducking_volume", 0.12)
-
-    if has_overlaps and has_quiet:
-        # Per-segment volume envelope. between(t,s,e) indicators select beats;
-        # commas inside the expr are fine here because the whole volume value is
-        # single-quoted, so ffmpeg does not read them as filter separators.
-        speech_vol = CONFIG.get("speech_ducking_volume", 0.2)
-        default_vol = CONFIG.get("ducking_orig_volume", 0.5)
-        overlap_exprs, quiet_exprs = [], []
-        for seg in tts_segments:
-            if not isinstance(seg, dict):
-                continue
-            s, e = _seg_place_window(seg)
-            ind = f"if(between(t,{s:.2f},{e:.2f}),1,0)"
-            (overlap_exprs if seg.get("overlaps_speech") else quiet_exprs).append(ind)
-        vol_expr = f"{default_vol}"
-        if overlap_exprs:
-            vol_expr += f"+{speech_vol-default_vol}*({'+'.join(overlap_exprs)})"
-        if quiet_exprs:
-            vol_expr += f"+{quiet_vol-default_vol}*({'+'.join(quiet_exprs)})"
-        vol_expr = f"max(0,min(1,{vol_expr}))"
-        log(f"动态 ducking: 语音重叠段={len(overlap_exprs)}, 安静段={len(quiet_exprs)}")
-        return f"[0:a]volume='{vol_expr}':eval=frame,aresample=48000[orig];" + _amix_tail(narr_vol)
-
-    if has_quiet and not has_overlaps:
-        # All beats in quiet windows: smooth trapezoid fade to quiet_vol under each
-        # beat, full original elsewhere.
-        default_vol = 1.0
-        fade = CONFIG.get("zone_fade_seconds", 0.5)
-        exprs = []
-        for seg in tts_segments:
-            if not isinstance(seg, dict):
-                continue
-            s, e = _seg_place_window(seg)
-            exprs.append(f"min(1,max(0,min(t-{s:.2f},{e:.2f}-t)/{fade:.1f}))")
-        vol_expr = f"{default_vol}"
-        if exprs:
-            vol_expr += f"+{quiet_vol - default_vol}*({'+'.join(exprs)})"
-        vol_expr = f"max(0,min(1,{vol_expr}))"
-        log(f"zone ducking: 解说时原声={quiet_vol}, 非解说时原声={default_vol}")
-        return f"[0:a]volume='{vol_expr}':eval=frame,aresample=48000[orig];" + _amix_tail(narr_vol)
-
-    # fixed (no per-segment overlap info): hold the original at a constant level.
-    orig_vol = CONFIG.get("ducking_orig_volume", 0.5)
-    return f"[0:a]volume={orig_vol},aresample=48000[orig];" + _amix_tail(narr_vol)
+    expr = _duck_envelope(tts_segments, idle, speech_vol, quiet_vol, fade)
+    if expr:
+        n_overlap = sum(1 for s in tts_segments if isinstance(s, dict) and s.get("overlaps_speech", True))
+        n_quiet = sum(1 for s in tts_segments if isinstance(s, dict) and not s.get("overlaps_speech", True))
+        log(f"gap-fill ducking: 间隙原声={idle}, 对白段={speech_vol}({n_overlap}), 安静段={quiet_vol}({n_quiet})")
+        orig = f"[0:a]volume='{expr}':eval=frame,aresample=48000[orig];"
+    else:
+        # No placement info at all: hold the original at a constant level.
+        orig = f"[0:a]volume={CONFIG.get('ducking_orig_volume', 0.3)},aresample=48000[orig];"
+    return orig + _amix_tail(narr_vol, bgm_chain)
 
 
 def assemble_video(input_video, tts_segments, work_dir, output_path):
@@ -387,8 +410,16 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
         ass_path = _generate_ass(tts_segments, work_dir)
         log(f"压制字幕文件: {ass_path}")
 
-    # 混合原始音频 + 解说音频
-    filter_complex = _build_audio_filter_complex(tts_segments)
+    # 可选 BGM：作为一条独立音轨（input [2:a]）混入，旁白处自动压低
+    bgm_path = CONFIG.get("bgm_path", "")
+    has_bgm = bool(bgm_path) and os.path.exists(bgm_path)
+    if bgm_path and not has_bgm:
+        log(f"  ⚠️ BGM 文件不存在，跳过: {bgm_path}")
+    elif has_bgm:
+        log(f"BGM 铺底: {bgm_path} (音量 {CONFIG.get('bgm_volume', 0.18)}，旁白时 {CONFIG.get('bgm_ducking_volume', 0.10)})")
+
+    # 混合原始音频 + 解说音频（+ 可选 BGM）
+    filter_complex = _build_audio_filter_complex(tts_segments, has_bgm)
 
     # 对于超长 volume 表达式（多段解说），使用 -filter_complex_script 避免命令行溢出
     # 末端整体响度归一：ducking 只管相对平衡，这一步统一成片绝对响度
@@ -399,6 +430,10 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
         aout_label = "[aoutln]"
         log(f"成片响度归一: {final_ln}")
 
+    # BGM is input [2:a]; -stream_loop -1 loops it to cover the whole timeline (amix
+    # duration=first + -t trim it back to the video length).
+    bgm_input = ["-stream_loop", "-1", "-i", str(bgm_path)] if has_bgm else []
+
     filter_complex_bytes = filter_complex.encode('utf-8')
     if len(filter_complex_bytes) > 8000:
         fc_script = Path(work_dir) / ".filter_complex.txt"
@@ -408,6 +443,7 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
             "ffmpeg", "-y",
             "-i", str(input_video),
             "-i", str(narration_wav),
+            *bgm_input,
             "-filter_complex_script", str(fc_script),
             "-map", "0:v", "-map", aout_label,
         ]
@@ -416,6 +452,7 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
             "ffmpeg", "-y",
             "-i", str(input_video),
             "-i", str(narration_wav),
+            *bgm_input,
             "-filter_complex", filter_complex,
             "-map", "0:v", "-map", aout_label,
         ]

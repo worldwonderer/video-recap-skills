@@ -16,9 +16,11 @@ bundle ships no root `CLAUDE.md` (so it never collides with your project/global 
 | TTS model | `MIMO_TTS_MODEL` | `mimo-v2.5-tts` | the only TTS engine |
 | MiMo voice | `MIMO_TTS_VOICE` / `--mimo-tts-voice` | `冰糖` | |
 | Narration density | `TARGET_SEGMENTS_PER_MINUTE` | `9.6` | min `MIN_SEGMENTS_PER_MINUTE=6.24` |
-| Narration speed | `NARRATION_SPEED` | `1.0` | global atempo on the voiceover; `1.1`–`1.2` is snappier for short-form |
-| Mask source subs | `MASK_SOURCE_SUBTITLES` / `SOURCE_SUBTITLE_MASK_RATIO` | off / `0.14` | cover burned-in source subtitles (bottom band) so only the recap's subtitles show |
-| Ducking level | `DUCKING_ORIG_VOLUME` / `SPEECH_DUCKING_VOLUME` | `0.5` / `0.2` | lower = original audio quieter under narration |
+| Narration speed | `NARRATION_SPEED` | `1.2` | global atempo on the voiceover; default leans snappy for short-form, set `1.0` for long-form/documentary |
+| Mask source subs | `MASK_SOURCE_SUBTITLES` / `SOURCE_SUBTITLE_MASK_RATIO` | on / `0.14` | covers burned-in source subtitles (bottom band) so only the recap's subtitles show; set `MASK_SOURCE_SUBTITLES=false` for sources without hardcoded subs |
+| Original ducking | `IDLE_ORIG_VOLUME` / `SPEECH_DUCKING_VOLUME` | `0.85` / `0.2` | the original swells to `IDLE` in the gaps between sentences (so the recap never goes dead-air / choppy) and ducks to `SPEECH` under narration. `DUCKING_ORIG_VOLUME` (`0.3`) is only the fallback when beats carry no placement info |
+| Duck fade | `DUCK_FADE_SECONDS` | `0.25` | ramp time for each duck transition, so the original fades down/up without clicks |
+| Background music | `BGM_PATH` / `BGM_VOLUME` / `BGM_DUCKING_VOLUME` | off / `0.18` / `0.10` | optional looped music bed mixed as its own track; point `BGM_PATH` at any audio file. It ducks to `BGM_DUCKING_VOLUME` under narration |
 | Final loudness | `FINAL_LOUDNORM` / `TARGET_LUFS` | `true` / `-14` | end-of-pipeline normalize |
 | Style | `--style` | `纪录片` | |
 | Edit mode | `EDIT_MODE` / `--edit-mode` | `full` | `full` or `cut` |

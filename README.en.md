@@ -153,7 +153,6 @@ python3 skills/video-recap/scripts/recap.py --doctor
 
 ## Acknowledgements
 
-- [Xiaomi MiMo](https://platform.xiaomimimo.com): ASR (`mimo-v2.5-asr`), VLM (`mimo-v2.5`), and TTS (`mimo-v2.5-tts`)
 - [linux.do](https://linux.do)
 
 ## License
