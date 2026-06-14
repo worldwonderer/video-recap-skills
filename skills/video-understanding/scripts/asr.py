@@ -16,7 +16,8 @@ def transcribe_audio(video_path, work_dir):
 
     if not CONFIG.get("mimo_asr_api_key"):
         key_name = CONFIG.get("mimo_asr_api_key_source", "MIMO_API_KEY")
-        log(f"ASR 跳过：未设置 {key_name}（MiMo ASR 需要）。如不需要对白可加 --skip-asr")
+        log(f"ASR 跳过：未设置 {key_name}（MiMo ASR 需要；VLM/TTS 也需要同一个 key）。"
+            f"如不需要对白可加 --skip-asr")
         asr_file.write_text(json.dumps([], ensure_ascii=False, indent=2))
         return []
 
@@ -52,7 +53,9 @@ def transcribe_audio(video_path, work_dir):
     asr_file.write_text(json.dumps(asr_result, ensure_ascii=False, indent=2))
 
     total_text = " ".join(s["text"] for s in asr_result if s["text"])
-    log(f"ASR 转录完成: {len(asr_result)} 段, 共 {len(total_text)} 字")
+    empty = sum(1 for s in asr_result if not s["text"])
+    suffix = f"（{empty} 段无文本：静音/切分失败/超限被跳过）" if empty else ""
+    log(f"ASR 转录完成: {len(asr_result)} 段, 共 {len(total_text)} 字{suffix}")
     return asr_result
 
 

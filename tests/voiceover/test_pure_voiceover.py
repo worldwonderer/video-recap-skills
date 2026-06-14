@@ -105,20 +105,20 @@ def test_detect_tts_engine_returns_mimo_when_key_set(monkeypatch):
     assert _detect_tts_engine() == "mimo-tts"
 
 
-def test_resolve_tts_engine_returns_mimo_and_rejects_unknown(monkeypatch):
+def test_resolve_tts_engine_returns_mimo_when_key_set(monkeypatch):
     monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "tp-secret")
-    monkeypatch.setitem(CONFIG, "tts_engine", "mimo-tts")
     assert resolve_tts_engine() == "mimo-tts"
 
-    monkeypatch.setitem(CONFIG, "tts_engine", "edge-tts")  # removed engine
-    with pytest.raises(RuntimeError, match="不支持的 TTS 引擎"):
+
+def test_resolve_tts_engine_raises_without_key(monkeypatch):
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "")
+    with pytest.raises(RuntimeError, match="没有可用的 TTS 引擎|MiMo"):
         resolve_tts_engine()
 
 
 def test_resolve_tts_engine_prefers_existing_when_no_key(monkeypatch):
     """Assemble-only reruns may reuse already-generated audio even without a fresh key."""
     monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "")
-    monkeypatch.setitem(CONFIG, "tts_engine", "mimo-tts")
     assert resolve_tts_engine(prefer_existing="mimo-tts") == "mimo-tts"
 
 

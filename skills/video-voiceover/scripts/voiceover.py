@@ -231,20 +231,17 @@ def _detect_tts_engine():
 
 
 def resolve_tts_engine(prefer_existing=None):
-    """Resolve the TTS engine. MiMo TTS (mimo-tts) is the only engine.
+    """Resolve the TTS engine. MiMo TTS (mimo-v2.5-tts) is the only engine.
 
-    `prefer_existing` is for assemble-only cache checks: already-generated audio
-    may still be assembled even if no fresh TTS key is configured.
+    `prefer_existing` lets an assemble-only rerun reuse already-generated audio
+    even when no fresh MiMo key is configured.
     """
-    engine = CONFIG.get("tts_engine", "mimo-tts")
-    if engine in ("auto", "mimo-tts"):
-        try:
-            return _detect_tts_engine()
-        except RuntimeError:
-            if prefer_existing in SUPPORTED_TTS_ENGINES:
-                return prefer_existing
-            raise
-    raise RuntimeError(f"不支持的 TTS 引擎: {engine}。当前仅支持 mimo-tts。")
+    try:
+        return _detect_tts_engine()
+    except RuntimeError:
+        if prefer_existing in SUPPORTED_TTS_ENGINES:
+            return prefer_existing
+        raise
 
 
 def tts_settings_fingerprint(engine=None):
@@ -314,12 +311,9 @@ def main():
     ap.add_argument("--work-dir", required=True)
     ap.add_argument("--narration", default=None,
                     help="narration json (default: narration_mapped.json if present, else narration.json)")
-    ap.add_argument("--engine", default=None, help="mimo-tts (the only supported engine)")
     ap.add_argument("--mimo-voice", default=None, help="MiMo TTS voice name")
     args = ap.parse_args()
     work_dir = Path(args.work_dir)
-    if args.engine:
-        CONFIG["tts_engine"] = args.engine
     if args.mimo_voice:
         CONFIG["mimo_tts_voice"] = args.mimo_voice
     if args.narration:
