@@ -1,11 +1,8 @@
 name: Skill Validate
 on:
+  # Run on every PR so the required status checks always report — a path filter
+  # here would let docs-only PRs stall forever under branch protection.
   pull_request:
-    paths:
-      - 'skills/**'
-      - 'tests/**'
-      - '.claude-plugin/**'
-      - 'scripts/**'
 
 jobs:
   validate:
