@@ -151,6 +151,7 @@ def test_assemble_video_burns_ass_subtitles(monkeypatch, tmp_path):
         return CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setitem(CONFIG, "burn_subtitles", True)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)  # isolate burn behavior from the mask default
     monkeypatch.setattr("assemble.get_video_duration", lambda path: 4.0)
     monkeypatch.setattr("assemble._build_timed_narration", lambda segments, out, duration, wd: Path(out).write_bytes(b"narration"))
     monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
@@ -187,6 +188,7 @@ def test_assemble_video_without_burn_keeps_video_copy(monkeypatch, tmp_path):
 
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
     monkeypatch.setitem(CONFIG, "force_video_reencode", False)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)  # nothing should force a re-encode here
     monkeypatch.setattr("assemble.get_video_duration", lambda path: 4.0)
     monkeypatch.setattr("assemble._build_timed_narration", lambda segments, out, duration, wd: Path(out).write_bytes(b"narration"))
     monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
@@ -206,42 +208,104 @@ def test_assemble_video_without_burn_keeps_video_copy(monkeypatch, tmp_path):
     assert ffmpeg_cmd[ffmpeg_cmd.index("-c:v") + 1] == "copy"
 
 
-def test_build_audio_filter_complex_dynamic_envelope_default(monkeypatch):
+def test_assemble_video_masks_source_subs_by_default(monkeypatch, tmp_path):
+    # mask_source_subtitles defaults to True now: even with burn off, the bottom
+    # band is drawn, which forces a video re-encode (no -c:v copy).
+    video = tmp_path / "input.mp4"
+    video.write_bytes(b"video")
+    output = tmp_path / "output.mp4"
+    commands = []
+
+    def fake_run_cmd(cmd):
+        commands.append(cmd)
+        output.write_bytes(b"mp4")
+        return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setitem(CONFIG, "burn_subtitles", False)
+    monkeypatch.setitem(CONFIG, "force_video_reencode", False)
+    # mask_source_subtitles left at its default (True) on purpose
+    monkeypatch.setattr("assemble.get_video_duration", lambda path: 4.0)
+    monkeypatch.setattr("assemble._build_timed_narration", lambda segments, out, duration, wd: Path(out).write_bytes(b"narration"))
+    monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
+
+    assemble_video(video, [{
+        "start": 0.0,
+        "end": 3.0,
+        "narration": "默认遮挡原字幕。",
+        "audio_path": str(tmp_path / "narr.wav"),
+        "audio_duration": 1.0,
+    }], tmp_path, output)
+
+    ffmpeg_cmd = commands[-1]
+    assert "-vf" in ffmpeg_cmd
+    assert any("drawbox=" in str(arg) for arg in ffmpeg_cmd)
+    assert ffmpeg_cmd[ffmpeg_cmd.index("-c:v") + 1] == "libx264"
+
+
+def test_build_audio_filter_complex_gap_fill_envelope(monkeypatch):
     monkeypatch.setitem(CONFIG, "ducking_mode", "fixed")
-    monkeypatch.setitem(CONFIG, "ducking_orig_volume", 0.5)
+    monkeypatch.setitem(CONFIG, "idle_orig_volume", 0.85)
     monkeypatch.setitem(CONFIG, "speech_ducking_volume", 0.2)
     monkeypatch.setitem(CONFIG, "zone_ducking_volume", 0.12)
+    monkeypatch.setitem(CONFIG, "duck_fade_seconds", 0.25)
     fc = _build_audio_filter_complex([
         {"actual_place_start": 0.0, "actual_place_end": 2.0, "overlaps_speech": True},
         {"actual_place_start": 5.0, "actual_place_end": 7.0, "overlaps_speech": False},
     ])
-    assert "volume='max(0,min(1," in fc  # per-segment envelope
+    assert "volume='max(0,min(1,0.85" in fc          # idle baseline holds the original up in the gaps
     assert "eval=frame" in fc
-    assert "between(t,0.00,2.00)" in fc
-    assert "between(t,5.00,7.00)" in fc
+    assert "min(t-0.00,2.00-t)/0.25" in fc            # faded duck under the dialogue-overlap beat
+    assert "min(t-5.00,7.00-t)/0.25" in fc            # faded duck under the quiet-window beat
+    assert "(-0.650)" in fc                           # 0.85 -> 0.20 under dialogue
+    assert "(-0.730)" in fc                           # 0.85 -> 0.12 in quiet window
     assert fc.endswith("[aout]")
 
 
-def test_build_audio_filter_complex_fixed_when_all_overlap(monkeypatch):
+def test_build_audio_filter_complex_all_overlap_still_fills_gaps(monkeypatch):
+    # Regression: all-overlap beats used to fall back to a constant duck, leaving the
+    # original quiet across the whole video (dead air between sentences). Now the
+    # original swells back to idle in the gaps and only ducks under each beat.
     monkeypatch.setitem(CONFIG, "ducking_mode", "fixed")
-    monkeypatch.setitem(CONFIG, "ducking_orig_volume", 0.5)
+    monkeypatch.setitem(CONFIG, "idle_orig_volume", 0.85)
+    monkeypatch.setitem(CONFIG, "speech_ducking_volume", 0.2)
+    monkeypatch.setitem(CONFIG, "duck_fade_seconds", 0.25)
     fc = _build_audio_filter_complex([
         {"actual_place_start": 0.0, "actual_place_end": 2.0, "overlaps_speech": True},
     ])
-    assert "volume=0.5,aresample=48000[orig]" in fc  # constant, not an envelope
-    assert "eval=frame" not in fc
+    assert "volume='max(0,min(1,0.85" in fc           # NOT a constant; idle baseline present
+    assert "min(t-0.00,2.00-t)/0.25" in fc            # ducks only under the narration window
+    assert "eval=frame" in fc
     assert fc.endswith("[aout]")
 
 
-def test_build_audio_filter_complex_trapezoid_when_all_quiet(monkeypatch):
+def test_build_audio_filter_complex_all_quiet_ducks_to_zone(monkeypatch):
     monkeypatch.setitem(CONFIG, "ducking_mode", "fixed")
+    monkeypatch.setitem(CONFIG, "idle_orig_volume", 0.85)
     monkeypatch.setitem(CONFIG, "zone_ducking_volume", 0.12)
-    monkeypatch.setitem(CONFIG, "zone_fade_seconds", 0.5)
+    monkeypatch.setitem(CONFIG, "duck_fade_seconds", 0.25)
     fc = _build_audio_filter_complex([
         {"actual_place_start": 1.0, "actual_place_end": 4.0, "overlaps_speech": False},
     ])
-    assert "min(t-1.00,4.00-t)/0.5" in fc  # smooth trapezoid fade
+    assert "min(t-1.00,4.00-t)/0.25" in fc            # smooth fade
+    assert "(-0.730)" in fc                           # 0.85 -> 0.12
     assert "eval=frame" in fc
+
+
+def test_build_audio_filter_complex_bgm_adds_third_track(monkeypatch):
+    monkeypatch.setitem(CONFIG, "ducking_mode", "fixed")
+    monkeypatch.setitem(CONFIG, "bgm_volume", 0.18)
+    monkeypatch.setitem(CONFIG, "bgm_ducking_volume", 0.10)
+    monkeypatch.setitem(CONFIG, "duck_fade_seconds", 0.25)
+    segs = [{"actual_place_start": 0.0, "actual_place_end": 2.0, "overlaps_speech": True}]
+    fc = _build_audio_filter_complex(segs, has_bgm=True)
+    assert "[2:a]volume='" in fc                      # BGM bed from input 2, ducked under narration
+    assert "[bgm]" in fc
+    assert "amix=inputs=3" in fc
+    assert fc.endswith("[aout]")
+    # default (no BGM) stays a two-track mix with no third input referenced
+    fc2 = _build_audio_filter_complex(segs, has_bgm=False)
+    assert "amix=inputs=2" in fc2
+    assert "[2:a]" not in fc2
 
 
 def test_build_audio_filter_complex_explicit_modes(monkeypatch):
