@@ -7,10 +7,13 @@ bundle ships no root `CLAUDE.md` (so it never collides with your project/global 
 
 | Concern | Env var / flag | Default | Notes |
 |---|---|---|---|
-| Chat/VLM model | `OPENAI_MODEL` | `doubao-seed-2-0-lite-260428` | frame VLM + reviewer + consolidate |
-| Chat API key | `OPENAI_API_KEY` (or `MIMO_API_KEY`) | — | required for VLM/review/consolidate only |
-| TTS engine | `TTS_ENGINE` | `auto` | `auto` prefers MiMo when `MIMO_API_KEY` set, else edge-tts |
-| edge voice | `--voice` | `zh-CN-YunxiNeural` | per run |
+| MiMo API key | `MIMO_API_KEY` | — | **required**; one key drives ASR + VLM + TTS. `tp-*` Token-Plan keys auto-route to the cluster base URL |
+| Token-Plan cluster | `MIMO_TOKEN_PLAN_CLUSTER` | `cn` | `cn` / `sgp` / `ams` (only for `tp-*` keys) |
+| VLM / chat model | `MIMO_MODEL` | `mimo-v2.5` | frame VLM + reviewer + consolidate |
+| ASR model | `MIMO_ASR_MODEL` | `mimo-v2.5-asr` | speech-to-text |
+| ASR language | `MIMO_ASR_LANGUAGE` | `auto` | `auto` / `zh` / `en` |
+| ASR window | `ASR_SEGMENT_SECONDS` | `30` | smaller → finer dialogue timestamps (stays under MiMo's 10MB base64 cap) |
+| TTS model | `MIMO_TTS_MODEL` | `mimo-v2.5-tts` | the only TTS engine |
 | MiMo voice | `MIMO_TTS_VOICE` / `--mimo-tts-voice` | `冰糖` | |
 | Narration density | `TARGET_SEGMENTS_PER_MINUTE` | `9.6` | min `MIN_SEGMENTS_PER_MINUTE=6.24` |
 | Final loudness | `FINAL_LOUDNORM` / `TARGET_LUFS` | `true` / `-14` | end-of-pipeline normalize |

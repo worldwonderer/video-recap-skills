@@ -456,7 +456,7 @@ def api_call(payload, max_retries=5, *, api_provider=None, api_url=None, api_key
                 hint += "请检查 API key 权限和 API URL 设置。"
                 raise RuntimeError(hint)
             elif e.code == 405:
-                raise RuntimeError("API 端点不可用 (405)，可能被 WAF 拦截。请检查 OPENAI_API_URL 或稍后重试。")
+                raise RuntimeError("API 端点不可用 (405)，可能被 WAF 拦截。请检查 MIMO_API_URL 或稍后重试。")
             elif e.code == 503:
                 log(f"API 服务暂不可用 (503)，等待 {wait}s (尝试 {attempt+1}/{max_retries})")
             elif e.code == 524:

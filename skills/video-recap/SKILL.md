@@ -23,13 +23,13 @@ Understanding artifacts are reused when fresh. For per-stage detail, read each s
 ## Install / env
 
 ```bash
-brew install ffmpeg && pip3 install edge-tts
-export OPENAI_API_KEY=***                       # frame VLM (or MIMO_API_KEY for MiMo)
-export OPENAI_MODEL=doubao-seed-2-0-lite-260428
+# ffmpeg: brew install ffmpeg | apt install ffmpeg | choco install ffmpeg
+export MIMO_API_KEY=***          # ONE key drives ASR + VLM + TTS (all MiMo)
 ```
 
-MiMo (optional): `MIMO_API_KEY` enables MiMo scene-chunk video understanding (`--mimo-video-overview`)
-and is preferred for TTS. `tp-*` Token Plan keys default to the cn cluster (`MIMO_TOKEN_PLAN_CLUSTER`).
+The whole pipeline runs on ffmpeg + a single MiMo key: ASR (`mimo-v2.5-asr`), VLM (`mimo-v2.5`),
+TTS (`mimo-v2.5-tts`). `tp-*` Token Plan keys default to the cn cluster (`MIMO_TOKEN_PLAN_CLUSTER`).
+Optional MiMo scene-chunk video understanding: `--mimo-video-overview`.
 
 Overridable defaults (zero-config otherwise): see `references/config-playbook.md`.
 

@@ -3,8 +3,8 @@ name: video-voiceover
 user-invocable: false
 description: >
  Synthesize Chinese narration audio (TTS voiceover) from a timestamped narration.json.
- Use to turn a written narration script into per-segment speech audio, with edge-tts or
- MiMo TTS, dynamic speed fitting, and loudness handling. Part of the video-recap bundle:
+ Use to turn a written narration script into per-segment speech audio, with MiMo TTS
+ (mimo-v2.5-tts), dynamic speed fitting, and loudness handling. Part of the video-recap bundle:
  consumes narration.json (or narration_mapped.json), produces tts_segments + tts_meta.json.
  触发词: 配音, 语音合成, TTS, 解说配音, voiceover, text to speech, 旁白配音.
 ---
@@ -12,15 +12,13 @@ description: >
 ## What this does
 
 Reads a timestamped narration script and synthesizes one audio clip per segment, fitting speech
-to each segment's time slot (dynamic rate), then records placement metadata. Engine selection:
-`auto` prefers MiMo TTS when `MIMO_API_KEY` is set, else `edge-tts`.
+to each segment's time slot (dynamic rate), then records placement metadata. The only engine is
+MiMo TTS (`mimo-v2.5-tts`).
 
 ## Requirements
 
 ```bash
-pip3 install edge-tts          # edge-tts engine
-# MiMo TTS (optional, preferred when available):
-export MIMO_API_KEY=***         # or MIMO_TTS_API_KEY
+export MIMO_API_KEY=***         # MiMo TTS (or a TTS-specific MIMO_TTS_API_KEY)
 ```
 
 ## Input contract
@@ -32,8 +30,7 @@ export MIMO_API_KEY=***         # or MIMO_TTS_API_KEY
 ## Run
 
 ```bash
-python3 scripts/voiceover.py --work-dir <work_dir> \
-  [--engine auto|edge-tts|mimo-tts] [--voice zh-CN-YunxiNeural] [--mimo-voice 冰糖]
+python3 scripts/voiceover.py --work-dir <work_dir> [--mimo-voice 冰糖]
 ```
 
 (Defaults to `narration_mapped.json` if present, else `narration.json`.)

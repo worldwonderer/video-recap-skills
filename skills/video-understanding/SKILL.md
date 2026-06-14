@@ -15,7 +15,7 @@ description: >
 Turns a source video into an **understanding index** an agent (or a downstream stage) can read:
 1. **Scene detection** — `scenes.json` (cut points, durations) + junk-scene filtering.
 2. **Frame extraction** — sampled frames for the visual analysis.
-3. **ASR** — `asr_result.json` (timestamped dialogue) via `qwen3-asr-rs`.
+3. **ASR** — `asr_result.json` (timestamped dialogue) via MiMo `mimo-v2.5-asr`.
 4. **Silence detection** — `silence_periods.json` (quiet windows, `has_speech` flag).
 5. **VLM analysis** — `vlm_analysis.json` (per-scene description, depth analysis, `frame_facts`).
 6. **Timeline fusion + brief** — `timeline_fusion.json`, `asr_writing_chunks.json`, `agent_narration_brief.md`.
@@ -25,13 +25,12 @@ Stateless: a stage is skipped only if its output exists and is newer than its in
 ## Requirements
 
 ```bash
-brew install ffmpeg
-export OPENAI_API_KEY=***          # frame VLM (or MIMO_API_KEY for the MiMo path)
-export OPENAI_MODEL=doubao-seed-2-0-lite-260428
+# ffmpeg: brew install ffmpeg | apt install ffmpeg | choco install ffmpeg
+export MIMO_API_KEY=***          # one key drives ASR (mimo-v2.5-asr) + VLM (mimo-v2.5)
 ```
 
-ASR needs `qwen3-asr-rs` (`ASR_BIN` / `ASR_MODEL_DIR`); without it, run `--skip-asr`.
-Optional MiMo scene-chunk video understanding: `--mimo-video-overview` (needs `MIMO_API_KEY`).
+ASR uses MiMo `mimo-v2.5-asr`; without `MIMO_API_KEY` it is skipped (or pass `--skip-asr`).
+Optional MiMo scene-chunk video understanding: `--mimo-video-overview`.
 
 ## Run
 

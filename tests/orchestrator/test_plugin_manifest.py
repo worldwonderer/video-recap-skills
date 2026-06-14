@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_plugin_manifest_has_exactly_four_keys():
     manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())
     assert set(manifest.keys()) == {"name", "version", "description", "author"}
-    assert manifest["name"] == "video-recap"
+    assert manifest["name"] == "video-recap-skills"
 
 
 def test_marketplace_json_is_deferred():
