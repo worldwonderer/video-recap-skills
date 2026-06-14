@@ -53,7 +53,7 @@ def detect_scenes(video_path, work_dir, threshold=None):
 
     # 保存
     scenes_file = work_dir / "scenes.json"
-    scenes_file.write_text(json.dumps(scenes, ensure_ascii=False, indent=2))
+    scenes_file.write_text(json.dumps(scenes, ensure_ascii=False, indent=2), encoding="utf-8")
     for i, s in enumerate(scenes):
         log(f"  场景 {i+1}: {s['start']:.1f}s - {s['end']:.1f}s ({s['end']-s['start']:.1f}s)")
 
@@ -250,7 +250,7 @@ def detect_silence_periods(video_path, work_dir, asr_result=None):
 
     # 保存
     (work_dir / "silence_periods.json").write_text(
-        json.dumps(periods, ensure_ascii=False, indent=2))
+        json.dumps(periods, ensure_ascii=False, indent=2), encoding="utf-8")
     log(f"检测到 {len(periods)} 个安静窗口 (≥{quiet_min}s)")
     for qp in periods:
         flag = " [有语音]" if qp["has_speech"] else ""

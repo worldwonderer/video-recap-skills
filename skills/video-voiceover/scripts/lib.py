@@ -495,7 +495,7 @@ def load_prompt(name):
     path = PROMPTS_DIR / "prompt-templates.md"
     if not path.exists():
         return None
-    content = path.read_text()
+    content = path.read_text(encoding="utf-8")
     # 用 ### NAME 和 ### 分隔提取对应 prompt
     pattern = rf"### {name}\s*\n(.*?)(?=\n### |\Z)"
     m = re.search(pattern, content, re.DOTALL)

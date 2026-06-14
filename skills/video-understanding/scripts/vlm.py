@@ -52,7 +52,7 @@ def analyze_scenes(scenes, frames, work_dir):
     if not scenes:
         analyses = []
         vlm_file = work_dir / "vlm_analysis.json"
-        vlm_file.write_text(json.dumps(analyses, ensure_ascii=False, indent=2))
+        vlm_file.write_text(json.dumps(analyses, ensure_ascii=False, indent=2), encoding="utf-8")
         log("VLM 分析完成: 0 个场景")
         return analyses
 
@@ -188,7 +188,7 @@ def analyze_scenes(scenes, frames, work_dir):
 
     # 保存
     vlm_file = work_dir / "vlm_analysis.json"
-    vlm_file.write_text(json.dumps(analyses, ensure_ascii=False, indent=2))
+    vlm_file.write_text(json.dumps(analyses, ensure_ascii=False, indent=2), encoding="utf-8")
 
     log(f"VLM 分析完成: {len(analyses)} 个场景")
     return analyses

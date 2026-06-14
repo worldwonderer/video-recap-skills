@@ -59,7 +59,7 @@ def test_zero_duration_does_not_fabricate_180s_timestamps(monkeypatch, tmp_path)
     result = asr.transcribe_audio(video_path, tmp_path)
 
     assert result == []
-    saved = json.loads((tmp_path / "asr_result.json").read_text())
+    saved = json.loads((tmp_path / "asr_result.json").read_text(encoding="utf-8"))
     assert saved == []
     # 绝不应出现伪造的 0-180s 时间戳
     assert not any(s.get("end") == 180.0 for s in saved)
@@ -116,7 +116,7 @@ def test_transcribe_audio_without_key_returns_empty(monkeypatch, tmp_path):
 
     monkeypatch.setattr("asr.run_cmd", boom)
     assert asr.transcribe_audio(video, tmp_path) == []
-    assert json.loads((tmp_path / "asr_result.json").read_text()) == []
+    assert json.loads((tmp_path / "asr_result.json").read_text(encoding="utf-8")) == []
 
 
 def test_extract_frames_returns_only_current_run_frames(monkeypatch, tmp_path):

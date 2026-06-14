@@ -18,7 +18,7 @@ def transcribe_audio(video_path, work_dir):
         key_name = CONFIG.get("mimo_asr_api_key_source", "MIMO_API_KEY")
         log(f"ASR 跳过：未设置 {key_name}（MiMo ASR 需要；VLM/TTS 也需要同一个 key）。"
             f"如不需要对白可加 --skip-asr")
-        asr_file.write_text(json.dumps([], ensure_ascii=False, indent=2))
+        asr_file.write_text(json.dumps([], ensure_ascii=False, indent=2), encoding="utf-8")
         return []
 
     # 提取音频
@@ -34,7 +34,7 @@ def transcribe_audio(video_path, work_dir):
     if duration <= 0:
         # ffprobe 失败时不再伪造 180s 时长，否则会向 asr_result.json 写入虚构时间戳
         log("ASR 警告: 无法获取音频时长（ffprobe 失败），跳过 ASR 转录")
-        asr_file.write_text(json.dumps([], ensure_ascii=False, indent=2))
+        asr_file.write_text(json.dumps([], ensure_ascii=False, indent=2), encoding="utf-8")
         return []
 
     segments_dir = work_dir / "audio_segments"
@@ -50,7 +50,7 @@ def transcribe_audio(video_path, work_dir):
         asr_result = _segment_and_transcribe(audio_wav, segments_dir, duration, segment_length)
 
     # 保存
-    asr_file.write_text(json.dumps(asr_result, ensure_ascii=False, indent=2))
+    asr_file.write_text(json.dumps(asr_result, ensure_ascii=False, indent=2), encoding="utf-8")
 
     total_text = " ".join(s["text"] for s in asr_result if s["text"])
     empty = sum(1 for s in asr_result if not s["text"])

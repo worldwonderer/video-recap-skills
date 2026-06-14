@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_plugin_manifest_has_exactly_four_keys():
-    manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())
+    manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     assert set(manifest.keys()) == {"name", "version", "description", "author"}
     assert manifest["name"] == "video-recap-skills"
 
@@ -19,7 +19,7 @@ def test_marketplace_json_is_deferred():
 
 def test_stage_skills_hidden_router_visible():
     def fm(skill):
-        return (ROOT / "skills" / skill / "SKILL.md").read_text()
+        return (ROOT / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
     for hidden in ("video-understanding", "video-cut", "video-voiceover", "video-assemble"):
         assert "user-invocable: false" in fm(hidden), f"{hidden} should be hidden"
     for visible in ("video-script", "video-recap"):

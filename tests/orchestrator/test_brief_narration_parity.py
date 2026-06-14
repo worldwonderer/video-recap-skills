@@ -29,7 +29,7 @@ def test_asr_span_tol_matches_across_files():
     import each other across skills). Guard that the literal stays in sync."""
     import re
     def tol(rel):
-        m = re.search(r"_ASR_SPAN_TOL\s*=\s*([0-9.]+)", (ROOT / rel).read_text())
+        m = re.search(r"_ASR_SPAN_TOL\s*=\s*([0-9.]+)", (ROOT / rel).read_text(encoding="utf-8"))
         return m.group(1) if m else None
     vals = {
         tol("skills/video-understanding/scripts/consolidate.py"),

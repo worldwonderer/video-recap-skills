@@ -113,7 +113,7 @@ def main():
 
     # Step 2: scene detection
     if not args.force and _fresh(scenes_json, video):
-        scenes = json.loads(scenes_json.read_text())
+        scenes = json.loads(scenes_json.read_text(encoding="utf-8"))
         log(f"跳过场景检测（已存在 {len(scenes)} 个场景）")
     else:
         scenes = detect_scenes(video, work_dir, scene_threshold)
@@ -121,10 +121,10 @@ def main():
     # Step 3: ASR
     if args.skip_asr:
         asr_result = []
-        asr_json.write_text(json.dumps(asr_result, ensure_ascii=False, indent=2))
+        asr_json.write_text(json.dumps(asr_result, ensure_ascii=False, indent=2), encoding="utf-8")
         log("跳过 ASR（--skip-asr）")
     elif not args.force and _fresh(asr_json, video):
-        asr_result = json.loads(asr_json.read_text())
+        asr_result = json.loads(asr_json.read_text(encoding="utf-8"))
         log(f"跳过 ASR（已存在 {len(asr_result)} 段）")
     else:
         try:
@@ -132,18 +132,18 @@ def main():
         except Exception as e:
             log(f"ASR 失败（继续无 ASR）: {e}")
             asr_result = []
-            asr_json.write_text(json.dumps(asr_result, ensure_ascii=False, indent=2))
+            asr_json.write_text(json.dumps(asr_result, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # Step 3.5: silence detection
     if not args.force and _fresh(silence_json, asr_json):
-        silence_periods = json.loads(silence_json.read_text())
+        silence_periods = json.loads(silence_json.read_text(encoding="utf-8"))
         log(f"跳过静音检测（已存在 {len(silence_periods)} 个窗口）")
     else:
         silence_periods = detect_silence_periods(video, work_dir, asr_result)
 
     # Step 4: VLM analysis (the only stage that requires the chat API key)
     if not args.force and _fresh(vlm_json, scenes_json):
-        vlm_analysis = json.loads(vlm_json.read_text())
+        vlm_analysis = json.loads(vlm_json.read_text(encoding="utf-8"))
         log(f"跳过 VLM 分析（已存在 {len(vlm_analysis)} 个场景）")
     else:
         if not CONFIG.get("api_key"):

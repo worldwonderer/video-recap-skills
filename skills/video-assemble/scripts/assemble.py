@@ -541,7 +541,7 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
     filter_complex_bytes = filter_complex.encode('utf-8')
     if len(filter_complex_bytes) > 8000:
         fc_script = Path(work_dir) / ".filter_complex.txt"
-        fc_script.write_text(filter_complex)
+        fc_script.write_text(filter_complex, encoding="utf-8")
         log(f"使用 filter_complex_script (表达式长度 {len(filter_complex_bytes)} bytes)")
         cmd = [
             "ffmpeg", "-y",
