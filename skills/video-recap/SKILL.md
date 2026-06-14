@@ -17,8 +17,10 @@ JSON/MP4 artifacts in a `work_dir` — no shared code):
 video-understanding ─▶ (agent writes narration.json per video-script) ─▶ [video-cut] ─▶ video-voiceover ─▶ video-assemble
 ```
 
-It is **stateless**: rerun the same command after writing `narration.json` to continue.
-Understanding artifacts are reused when fresh. For per-stage detail, read each skill's own SKILL.md.
+It is resume-safe: rerun the same command after writing `narration.json` to continue.
+Phase B validates `recap_run_manifest.json` so an old `work_dir` from another source video or
+different run settings is rejected instead of silently reusing stale narration. Understanding
+artifacts are reused only when their provenance matches. For per-stage detail, read each skill's own SKILL.md.
 
 ## Install / env
 

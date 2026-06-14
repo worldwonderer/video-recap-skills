@@ -33,7 +33,7 @@ inspection and what the **optional** 剪映 exporter consumes. Times are plain
 }
 ```
 
-- **video** — the source clip(s). In cut mode (with `--source-video` / `SOURCE_VIDEO`)
+- **video** — the source clip(s). In cut mode (with explicit `--source-video`)
   each `clip_plan` entry references the real source range; otherwise a single clip
   spans the rendered input. The clip's `audio` carries the **original-audio ducking
   automation** (gap-fill: held at `base_gain` between sentences, dipped under each
@@ -63,7 +63,7 @@ unbundled draft opens with every clip "暂无访问权限 / offline". Drop the d
 its `materials/`) into 剪映's drafts root — on this setup
 `~/Movies/JianyingPro/User Data/Projects/com.lveditor.draft/` — and it appears in
 the 草稿 list. Use `--jianying-no-bundle-media` only when 剪映 can reach the original
-paths (e.g. media already under the drafts root).
+paths (e.g. media already under the drafts root). If the requested draft folder already exists and is non-empty, the exporter writes a numbered sibling (for example `recap_demo_2`) rather than overwriting an edited draft.
 
 **Decoupling guarantees** (the core never depends on 剪映):
 - the exporter is **lazy-imported** only when an export is requested; importing the
@@ -72,8 +72,7 @@ paths (e.g. media already under the drafts root).
 - any failure is caught and logged; it never breaks the ffmpeg render.
 
 **Limitations** (documented, not bugs): the draft references the *un-burned* source,
-so the source's own hardcoded subtitles show in 剪映 (mask them there if needed); a
-BGM shorter than the recap is not auto-looped in the draft (copy it to extend);
+so the source's own hardcoded subtitles show in 剪映 (mask them there if needed);
 ffmpeg remains the canonical mix — the 剪映 mix is an editable approximation.
 
 ## Acknowledgements

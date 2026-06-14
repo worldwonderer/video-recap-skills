@@ -7,15 +7,22 @@ Chains the independent video-* stage skills into a full narrated recap:
   [video-cut]  ->  video-voiceover  ->  video-assemble
 
 Each stage is a self-contained sibling skill invoked as a subprocess; they communicate
-only through JSON/MP4 artifacts in the shared work_dir. Stateless: rerun the same command
-after writing narration.json to continue (understanding artifacts are reused if fresh).
+only through JSON/MP4 artifacts in the shared work_dir. Resume by rerunning the same
+command after writing narration.json; Phase B verifies a run manifest before reusing
+work_dir artifacts.
 """
 import argparse
+import hashlib
+import json
+import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
 BUNDLE = Path(__file__).resolve().parents[2]  # the skills/ directory
+RUN_MANIFEST = "recap_run_manifest.json"
+ASSEMBLY_MANIFEST = "assembly_manifest.json"
 
 
 def _entry(skill, script):
@@ -30,6 +37,113 @@ def _run(skill, script, *cli_args):
         raise SystemExit(f"{skill}/{script} 失败 (exit {res.returncode})")
 
 
+def _file_fingerprint(path, chunk_size=1024 * 1024):
+    h = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _run_manifest_payload(video, args):
+    return {
+        "schema_version": 1,
+        "source_video": str(Path(video).resolve()),
+        "source_video_fingerprint": _file_fingerprint(video),
+        "settings": {
+            "context": args.context,
+            "scene_threshold": args.scene_threshold,
+            "style": args.style,
+            "edit_mode": args.edit_mode,
+            "target_duration": args.target_duration,
+            "skip_asr": bool(args.skip_asr),
+            "mimo_video_overview": bool(args.mimo_video_overview),
+            "consolidate": bool(args.consolidate),
+            "consolidate_asr": bool(args.consolidate_asr),
+        },
+    }
+
+
+def _write_run_manifest(work_dir, video, args):
+    payload = _run_manifest_payload(video, args)
+    (work_dir / RUN_MANIFEST).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_run_manifest(work_dir):
+    path = Path(work_dir) / RUN_MANIFEST
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _load_json(path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _manifest_mismatches(work_dir, video, args):
+    expected = _run_manifest_payload(video, args)
+    actual = _load_run_manifest(work_dir)
+    if not actual:
+        return ["缺少或无法读取 recap_run_manifest.json；不能证明 work_dir 属于当前视频/参数"]
+    mismatches = []
+    for key in ("source_video", "source_video_fingerprint"):
+        if actual.get(key) != expected.get(key):
+            mismatches.append(f"{key}: expected {expected.get(key)!r}, got {actual.get(key)!r}")
+    if actual.get("settings") != expected.get("settings"):
+        mismatches.append("settings: 当前 CLI/env 参数与 Phase A manifest 不匹配")
+    return mismatches
+
+
+def _read_assembly_output(work_dir):
+    manifest = _load_json(Path(work_dir) / ASSEMBLY_MANIFEST)
+    if isinstance(manifest, dict) and manifest.get("final_output"):
+        return Path(manifest["final_output"])
+    return None
+
+
+def _continuation_command(video, work_dir, args):
+    parts = [sys.executable, str(_entry("video-recap", "recap.py")), str(video), "--work-dir", str(work_dir)]
+    if args.context:
+        parts += ["--context", args.context]
+    if args.scene_threshold is not None:
+        parts += ["--scene-threshold", str(args.scene_threshold)]
+    if args.style != "纪录片":
+        parts += ["--style", args.style]
+    if args.edit_mode != "full":
+        parts += ["--edit-mode", args.edit_mode]
+    if args.target_duration:
+        parts += ["--target-duration", args.target_duration]
+    if args.skip_asr:
+        parts.append("--skip-asr")
+    if args.mimo_video_overview:
+        parts.append("--mimo-video-overview")
+    if args.consolidate:
+        parts.append("--consolidate")
+    if args.consolidate_asr:
+        parts.append("--consolidate-asr")
+    if getattr(args, "mimo_tts_voice", None):
+        parts += ["--mimo-tts-voice", args.mimo_tts_voice]
+    if getattr(args, "allow_partial_tts", False):
+        parts.append("--allow-partial-tts")
+    if getattr(args, "burn_subtitles", False):
+        parts.append("--burn-subtitles")
+    if getattr(args, "output_dir", None):
+        parts += ["--output-dir", args.output_dir]
+    if getattr(args, "export_jianying", False):
+        parts.append("--export-jianying")
+    if getattr(args, "jianying_bundle_media", False):
+        parts.append("--jianying-bundle-media")
+    if getattr(args, "jianying_no_bundle_media", False):
+        parts.append("--jianying-no-bundle-media")
+    return " ".join(shlex.quote(part) for part in parts)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Full video recap orchestrator (video-* skill bundle).")
     ap.add_argument("video", nargs="?")
@@ -37,13 +151,15 @@ def main():
     ap.add_argument("--context", default="")
     ap.add_argument("--scene-threshold", type=float, default=None)
     ap.add_argument("--style", default="纪录片")
-    ap.add_argument("--edit-mode", default="full", choices=["full", "cut"])
-    ap.add_argument("--target-duration", default=None)
+    ap.add_argument("--edit-mode", default=os.environ.get("EDIT_MODE", "full"), choices=["full", "cut"])
+    ap.add_argument("--target-duration", default=os.environ.get("TARGET_DURATION") or None)
     ap.add_argument("--skip-asr", action="store_true")
     ap.add_argument("--mimo-video-overview", action="store_true")
     ap.add_argument("--consolidate", action="store_true", help="build understanding index (Pass B)")
     ap.add_argument("--consolidate-asr", action="store_true", help="also clean ASR (Pass A)")
     ap.add_argument("--mimo-tts-voice", default=None, help="MiMo TTS voice")
+    ap.add_argument("--allow-partial-tts", action="store_true",
+                    help="allow video-voiceover to continue when some narration segments fail TTS")
     ap.add_argument("--burn-subtitles", action="store_true")
     ap.add_argument("--output-dir", default=None)
     ap.add_argument("--export-jianying", action="store_true",
@@ -76,6 +192,10 @@ def main():
             uargs += ["--context", args.context]
         if args.scene_threshold is not None:
             uargs += ["--scene-threshold", str(args.scene_threshold)]
+        if args.edit_mode:
+            uargs += ["--edit-mode", args.edit_mode]
+        if args.target_duration:
+            uargs += ["--target-duration", args.target_duration]
         if args.skip_asr:
             uargs.append("--skip-asr")
         if args.mimo_video_overview:
@@ -85,10 +205,9 @@ def main():
         if args.consolidate_asr:
             uargs.append("--consolidate-asr")
         _run("video-understanding", "understand.py", *uargs)
+        _write_run_manifest(work_dir, video, args)
         brief = work_dir / "agent_narration_brief.md"
-        cont = f"python3 {_entry('video-recap', 'recap.py')} {video} --work-dir {work_dir}"
-        if cut:
-            cont += " --edit-mode cut"
+        cont = _continuation_command(video, work_dir, args)
         print("=" * 50)
         need = f"{narration_json}" + (f" 和 {clip_plan_json}" if cut else "")
         print(f"[video-recap] ⏸  阅读 {brief}（按 video-script 规则）后写入 {need}")
@@ -97,6 +216,14 @@ def main():
         return
 
     # Phase B: produce
+    mismatches = _manifest_mismatches(work_dir, video, args)
+    if mismatches:
+        details = "\n  - ".join(mismatches)
+        raise SystemExit(
+            "work_dir 与当前 recap 输入不匹配，拒绝复用既有 narration/clip_plan；"
+            "请使用新的 --work-dir，或删除旧产物后重新运行 Phase A。\n"
+            f"  - {details}"
+        )
     _run("video-script", "validate.py", "--work-dir", work_dir, "--mode", args.edit_mode)
     assemble_video_path = video
     if cut:
@@ -106,9 +233,12 @@ def main():
         _run("video-cut", "cut.py", *cargs)
         assemble_video_path = work_dir / "edited_source.mp4"
 
-    vargs = ["--work-dir", str(work_dir)]
+    narration_for_tts = work_dir / ("narration_mapped.json" if cut else "narration.json")
+    vargs = ["--work-dir", str(work_dir), "--narration", str(narration_for_tts)]
     if args.mimo_tts_voice:
         vargs += ["--mimo-voice", args.mimo_tts_voice]
+    if args.allow_partial_tts:
+        vargs.append("--allow-partial-tts")
     _run("video-voiceover", "voiceover.py", *vargs)
 
     aargs = [str(assemble_video_path), "--work-dir", str(work_dir), "--recap-stem", video.stem]
@@ -128,7 +258,8 @@ def main():
     _run("video-assemble", "assemble.py", *aargs)
 
     final_dir = Path(args.output_dir) if args.output_dir else work_dir.parent
-    print(f"[video-recap] ✅ 完成: {final_dir / ('recap_' + video.stem + '.mp4')}")
+    final_output = _read_assembly_output(work_dir) or (final_dir / ("recap_" + video.stem + ".mp4"))
+    print(f"[video-recap] ✅ 完成: {final_output}")
 
 
 if __name__ == "__main__":
