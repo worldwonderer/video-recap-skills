@@ -56,6 +56,15 @@ work_dir):
 - video on the main track, narration/BGM as their own audio tracks (higher
   `render_index`), subtitles on a text track.
 
+**Media is bundled by default.** The referenced media is copied into the draft's
+`materials/` folder and the paths rewritten to those copies. This is **required on
+macOS**: 剪映 is sandboxed and cannot read files outside its own data dir, so an
+unbundled draft opens with every clip "暂无访问权限 / offline". Drop the draft (with
+its `materials/`) into 剪映's drafts root — on this setup
+`~/Movies/JianyingPro/User Data/Projects/com.lveditor.draft/` — and it appears in
+the 草稿 list. Use `--jianying-no-bundle-media` only when 剪映 can reach the original
+paths (e.g. media already under the drafts root).
+
 **Decoupling guarantees** (the core never depends on 剪映):
 - the exporter is **lazy-imported** only when an export is requested; importing the
   render path does not import it (enforced by a test);

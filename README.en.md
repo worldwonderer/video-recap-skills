@@ -67,6 +67,8 @@ Each skill ships its own `lib.py` with its config and helpers. There is no share
 
 **Multi-track timeline, optional 剪映 export.** Assembly also emits a backend-neutral `timeline.json` (video / original / narration / BGM / subtitle tracks with ducking automation). Add `--export-jianying` to turn it into a 剪映/JianYing draft — original clips, separate audio tracks, and volume keyframes — to keep editing by hand. This is fully optional: the core render only needs `ffmpeg` and never depends on 剪映.
 
+![Exported 剪映 draft: original clips, narration track, BGM, and subtitles, each independently editable](docs/jianying-export.png)
+
 **Re-runs are cheap.** Edit `narration.json` and only the voiceover and assembly re-run; the analysis is reused.
 
 **Cut-style recaps.** `--edit-mode cut` picks source ranges in `clip_plan.json` to turn a long video into a shorter narrated edit.
