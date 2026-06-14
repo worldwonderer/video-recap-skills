@@ -156,7 +156,7 @@ python3 skills/video-recap/scripts/recap.py --doctor
 ## 致谢
 
 - [linux.do](https://linux.do)
-- 可选的剪映草稿导出参考了开源项目 [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft)（© GuanYixuan，Apache-2.0）与 [capcut-mate](https://github.com/Hommy-master/capcut-mate)（© Hommy，Apache-2.0）的草稿结构。本仓库未内置其代码，剪映草稿 JSON 由本项目自行生成。
+- 剪映草稿导出参考了 [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft)、[capcut-mate](https://github.com/Hommy-master/capcut-mate)（均 Apache-2.0）的草稿结构，未内置其代码。
 
 ## 许可
 

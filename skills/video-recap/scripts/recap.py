@@ -48,6 +48,8 @@ def main():
     ap.add_argument("--output-dir", default=None)
     ap.add_argument("--export-jianying", action="store_true",
                     help="also export an OPTIONAL 剪映/JianYing draft (decoupled; never required)")
+    ap.add_argument("--jianying-bundle-media", action="store_true",
+                    help="copy media into the 剪映 draft so it is portable to another machine")
     ap.add_argument("--doctor", action="store_true")
     args = ap.parse_args()
 
@@ -117,6 +119,8 @@ def main():
         aargs += ["--source-video", str(video)]
     if args.export_jianying:  # env EXPORT_JIANYING is honored by assemble.py itself
         aargs.append("--export-jianying")
+    if args.jianying_bundle_media:
+        aargs.append("--jianying-bundle-media")
     _run("video-assemble", "assemble.py", *aargs)
 
     final_dir = Path(args.output_dir) if args.output_dir else work_dir.parent

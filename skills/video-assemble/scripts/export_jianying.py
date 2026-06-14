@@ -19,6 +19,7 @@ draft JSON is built directly here so the bundle stays stdlib-only.
 
 import json
 import os
+import shutil
 import subprocess
 import uuid
 
@@ -314,11 +315,49 @@ def _meta_info(draft_id, total_us):
     }
 
 
-def export_timeline_to_jianying(timeline, out_dir, draft_name="recap", new_id=None, probe=None):
-    """Write a 剪映 draft folder under out_dir/draft_name. Returns the folder path."""
+def _bundle_media(content, draft_dir):
+    """Copy every referenced media file into <draft_dir>/materials/ and rewrite the
+    material paths to the copies, so the draft folder is self-contained and portable
+    (move/zip it to any 剪映 machine; media sits right next to the JSON for relink)."""
+    mats_dir = os.path.join(draft_dir, "materials")
+    os.makedirs(mats_dir, exist_ok=True)
+    copied, used, notes = {}, set(), []
+    for arr in (content["materials"]["videos"], content["materials"]["audios"]):
+        for m in arr:
+            src = m.get("path")
+            if not src:
+                continue
+            if src in copied:
+                m["path"] = copied[src]
+                continue
+            if not os.path.exists(src):
+                notes.append(f"素材缺失，未打包: {src}")
+                continue
+            base = os.path.basename(src)
+            name, stem_ext = base, os.path.splitext(base)
+            i = 1
+            while name in used:
+                name = f"{stem_ext[0]}_{i}{stem_ext[1]}"
+                i += 1
+            used.add(name)
+            dest = os.path.join(mats_dir, name)
+            shutil.copy2(src, dest)
+            copied[src] = dest
+            m["path"] = dest
+    return notes
+
+
+def export_timeline_to_jianying(timeline, out_dir, draft_name="recap", new_id=None,
+                                probe=None, bundle_media=False):
+    """Write a 剪映 draft folder under out_dir/draft_name. Returns (folder, notes).
+
+    bundle_media=True copies the referenced media into the draft folder so it is
+    self-contained and portable to another machine."""
     content, meta, notes = build_draft(timeline, new_id=new_id, probe=probe)
     draft_dir = os.path.join(out_dir, draft_name)
     os.makedirs(draft_dir, exist_ok=True)
+    if bundle_media:
+        notes = notes + _bundle_media(content, draft_dir)
     meta["draft_name"] = draft_name
     meta["draft_fold_path"] = draft_dir
     content["name"] = draft_name
@@ -337,10 +376,13 @@ def main():
     ap.add_argument("timeline", help="path to timeline.json")
     ap.add_argument("--out-dir", required=True, help="parent dir to create the draft folder in")
     ap.add_argument("--name", default="recap", help="draft folder name")
+    ap.add_argument("--bundle-media", action="store_true",
+                    help="copy referenced media into the draft folder (portable, self-contained)")
     args = ap.parse_args()
     with open(args.timeline, encoding="utf-8") as f:
         timeline = json.load(f)
-    draft_dir, notes = export_timeline_to_jianying(timeline, args.out_dir, args.name)
+    draft_dir, notes = export_timeline_to_jianying(timeline, args.out_dir, args.name,
+                                                   bundle_media=args.bundle_media)
     for n in notes:
         print(f"  注意: {n}")
     print(json.dumps({"status": "exported", "draft_dir": draft_dir}, ensure_ascii=False))

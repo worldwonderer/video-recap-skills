@@ -807,6 +807,8 @@ def main():
     ap.add_argument("--export-jianying", action="store_true",
                     help="also export an OPTIONAL 剪映/JianYing draft from timeline.json after rendering")
     ap.add_argument("--jianying-out", default=None, help="parent dir for the 剪映 draft (default: work-dir)")
+    ap.add_argument("--jianying-bundle-media", action="store_true",
+                    help="copy media into the 剪映 draft folder so it is portable/self-contained")
     args = ap.parse_args()
     work_dir = Path(args.work_dir)
     if args.burn_subtitles:
@@ -815,6 +817,8 @@ def main():
         CONFIG["source_video"] = args.source_video
     if args.export_jianying:
         CONFIG["export_jianying"] = True
+    if args.jianying_bundle_media:
+        CONFIG["jianying_bundle_media"] = True
     tts_meta = Path(args.tts_meta) if args.tts_meta else work_dir / "tts_meta.json"
     tts_segments = json.loads(tts_meta.read_text(encoding="utf-8"))["segments"]
     output_path = work_dir / "output.mp4"
@@ -846,7 +850,8 @@ def _maybe_export_jianying(work_dir, out_dir, stem):
         from timeline import load_timeline
         parent = out_dir or CONFIG.get("jianying_draft_dir") or str(work_dir)
         draft_dir, notes = export_timeline_to_jianying(
-            load_timeline(timeline_path), parent, draft_name=f"recap_{stem}")
+            load_timeline(timeline_path), parent, draft_name=f"recap_{stem}",
+            bundle_media=CONFIG.get("jianying_bundle_media", False))
         for n in notes:
             log(f"  注意: {n}")
         log(f"剪映草稿已导出: {draft_dir}")

@@ -107,6 +107,27 @@ def test_exporter_handles_timeline_without_bgm():
     assert [t["type"] for t in content["tracks"]] == ["video", "audio", "text"]
 
 
+def test_bundle_media_copies_and_rewrites_paths(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    vid, wav = src / "orig.mp4", src / "n0.wav"
+    vid.write_bytes(b"video")
+    wav.write_bytes(b"audio")
+    tl = build_timeline({"width": 100, "height": 100, "fps": 30}, 5.0,
+                        [{"source_path": str(vid), "source_start": 0.0, "source_end": 5.0,
+                          "timeline_start": 0.0, "timeline_end": 5.0}],
+                        [{"source_path": str(wav), "timeline_start": 0.0, "timeline_end": 2.0,
+                          "text": "x"}], bgm=None, ducking=None)
+    draft_dir, _notes = export_timeline_to_jianying(
+        tl, str(tmp_path / "out"), draft_name="d", new_id=_counter_ids(),
+        probe=_fake_probe, bundle_media=True)
+    mats = Path(draft_dir) / "materials"
+    assert (mats / "orig.mp4").exists() and (mats / "n0.wav").exists()
+    content = json.loads((Path(draft_dir) / "draft_content.json").read_text(encoding="utf-8"))
+    for m in content["materials"]["videos"] + content["materials"]["audios"]:
+        assert m["path"].startswith(str(mats)), "material paths rewritten into the bundle"
+
+
 def test_exporter_skips_empty_audio_track():
     tl = {"schema_version": 1, "canvas": {"width": 100, "height": 100, "fps": 30},
           "duration": 5.0, "tracks": [

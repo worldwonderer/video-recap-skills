@@ -30,7 +30,8 @@ bundle ships no root `CLAUDE.md` (so it never collides with your project/global 
 | Subtitle size | `SUBTITLE_FONT_SIZE` / `SUBTITLE_MARGIN_V` | `42` / `48` | look & placement |
 | 整理 / index | `--consolidate` / `--consolidate-asr` | off | build the understanding index (and optionally clean ASR) |
 | 剪映 export (optional) | `--export-jianying` / `EXPORT_JIANYING` | off | after rendering, also write a 剪映/JianYing draft from `timeline.json`. Decoupled — the core render never needs it |
-| 剪映 draft dir | `JIANYING_DRAFT_DIR` | work_dir | parent folder for the exported draft |
+| 剪映 draft dir | `JIANYING_DRAFT_DIR` | work_dir | parent folder for the exported draft (point it at 剪映's drafts root to open in-app) |
+| 剪映 bundle media | `--jianying-bundle-media` / `JIANYING_BUNDLE_MEDIA` | off | copy referenced media into the draft folder so it is self-contained / portable to another machine |
 | Source video | `--source-video` / `SOURCE_VIDEO` | — | original video (cut mode) so `timeline.json` / 剪映 export reference the real source clips instead of the concatenated `edited_source.mp4` |
 
 `video-assemble` always writes `timeline.json` — a backend-neutral multi-track model

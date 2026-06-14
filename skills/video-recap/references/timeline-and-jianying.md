@@ -69,7 +69,5 @@ ffmpeg remains the canonical mix — the 剪映 mix is an editable approximation
 
 ## Acknowledgements
 
-The draft structure is reimplemented from the open-source
-[pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft) (© GuanYixuan,
-Apache-2.0) and [capcut-mate](https://github.com/Hommy-master/capcut-mate)
-(© Hommy, Apache-2.0). No third-party code is vendored.
+Draft schema follows [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft)
+and [capcut-mate](https://github.com/Hommy-master/capcut-mate) (both Apache-2.0); no code vendored.
