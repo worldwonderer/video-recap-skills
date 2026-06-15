@@ -475,3 +475,59 @@ def test_recap_cut_normalizes_plan_before_validate(monkeypatch, tmp_path):
     cut_full_idx = next(i for i, c in enumerate(calls)
                         if c[:2] == ("video-cut", "cut.py") and "--normalize-only" not in c[2])
     assert cut_norm_idx < validate_idx < cut_full_idx
+
+
+def test_cut_narration_stale_guard_logic():
+    """Step 5: stale iff clip_plan changed but narration did NOT (re-cut without re-writing)."""
+    assert recap._cut_narration_is_stale(None, "cp1", "n1") is False
+    base = {"clip_plan_fingerprint": "cp1", "narration_fingerprint": "n1"}
+    assert recap._cut_narration_is_stale(base, "cp1", "n1") is False      # nothing changed
+    assert recap._cut_narration_is_stale(base, "cp2", "n1") is True       # clip_plan changed, narration same -> stale
+    assert recap._cut_narration_is_stale(base, "cp2", "n2") is False      # both changed (re-authored) -> fresh
+
+
+def test_recap_cut_rejects_stale_narration_after_clip_plan_change(monkeypatch, tmp_path):
+    """Step 5: a narration written for a previous clip_plan must not resume into the cut/TTS."""
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "narration.json").write_text(
+        json.dumps([{"start": 10, "end": 12, "narration": "解说。"}]), encoding="utf-8")
+    (work / "clip_plan.json").write_text(json.dumps([{"start": 10, "end": 12}]), encoding="utf-8")
+    recap._write_run_manifest(work, video.resolve(), _manifest_args(edit_mode="cut"))
+    # Ledger recorded for an OLD clip_plan; the narration has not changed since.
+    recap._write_phase_ledger(work, clip_plan_fingerprint="OLD_DIFFERENT_FP",
+                              narration_fingerprint=recap._file_md5(work / "narration.json"),
+                              narration_written=True)
+
+    monkeypatch.setattr("recap._run",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("must reject before any stage runs")))
+    monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--work-dir", str(work), "--edit-mode", "cut"])
+
+    with pytest.raises(SystemExit, match="clip_plan.json 已改变"):
+        recap.main()
+
+
+def test_recap_full_mode_writes_no_phase_ledger(monkeypatch, tmp_path):
+    """Step 5: the phase ledger is cut-mode only; full mode stays unchanged."""
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "narration.json").write_text(
+        json.dumps([{"start": 0, "end": 1, "narration": "full。"}]), encoding="utf-8")
+    recap._write_run_manifest(work, video.resolve(), _manifest_args())
+
+    def fake_run(skill, script, *cli_args):
+        if script == "assemble.py":
+            (work / "output.mp4").write_bytes(b"mp4")
+            (work / "assembly_manifest.json").write_text(
+                json.dumps({"final_output": str(tmp_path / "r.mp4")}), encoding="utf-8")
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--work-dir", str(work)])
+
+    recap.main()
+
+    assert not (work / "recap_phase.json").exists()

@@ -23,6 +23,7 @@ from pathlib import Path
 BUNDLE = Path(__file__).resolve().parents[2]  # the skills/ directory
 RUN_MANIFEST = "recap_run_manifest.json"
 ASSEMBLY_MANIFEST = "assembly_manifest.json"
+PHASE_LEDGER = "recap_phase.json"
 
 
 def _entry(skill, script):
@@ -119,6 +120,45 @@ def _read_assembly_output(work_dir):
     if isinstance(manifest, dict) and manifest.get("final_output"):
         return Path(manifest["final_output"])
     return None
+
+
+def _file_md5(path):
+    path = Path(path)
+    return hashlib.md5(path.read_bytes()).hexdigest() if path.exists() else None
+
+
+def _read_phase_ledger(work_dir):
+    """Phase ledger (cut mode): which artifacts exist and the clip_plan/narration they match.
+
+    Lets resume be driven by recorded phase state rather than bare file existence — the
+    prerequisite for the cut-first/narrate-second two-pause flow, and the guard that keeps a
+    narration written for one clip_plan from silently driving a different cut into TTS.
+    """
+    ledger = _load_json(Path(work_dir) / PHASE_LEDGER)
+    return ledger if isinstance(ledger, dict) else None
+
+
+def _write_phase_ledger(work_dir, **fields):
+    ledger = _read_phase_ledger(work_dir) or {}
+    ledger.update(fields)
+    (Path(work_dir) / PHASE_LEDGER).write_text(
+        json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
+    return ledger
+
+
+def _cut_narration_is_stale(ledger, current_clip_plan_fp, current_narration_fp):
+    """Stale iff the clip_plan changed since the ledger was written but the narration did NOT
+    — i.e. the agent re-cut without re-writing the narration, so it describes the old cut.
+    If BOTH changed (narration re-authored for the new clips) it is fresh."""
+    if not ledger:
+        return False
+    recorded_cp = ledger.get("clip_plan_fingerprint")
+    recorded_narr = ledger.get("narration_fingerprint")
+    return bool(
+        recorded_cp is not None
+        and recorded_cp != current_clip_plan_fp
+        and recorded_narr == current_narration_fp
+    )
 
 
 def _continuation_command(video, work_dir, args):
@@ -249,6 +289,16 @@ def main():
             f"  - {details}"
         )
     if cut:
+        # Phase ledger: refuse to drive a stale narration (written for a previous clip_plan)
+        # into the cut/TTS. If clip_plan changed but narration did not, it describes the old cut.
+        cp_fp = _file_md5(clip_plan_json)
+        narr_fp = _file_md5(narration_json)
+        if _cut_narration_is_stale(_read_phase_ledger(work_dir), cp_fp, narr_fp):
+            raise SystemExit(
+                "clip_plan.json 已改变，但 narration.json 没有相应更新：解说仍是对旧剪辑写的，"
+                "会与剪后画面对不上。请按新的保留片段重写 narration.json（或删除它重新进入暂停）。")
+        _write_phase_ledger(work_dir, clip_plan_fingerprint=cp_fp,
+                            narration_fingerprint=narr_fp, narration_written=True)
         # Normalize the clip plan FIRST (cheap, no render) so validate lints the SAME
         # padded/pruned clips the mapper uses — otherwise validate sees the raw plan and
         # can pass a beat the mapper later silently drops.
