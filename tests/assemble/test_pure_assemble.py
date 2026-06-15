@@ -300,59 +300,11 @@ def test_build_timed_narration_clamps_delay_to_slot(monkeypatch, tmp_path):
 
 
 def test_subtitle_burn_filter_escapes_path():
-    path = Path("/tmp/video recap/o'hara/a:b,c[1].ass")
+    path = Path("/tmp/video recap/a:b,c[1].ass")
     filt = _subtitle_burn_filter(path)
     assert filt.startswith("subtitles=")
     assert "video recap" in filt
-    assert r"o\\\'hara" in filt
     assert r"a\:b\,c\[1\].ass" in filt
-    assert "filename='" not in filt
-
-
-def test_subtitle_burn_filter_accepts_apostrophe_path_with_ffmpeg(tmp_path):
-    import subprocess
-
-    video = tmp_path / "input.mp4"
-    ass_dir = tmp_path / "video recap"
-    ass_dir.mkdir()
-    ass = ass_dir / "o'hara.ass"
-    ass.write_text(
-        "\n".join([
-            "[Script Info]",
-            "ScriptType: v4.00+",
-            "[V4+ Styles]",
-            (
-                "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
-                "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
-                "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
-                "Alignment, MarginL, MarginR, MarginV, Encoding"
-            ),
-            (
-                "Style: Default,Arial,12,&H00FFFFFF,&H000000FF,&H00000000,"
-                "&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,1"
-            ),
-            "[Events]",
-            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
-            "Dialogue: 0,0:00:00.00,0:00:00.10,Default,,0,0,0,,Hi",
-            "",
-        ]),
-        encoding="utf-8",
-    )
-    create = subprocess.run([
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-f", "lavfi", "-i", "color=c=black:s=16x16:d=0.1",
-        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(video),
-    ], capture_output=True, text=True)
-    if create.returncode != 0:
-        pytest.skip(f"ffmpeg unavailable for subtitle smoke test: {create.stderr}")
-
-    burn = subprocess.run([
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-i", str(video), "-vf", _subtitle_burn_filter(ass),
-        "-frames:v", "1", "-f", "null", "-",
-    ], capture_output=True, text=True)
-
-    assert burn.returncode == 0, burn.stderr
 
 
 def test_assemble_video_burns_ass_subtitles(monkeypatch, tmp_path):

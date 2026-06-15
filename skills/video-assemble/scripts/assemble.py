@@ -419,7 +419,7 @@ def _escape_subtitle_filter_path(path):
     for raw, escaped in (
         ("\\", "\\\\"),
         (":", "\\:"),
-        ("'", "\\\\\\'"),
+        ("'", "\\'"),
         (",", "\\,"),
         ("[", "\\["),
         ("]", "\\]"),
@@ -430,7 +430,7 @@ def _escape_subtitle_filter_path(path):
 
 def _subtitle_burn_filter(subtitle_path):
     """Build the ffmpeg video filter used for hard-sub rendering."""
-    return f"subtitles=filename={_escape_subtitle_filter_path(subtitle_path)}"
+    return f"subtitles=filename='{_escape_subtitle_filter_path(subtitle_path)}'"
 
 
 def final_loudnorm_filter():
