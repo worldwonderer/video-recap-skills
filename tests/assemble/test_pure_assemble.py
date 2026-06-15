@@ -449,6 +449,7 @@ def test_build_audio_filter_complex_gap_fill_envelope(monkeypatch):
     monkeypatch.setitem(CONFIG, "speech_ducking_volume", 0.2)
     monkeypatch.setitem(CONFIG, "zone_ducking_volume", 0.12)
     monkeypatch.setitem(CONFIG, "duck_fade_seconds", 0.25)
+    monkeypatch.setitem(CONFIG, "duck_bridge_seconds", 0.5)  # keep the 3s gap unbridged so each beat keeps its own level
     fc = _build_audio_filter_complex([
         {"actual_place_start": 0.0, "actual_place_end": 2.0, "overlaps_speech": True},
         {"actual_place_start": 5.0, "actual_place_end": 7.0, "overlaps_speech": False},
@@ -464,8 +465,8 @@ def test_build_audio_filter_complex_gap_fill_envelope(monkeypatch):
 
 def test_build_audio_filter_complex_all_overlap_still_fills_gaps(monkeypatch):
     # Regression: all-overlap beats used to fall back to a constant duck, leaving the
-    # original quiet across the whole video (dead air between sentences). Now the
-    # original swells back to idle in the gaps and only ducks under each beat.
+    # original quiet across the whole video (dead air). A single beat ducks only under its
+    # own window; the lead-in/out around it still swells back to idle.
     monkeypatch.setitem(CONFIG, "ducking_mode", "fixed")
     monkeypatch.setitem(CONFIG, "idle_orig_volume", 0.85)
     monkeypatch.setitem(CONFIG, "speech_ducking_volume", 0.2)
@@ -477,6 +478,75 @@ def test_build_audio_filter_complex_all_overlap_still_fills_gaps(monkeypatch):
     assert "min(t-0.00,2.00-t)/0.25" in fc            # ducks only under the narration window
     assert "eval=frame" in fc
     assert fc.endswith("[aout]")
+
+
+def test_build_audio_filter_complex_bridges_short_gaps(monkeypatch):
+    # The fix: beats separated by a gap smaller than duck_bridge_seconds stay ducked across
+    # the gap (one held span) so the source dialogue does not pop back up between sentences.
+    monkeypatch.setitem(CONFIG, "ducking_mode", "fixed")
+    monkeypatch.setitem(CONFIG, "idle_orig_volume", 0.85)
+    monkeypatch.setitem(CONFIG, "speech_ducking_volume", 0.2)
+    monkeypatch.setitem(CONFIG, "duck_fade_seconds", 0.25)
+    monkeypatch.setitem(CONFIG, "duck_bridge_seconds", 6.0)
+    fc = _build_audio_filter_complex([
+        {"actual_place_start": 0.0, "actual_place_end": 2.0, "overlaps_speech": True},
+        {"actual_place_start": 4.0, "actual_place_end": 6.0, "overlaps_speech": True},  # gap 2.0 < 6.0
+    ])
+    assert "min(t-0.00,6.00-t)/0.25" in fc            # one held duck across both beats + the gap
+    assert "min(t-0.00,2.00-t)" not in fc             # NOT two separate dips
+    assert "min(t-4.00,6.00-t)" not in fc
+    assert fc.count("(-0.650)") == 1                  # a single coalesced duck term
+
+
+def test_build_audio_filter_complex_releases_long_gaps(monkeypatch):
+    # A genuine gap >= duck_bridge_seconds still releases the original to idle so the
+    # picture can breathe (e.g. a deliberate long pause between sections).
+    monkeypatch.setitem(CONFIG, "ducking_mode", "fixed")
+    monkeypatch.setitem(CONFIG, "idle_orig_volume", 0.85)
+    monkeypatch.setitem(CONFIG, "speech_ducking_volume", 0.2)
+    monkeypatch.setitem(CONFIG, "duck_fade_seconds", 0.25)
+    monkeypatch.setitem(CONFIG, "duck_bridge_seconds", 6.0)
+    fc = _build_audio_filter_complex([
+        {"actual_place_start": 0.0, "actual_place_end": 2.0, "overlaps_speech": True},
+        {"actual_place_start": 10.0, "actual_place_end": 12.0, "overlaps_speech": True},  # gap 8.0 >= 6.0
+    ])
+    assert "min(t-0.00,2.00-t)/0.25" in fc            # two separate dips with idle between
+    assert "min(t-10.00,12.00-t)/0.25" in fc
+    assert fc.count("(-0.650)") == 2
+
+
+def test_build_audio_filter_complex_bridged_mixed_levels_flatten_to_min(monkeypatch):
+    # A bridged span mixing a speech beat (0.2) and a quiet beat (0.12) flattens to the MIN
+    # level across the span — matching variable_ducking_keyframes so the 剪映 draft == the mp4.
+    monkeypatch.setitem(CONFIG, "ducking_mode", "fixed")
+    monkeypatch.setitem(CONFIG, "idle_orig_volume", 0.85)
+    monkeypatch.setitem(CONFIG, "speech_ducking_volume", 0.2)
+    monkeypatch.setitem(CONFIG, "zone_ducking_volume", 0.12)
+    monkeypatch.setitem(CONFIG, "duck_fade_seconds", 0.25)
+    monkeypatch.setitem(CONFIG, "duck_bridge_seconds", 6.0)
+    fc = _build_audio_filter_complex([
+        {"actual_place_start": 0.0, "actual_place_end": 2.0, "overlaps_speech": True},   # 0.2
+        {"actual_place_start": 4.0, "actual_place_end": 6.0, "overlaps_speech": False},  # 0.12, gap 2 < 6
+    ])
+    assert "min(t-0.00,6.00-t)/0.25" in fc            # one coalesced span across both beats
+    assert "(-0.730)" in fc                           # held at the MIN level (0.12)
+    assert "(-0.650)" not in fc                       # NOT the speech level (0.2)
+
+
+def test_build_audio_filter_complex_bgm_envelope_bridges_short_gaps(monkeypatch):
+    # The BGM bed bridges the same way: two beats within the bridge coalesce to one BGM dip.
+    monkeypatch.setitem(CONFIG, "ducking_mode", "fixed")
+    monkeypatch.setitem(CONFIG, "bgm_volume", 0.18)
+    monkeypatch.setitem(CONFIG, "bgm_ducking_volume", 0.10)
+    monkeypatch.setitem(CONFIG, "duck_fade_seconds", 0.25)
+    monkeypatch.setitem(CONFIG, "duck_bridge_seconds", 6.0)
+    fc = _build_audio_filter_complex([
+        {"actual_place_start": 0.0, "actual_place_end": 2.0, "overlaps_speech": True},
+        {"actual_place_start": 4.0, "actual_place_end": 6.0, "overlaps_speech": True},  # gap 2 < 6
+    ], has_bgm=True)
+    bgm_part = fc.split("[bgm]")[0]                    # the bgm chain comes first
+    assert "min(t-0.00,6.00-t)/0.25" in bgm_part      # one coalesced BGM dip across both beats
+    assert "min(t-0.00,2.00-t)" not in bgm_part
 
 
 def test_build_audio_filter_complex_all_quiet_ducks_to_zone(monkeypatch):

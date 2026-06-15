@@ -206,7 +206,8 @@ def _emit_timeline(input_video, tts_segments, work_dir, duration_s, has_bgm):
         ducking = {"idle": CONFIG.get("idle_orig_volume", 0.85),
                    "speech": CONFIG.get("speech_ducking_volume", 0.2),
                    "quiet": CONFIG.get("zone_ducking_volume", 0.12),
-                   "fade": fade}
+                   "fade": fade,
+                   "bridge": CONFIG.get("duck_bridge_seconds", 12.0)}
     timeline = build_timeline(canvas, duration_s, video_clips,
                               narration_segments, bgm=bgm, ducking=ducking)
     out = Path(work_dir) / "timeline.json"
@@ -274,6 +275,7 @@ def assembly_settings_fingerprint():
         "audio_mix": {
             "ducking_mode": CONFIG.get("ducking_mode", "fixed"),
             "duck_fade_seconds": CONFIG.get("duck_fade_seconds", 0.25),
+            "duck_bridge_seconds": CONFIG.get("duck_bridge_seconds", 12.0),
             "ducking_narr_weight": CONFIG.get("ducking_narr_weight", 1.5),
             "ducking_orig_volume": CONFIG.get("ducking_orig_volume", 0.5),
             "idle_orig_volume": CONFIG.get("idle_orig_volume", 0.85),
@@ -512,41 +514,71 @@ def _duck_ramp(s, e, fade):
     return f"min(1,max(0,min(t-{s:.2f},{e:.2f}-t)/{fade:.2f}))"
 
 
-def _duck_envelope(tts_segments, idle, speech_vol, quiet_vol, fade):
-    """Per-beat ducking automation for the ORIGINAL track.
-
-    Holds the original at `idle` in the gaps (no narration) so the source audio keeps
-    the recap from going dead-air between sentences, and ramps it down under each
-    placed narration window — to speech_vol where the beat overlaps source dialogue,
-    quiet_vol where it sits in a quiet window. Returns a volume= expression, or None
-    when no beat carries placement info (caller falls back to a constant)."""
-    terms = []
+def _placement_windows(tts_segments, level_for):
+    """Collect [(start, end, level)] placement windows for the placed beats, using
+    `level_for(seg)` to pick each beat's duck level. Skips non-dicts and empty spans."""
+    windows = []
     for seg in tts_segments:
         if not isinstance(seg, dict):
             continue
         s, e = _seg_place_window(seg)
         if e - s <= 0:
             continue
-        level = speech_vol if seg.get("overlaps_speech", True) else quiet_vol
-        terms.append(f"+({level - idle:.3f})*{_duck_ramp(s, e, fade)}")
-    if not terms:
+        windows.append((s, e, level_for(seg)))
+    return windows
+
+
+def _coalesce_duck_windows(windows, bridge):
+    """Merge placement windows whose gap is smaller than `bridge` into one held span,
+    so the duck stays low across short inter-beat gaps (a continuous bed) instead of the
+    original swelling back to idle between sentences. Each merged span keeps the
+    most-ducked (lowest) level of its members. Genuine gaps >= bridge survive as separate
+    dips, so the original still breathes there. `windows` is [(start, end, level)]."""
+    rel = sorted(([float(s), float(e), float(g)] for s, e, g in windows if e > s),
+                 key=lambda w: w[0])
+    if not rel:
+        return []
+    merged = [rel[0][:]]
+    for s, e, g in rel[1:]:
+        if s - merged[-1][1] < bridge:
+            merged[-1][1] = max(merged[-1][1], e)
+            merged[-1][2] = min(merged[-1][2], g)
+        else:
+            merged.append([s, e, g])
+    return merged
+
+
+def _duck_envelope(tts_segments, idle, speech_vol, quiet_vol, fade, bridge=None):
+    """Per-beat ducking automation for the ORIGINAL track.
+
+    Ramps the original down under each placed narration window — to speech_vol where the
+    beat overlaps source dialogue, quiet_vol where it sits in a quiet window — and HOLDS
+    that duck across inter-beat gaps shorter than `bridge` so the source dialogue does not
+    pop back up between sentences. Only gaps >= bridge swell back to `idle` (lead-in/out
+    and deliberate long pauses). Returns a volume= expression, or None when no beat carries
+    placement info (caller falls back to a constant)."""
+    if bridge is None:
+        bridge = 2 * float(fade or 0)
+    windows = _placement_windows(
+        tts_segments, lambda seg: speech_vol if seg.get("overlaps_speech", True) else quiet_vol)
+    merged = _coalesce_duck_windows(windows, bridge)
+    if not merged:
         return None
+    terms = [f"+({level - idle:.3f})*{_duck_ramp(s, e, fade)}" for s, e, level in merged]
     return f"max(0,min(1,{idle}{''.join(terms)}))"
 
 
-def _bgm_envelope(tts_segments, base, duck, fade):
+def _bgm_envelope(tts_segments, base, duck, fade, bridge=None):
     """Per-beat ducking automation for the BGM track: hold the bed at `base`, dip to
-    `duck` under every narration window so the voice stays clear. None if no beats."""
-    terms = []
-    for seg in tts_segments:
-        if not isinstance(seg, dict):
-            continue
-        s, e = _seg_place_window(seg)
-        if e - s <= 0:
-            continue
-        terms.append(f"+({duck - base:.3f})*{_duck_ramp(s, e, fade)}")
-    if not terms:
+    `duck` under each narration window (held across gaps < `bridge`) so the voice stays
+    clear. None if no beats."""
+    if bridge is None:
+        bridge = 2 * float(fade or 0)
+    windows = _placement_windows(tts_segments, lambda seg: duck)
+    merged = _coalesce_duck_windows(windows, bridge)
+    if not merged:
         return None
+    terms = [f"+({lvl - base:.3f})*{_duck_ramp(s, e, fade)}" for s, e, lvl in merged]
     return f"max(0,min(1,{base}{''.join(terms)}))"
 
 
@@ -579,7 +611,8 @@ def _build_audio_filter_complex(
     bgm_chain = ""
     if has_bgm:
         base = CONFIG.get("bgm_volume", 0.18)
-        bgm_expr = _bgm_envelope(tts_segments, base, CONFIG.get("bgm_ducking_volume", 0.10), fade)
+        bgm_expr = _bgm_envelope(tts_segments, base, CONFIG.get("bgm_ducking_volume", 0.10), fade,
+                                 bridge=CONFIG.get("duck_bridge_seconds", 12.0))
         if bgm_expr:
             bgm_chain = f"{bgm_in}volume='{bgm_expr}':eval=frame,aresample=48000[bgm];"
         else:
@@ -607,11 +640,12 @@ def _build_audio_filter_complex(
     idle = CONFIG.get("idle_orig_volume", 0.85)
     speech_vol = CONFIG.get("speech_ducking_volume", 0.2)
     quiet_vol = CONFIG.get("zone_ducking_volume", 0.12)
-    expr = _duck_envelope(tts_segments, idle, speech_vol, quiet_vol, fade)
+    bridge = CONFIG.get("duck_bridge_seconds", 12.0)
+    expr = _duck_envelope(tts_segments, idle, speech_vol, quiet_vol, fade, bridge=bridge)
     if expr:
         n_overlap = sum(1 for s in tts_segments if isinstance(s, dict) and s.get("overlaps_speech", True))
         n_quiet = sum(1 for s in tts_segments if isinstance(s, dict) and not s.get("overlaps_speech", True))
-        log(f"gap-fill ducking: 间隙原声={idle}, 对白段={speech_vol}({n_overlap}), 安静段={quiet_vol}({n_quiet})")
+        log(f"gap-fill ducking: 间隙原声={idle}, 对白段={speech_vol}({n_overlap}), 安静段={quiet_vol}({n_quiet}), 桥接间隙<{bridge}s")
         orig = f"{original_in}volume='{expr}':eval=frame,aresample=48000[orig];"
     else:
         # No placement info at all: hold the original at a constant level.

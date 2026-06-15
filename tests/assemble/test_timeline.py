@@ -38,6 +38,45 @@ def test_ducking_keyframes_preserves_real_gaps():
     assert gains[3.0] == 0.2 and gains[7.0] == 0.2       # ducked under each beat
 
 
+def test_ducking_keyframes_bridge_param_holds_across_wider_gaps():
+    # an explicit bridge holds the duck across a gap that the default 2*fade would release:
+    # the two beats coalesce into one held span [2,8], so no keyframe inside swells to idle.
+    kfs = ducking_keyframes([(2.0, 3.0), (7.0, 8.0)], idle=0.85, duck=0.2,
+                            fade=0.25, span_start=0.0, span_end=10.0, bridge=6.0)
+    held = [k["gain"] for k in kfs if 2.0 <= k["t"] <= 8.0]
+    assert held and all(g == 0.2 for g in held), "duck held across the bridged gap (no idle inside)"
+    gains = {round(k["t"], 2): k["gain"] for k in kfs}
+    assert gains[2.0] == 0.2 and gains[8.0] == 0.2
+
+
+def test_variable_ducking_bridges_gaps_below_bridge():
+    # original-audio automation: a 3s gap with bridge=6 coalesces into one held span [2,9],
+    # so no keyframe inside swells back to idle.
+    kfs = variable_ducking_keyframes([(2.0, 4.0, 0.2), (7.0, 9.0, 0.2)], idle=0.85,
+                                     fade=0.25, span_start=0.0, span_end=12.0, bridge=6.0)
+    held = [k["gain"] for k in kfs if 2.0 <= k["t"] <= 9.0]
+    assert held and all(g == 0.2 for g in held), "duck held across the bridged gap (no idle inside)"
+    gains = {round(k["t"], 2): k["gain"] for k in kfs}
+    assert gains[2.0] == 0.2 and gains[9.0] == 0.2
+
+
+def test_variable_ducking_releases_gaps_at_or_above_bridge():
+    # the same 3s gap with bridge=2 releases the original back to idle.
+    kfs = variable_ducking_keyframes([(2.0, 4.0, 0.2), (7.0, 9.0, 0.2)], idle=0.85,
+                                     fade=0.25, span_start=0.0, span_end=12.0, bridge=2.0)
+    assert any(k["gain"] == 0.85 for k in kfs if 4.0 < k["t"] < 7.0), "long gap must swell to idle"
+
+
+def test_variable_ducking_mixed_levels_coalesce_to_min_like_render():
+    # Render/draft consistency: a bridged span mixing a speech beat (0.2) and a quiet beat
+    # (0.12) must flatten to the MIN level across the whole span, exactly as the ffmpeg render
+    # coalesces it — otherwise the 剪映 draft would play the original louder than the mp4.
+    kfs = variable_ducking_keyframes([(0.0, 2.0, 0.2), (4.0, 6.0, 0.12)], idle=0.85,
+                                     fade=0.25, span_start=0.0, span_end=8.0, bridge=6.0)
+    held = [k["gain"] for k in kfs if 0.0 <= k["t"] <= 6.0]
+    assert held and all(g == 0.12 for g in held), "mixed bridged span holds at the min (0.12)"
+
+
 def test_build_timeline_has_all_tracks():
     canvas = {"width": 1280, "height": 720, "fps": 25}
     video = [{"source_path": "/src.mp4", "source_start": 10.0, "source_end": 20.0,
@@ -115,6 +154,7 @@ def test_variable_ducking_keyframes_do_not_release_to_idle_between_close_windows
         span_end=8.0,
     )
 
-    between = [kf for kf in keyframes if 4.0 < kf["t"] < 5.0]
-    assert between
-    assert all(kf["gain"] != 0.85 for kf in between)
+    # the two close windows (gap 0.1 < 2*fade) coalesce into one held span [1,5] at the min
+    # level — the duck never swells back to idle between them.
+    held = [kf["gain"] for kf in keyframes if 1.0 <= kf["t"] <= 5.0]
+    assert held and all(g == 0.12 for g in held)
