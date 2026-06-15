@@ -224,6 +224,12 @@ def main():
         cont = _continuation_command(video, work_dir, args)
         print("=" * 50)
         need = f"{narration_json}" + (f" 和 {clip_plan_json}" if cut else "")
+        # The brief fires a research directive only when the substrate is thin/empty and no
+        # background_research.json exists yet. Amplify it here so the agent researches the
+        # title BEFORE writing, instead of shipping cold "看图说话".
+        if brief.exists() and "Research the story FIRST" in brief.read_text(encoding="utf-8"):
+            print("[video-recap] ⚑ 理解素材偏薄：先按 brief 顶部「Research the story FIRST」调研并写 "
+                  "background_research.json，再写解说，避免看图说话。")
         print(f"[video-recap] ⏸  阅读 {brief}（按 video-script 规则）后写入 {need}")
         print(f"[video-recap]    写完后重跑继续: {cont}")
         print("=" * 50)

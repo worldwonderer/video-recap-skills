@@ -155,6 +155,20 @@ def test_build_agent_brief_research_directive_when_context_without_research(monk
     assert "Research the story FIRST" not in text2  # already researched -> directive gone
 
 
+def test_research_directive_does_not_fire_for_dialogue_rich_titled_run(monkeypatch, tmp_path):
+    """Step 3: a dialogue-rich (substrate=rich) titled run with no research file must NOT be
+    nagged — the directive fires only for thin/empty substrate, not merely because a title exists."""
+    monkeypatch.setitem(CONFIG, "edit_mode", "full")
+    monkeypatch.setitem(CONFIG, "target_duration", "")
+    monkeypatch.setitem(CONFIG, "context_info", "这是《庆余年》第一集")  # a title, but no research file
+    scenes = [{"scene_id": i, "start": float(i * 6), "end": float(i * 6 + 6),
+               "description": "范闲与人对峙", "frame_facts": {str(i * 6): ["对峙"]}} for i in range(4)]
+    asr = [{"start": 1.0, "end": 5.0, "text": "对" * 250}]  # rich dialogue spine
+    assert assess_understanding_substrate(scenes, asr)["level"] == "rich"
+    text = build_agent_brief(scenes, asr, [], 24.0, tmp_path).read_text(encoding="utf-8")
+    assert "Research the story FIRST" not in text  # rich + titled -> no nag
+
+
 def test_lint_narration_cut_mode_warns_on_clip_boundary_crossing():
     """A beat that spills past its clip is silently trimmed by the mapper and ends up
     over cut-away footage -> warn so the agent tightens it inside the clip."""

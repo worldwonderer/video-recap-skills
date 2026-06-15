@@ -1309,25 +1309,24 @@ def _parse_target_seconds(value):
 
 
 def _format_research_directive(work_dir, substrate):
-    """A loud, actionable research-first directive when the agent has a title/context but
-    no background_research.json, or when the substrate is too thin to write real commentary.
+    """A loud, actionable research-first directive — but ONLY when the substrate is too thin
+    for real commentary (no dialogue/story spine) and no background_research.json exists yet.
 
-    The narration's quality ceiling is how much story context the agent has: with only
-    frame descriptions it can only narrate pixels. This pushes the agent to research the
-    title first (see references/research-guide.md) instead of silently writing 看图说话.
+    The narration's quality ceiling is how much story context the agent has: with only frame
+    descriptions it can only narrate pixels, so research the title FIRST (see
+    references/research-guide.md). Fires only for thin/empty substrate — NOT merely because a
+    title was given — so a dialogue-rich titled run is never nagged.
     """
     if (Path(work_dir) / "background_research.json").exists():
         return []  # already researched; _format_background_research surfaces it
+    if not (substrate and substrate.get("level") in ("thin", "empty")):
+        return []  # rich enough to write from dialogue/spine; do not nag
     context = str(CONFIG.get("context_info") or "").strip()
-    thin = substrate.get("level") in ("thin", "empty") if substrate else False
-    if not context and not thin:
-        return []
-    why = "the substrate is thin" if thin else "you have a title/context but no background_research.json"
     return [
         "## ⚑ Research the story FIRST (do this before writing narration)",
         "",
-        f"Reason: {why}. Engaging recap commentary (motive, stakes, relationships) needs story",
-        "context the frames alone do not carry — without it the narration can only describe pixels.",
+        "Reason: the understanding substrate is thin — no dialogue/story spine, only frame",
+        "descriptions, so without research the narration can only describe pixels.",
         "1. Pull the title/keywords from `--context`, the filename, or the user's description"
         + (f" (context: {context})." if context else "."),
         "2. Use any available web-search/browser tool to look up synopsis, characters, and",

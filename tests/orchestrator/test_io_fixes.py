@@ -393,3 +393,47 @@ def test_recap_resumes_old_manifest_missing_consolidate_key(monkeypatch, tmp_pat
     recap.main()  # must NOT SystemExit on a consolidate settings mismatch
 
     assert any(call[:2] == ("video-assemble", "assemble.py") for call in calls)
+
+
+def test_recap_pause_banner_amplifies_research_when_brief_flags_thin(monkeypatch, tmp_path, capsys):
+    """Step 3: when the Phase-A brief fires the research directive (thin substrate, no research),
+    the recap pause banner amplifies it so the agent researches before writing."""
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+
+    def fake_run(skill, script, *cli_args):
+        if script == "understand.py":
+            (work / "agent_narration_brief.md").write_text(
+                "# Agent Narration Brief\n\n## ⚑ Research the story FIRST (do this before writing narration)\n",
+                encoding="utf-8",
+            )
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--work-dir", str(work)])
+
+    recap.main()  # Phase A (no narration.json) -> pause
+
+    out = capsys.readouterr().out
+    assert "理解素材偏薄" in out
+    assert "Research the story FIRST" in out
+
+
+def test_recap_pause_banner_quiet_when_brief_has_no_research_flag(monkeypatch, tmp_path, capsys):
+    """A rich-substrate brief (no research directive) must NOT add a research nag to the banner."""
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+
+    def fake_run(skill, script, *cli_args):
+        if script == "understand.py":
+            (work / "agent_narration_brief.md").write_text("# Agent Narration Brief\n", encoding="utf-8")
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--work-dir", str(work)])
+
+    recap.main()
+
+    assert "理解素材偏薄" not in capsys.readouterr().out
