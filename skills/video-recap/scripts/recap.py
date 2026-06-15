@@ -86,6 +86,20 @@ def _load_json(path):
         return None
 
 
+def _settings_for_compare(settings):
+    """Settings that, if changed, invalidate reusing an existing work_dir on resume.
+
+    `consolidate`/`consolidate_asr` are EXCLUDED: they only ADD an optional understanding
+    artifact and never re-run Phase A on a Phase-B resume, so a stored manifest carrying the
+    old default (or missing the key entirely, pre-dating it) must still resume — otherwise
+    flipping `--consolidate`'s default ON would hard-fail every in-flight work_dir.
+    """
+    s = dict(settings or {})
+    s.pop("consolidate", None)
+    s.pop("consolidate_asr", None)
+    return s
+
+
 def _manifest_mismatches(work_dir, video, args):
     expected = _run_manifest_payload(video, args)
     actual = _load_run_manifest(work_dir)
@@ -95,7 +109,7 @@ def _manifest_mismatches(work_dir, video, args):
     for key in ("source_video", "source_video_fingerprint"):
         if actual.get(key) != expected.get(key):
             mismatches.append(f"{key}: expected {expected.get(key)!r}, got {actual.get(key)!r}")
-    if actual.get("settings") != expected.get("settings"):
+    if _settings_for_compare(actual.get("settings")) != _settings_for_compare(expected.get("settings")):
         mismatches.append("settings: 当前 CLI/env 参数与 Phase A manifest 不匹配")
     return mismatches
 
@@ -123,8 +137,8 @@ def _continuation_command(video, work_dir, args):
         parts.append("--skip-asr")
     if args.mimo_video_overview:
         parts.append("--mimo-video-overview")
-    if args.consolidate:
-        parts.append("--consolidate")
+    if not args.consolidate:  # default is ON now; only the opt-out needs to round-trip
+        parts.append("--no-consolidate")
     if args.consolidate_asr:
         parts.append("--consolidate-asr")
     if getattr(args, "mimo_tts_voice", None):
@@ -155,7 +169,8 @@ def main():
     ap.add_argument("--target-duration", default=os.environ.get("TARGET_DURATION") or None)
     ap.add_argument("--skip-asr", action="store_true")
     ap.add_argument("--mimo-video-overview", action="store_true")
-    ap.add_argument("--consolidate", action="store_true", help="build understanding index (Pass B)")
+    ap.add_argument("--consolidate", action=argparse.BooleanOptionalAction, default=True,
+                    help="build the understanding story index (Pass B); default ON, --no-consolidate to skip")
     ap.add_argument("--consolidate-asr", action="store_true", help="also clean ASR (Pass A)")
     ap.add_argument("--mimo-tts-voice", default=None, help="MiMo TTS voice")
     ap.add_argument("--allow-partial-tts", action="store_true",
@@ -200,8 +215,7 @@ def main():
             uargs.append("--skip-asr")
         if args.mimo_video_overview:
             uargs.append("--mimo-video-overview")
-        if args.consolidate:
-            uargs.append("--consolidate")
+        uargs.append("--consolidate" if args.consolidate else "--no-consolidate")
         if args.consolidate_asr:
             uargs.append("--consolidate-asr")
         _run("video-understanding", "understand.py", *uargs)

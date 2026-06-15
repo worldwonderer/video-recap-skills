@@ -253,7 +253,8 @@ def main():
     ap.add_argument("--skip-asr", action="store_true")
     ap.add_argument("--mimo-video-overview", action="store_true")
     ap.add_argument("--force", action="store_true", help="ignore cached artifacts and recompute")
-    ap.add_argument("--consolidate", action="store_true", help="build the global understanding index (Pass B)")
+    ap.add_argument("--consolidate", action=argparse.BooleanOptionalAction, default=True,
+                    help="build the global understanding story index (Pass B); default ON, --no-consolidate to skip")
     ap.add_argument("--consolidate-asr", action="store_true", help="also clean the ASR transcript (Pass A)")
     args = ap.parse_args()
 

@@ -257,7 +257,9 @@ def _run_understand_for_cache_tests(monkeypatch, tmp_path, video, *, argv_extra=
     monkeypatch.setattr("understand.api_call", lambda payload: {"choices": [{"message": {"content": "ok"}}]})
     monkeypatch.setattr("understand.extract_frames", lambda video_path, work_dir: [frame])
     monkeypatch.setattr("understand.build_agent_brief", lambda *a, **k: tmp_path / "agent_narration_brief.md")
-    argv = ["understand.py", str(video), "--work-dir", str(tmp_path), *(argv_extra or [])]
+    # These tests exercise VLM cache-key behavior, not the consolidate index (now default-on,
+    # whose api_call is the real lib.api_call, not the mocked understand.api_call). Skip it.
+    argv = ["understand.py", str(video), "--work-dir", str(tmp_path), "--no-consolidate", *(argv_extra or [])]
     monkeypatch.setattr(sys, "argv", argv)
     understand.main()
 

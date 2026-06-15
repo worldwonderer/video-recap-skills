@@ -356,3 +356,40 @@ def test_recap_phase_b_allows_environment_changes_when_artifacts_are_unchanged(m
     recap.main()
 
     assert any(call[:2] == ("video-assemble", "assemble.py") for call in calls)
+
+
+def test_recap_resumes_old_manifest_missing_consolidate_key(monkeypatch, tmp_path):
+    """Step 2 backward-compat: --consolidate now defaults ON, so its value lives in the run
+    manifest. A work_dir whose manifest predates the consolidate setting (key absent) — or
+    carries the old default false — must still resume, not hard-fail on a settings mismatch."""
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "narration.json").write_text(
+        json.dumps([{"start": 0, "end": 1, "narration": "old。"}]),
+        encoding="utf-8",
+    )
+    recap._write_run_manifest(work, video.resolve(), _manifest_args())
+    manifest = json.loads((work / recap.RUN_MANIFEST).read_text(encoding="utf-8"))
+    manifest["settings"].pop("consolidate", None)        # simulate a pre-consolidate-key manifest
+    manifest["settings"].pop("consolidate_asr", None)
+    (work / recap.RUN_MANIFEST).write_text(json.dumps(manifest), encoding="utf-8")
+
+    calls = []
+
+    def fake_run(skill, script, *cli_args):
+        calls.append((skill, script, [str(arg) for arg in cli_args]))
+        if script == "assemble.py":
+            (work / "output.mp4").write_bytes(b"mp4")
+            (work / "assembly_manifest.json").write_text(
+                json.dumps({"final_output": str(tmp_path / "recap_video.mp4")}),
+                encoding="utf-8",
+            )
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--work-dir", str(work)])
+
+    recap.main()  # must NOT SystemExit on a consolidate settings mismatch
+
+    assert any(call[:2] == ("video-assemble", "assemble.py") for call in calls)
