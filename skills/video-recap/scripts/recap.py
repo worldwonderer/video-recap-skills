@@ -146,19 +146,14 @@ def _write_phase_ledger(work_dir, **fields):
     return ledger
 
 
-def _cut_narration_is_stale(ledger, current_clip_plan_fp, current_narration_fp):
-    """Stale iff the clip_plan changed since the ledger was written but the narration did NOT
-    — i.e. the agent re-cut without re-writing the narration, so it describes the old cut.
-    If BOTH changed (narration re-authored for the new clips) it is fresh."""
+def _cut_narration_is_stale(ledger, current_clip_plan_fp):
+    """Two-pass cut: the narration is authored against the rendered cut shown at the A2 pause,
+    i.e. against the clip_plan recorded in the ledger. If clip_plan changed since (a re-cut)
+    while that narration is still present, it describes the OLD cut — stale."""
     if not ledger:
         return False
     recorded_cp = ledger.get("clip_plan_fingerprint")
-    recorded_narr = ledger.get("narration_fingerprint")
-    return bool(
-        recorded_cp is not None
-        and recorded_cp != current_clip_plan_fp
-        and recorded_narr == current_narration_fp
-    )
+    return bool(recorded_cp is not None and recorded_cp != current_clip_plan_fp)
 
 
 def _continuation_command(video, work_dir, args):
@@ -243,9 +238,9 @@ def main():
     narration_json = work_dir / "narration.json"
     clip_plan_json = work_dir / "clip_plan.json"
 
-    need_script = not narration_json.exists() or (cut and not clip_plan_json.exists())
-    if need_script:
-        # Phase A: understand -> brief, then pause for the agent to write narration.json (+ clip_plan.json)
+    edited_source = work_dir / "edited_source.mp4"
+
+    def _understand():
         uargs = [str(video), "--work-dir", str(work_dir), "--style", args.style]
         if args.context:
             uargs += ["--context", args.context]
@@ -263,61 +258,71 @@ def main():
         if args.consolidate_asr:
             uargs.append("--consolidate-asr")
         _run("video-understanding", "understand.py", *uargs)
-        _write_run_manifest(work_dir, video, args)
+
+    def _pause(need_text):
         brief = work_dir / "agent_narration_brief.md"
         cont = _continuation_command(video, work_dir, args)
         print("=" * 50)
-        need = f"{narration_json}" + (f" 和 {clip_plan_json}" if cut else "")
         # The brief fires a research directive only when the substrate is thin/empty and no
-        # background_research.json exists yet. Amplify it here so the agent researches the
-        # title BEFORE writing, instead of shipping cold "看图说话".
+        # background_research.json exists yet; amplify it so the agent researches BEFORE writing.
         if brief.exists() and "Research the story FIRST" in brief.read_text(encoding="utf-8"):
             print("[video-recap] ⚑ 理解素材偏薄：先按 brief 顶部「Research the story FIRST」调研并写 "
                   "background_research.json，再写解说，避免看图说话。")
-        print(f"[video-recap] ⏸  阅读 {brief}（按 video-script 规则）后写入 {need}")
+        print(f"[video-recap] ⏸  阅读 {brief}（按 video-script 规则）后写入 {need_text}")
         print(f"[video-recap]    写完后重跑继续: {cont}")
         print("=" * 50)
-        return
 
-    # Phase B: produce
-    mismatches = _manifest_mismatches(work_dir, video, args)
-    if mismatches:
-        details = "\n  - ".join(mismatches)
-        raise SystemExit(
-            "work_dir 与当前 recap 输入不匹配，拒绝复用既有 narration/clip_plan；"
-            "请使用新的 --work-dir，或删除旧产物后重新运行 Phase A。\n"
-            f"  - {details}"
-        )
-    if cut:
-        # Phase ledger: refuse to drive a stale narration (written for a previous clip_plan)
-        # into the cut/TTS. If clip_plan changed but narration did not, it describes the old cut.
-        cp_fp = _file_md5(clip_plan_json)
-        narr_fp = _file_md5(narration_json)
-        if _cut_narration_is_stale(_read_phase_ledger(work_dir), cp_fp, narr_fp):
+    def _reject_stale_manifest():
+        mismatches = _manifest_mismatches(work_dir, video, args)
+        if mismatches:
+            details = "\n  - ".join(mismatches)
             raise SystemExit(
-                "clip_plan.json 已改变，但 narration.json 没有相应更新：解说仍是对旧剪辑写的，"
-                "会与剪后画面对不上。请按新的保留片段重写 narration.json（或删除它重新进入暂停）。")
-        _write_phase_ledger(work_dir, clip_plan_fingerprint=cp_fp,
-                            narration_fingerprint=narr_fp, narration_written=True)
-        # Normalize the clip plan FIRST (cheap, no render) so validate lints the SAME
-        # padded/pruned clips the mapper uses — otherwise validate sees the raw plan and
-        # can pass a beat the mapper later silently drops.
-        ncargs = [str(video), "--work-dir", str(work_dir), "--normalize-only"]
-        if args.target_duration:
-            ncargs += ["--target-duration", args.target_duration]
-        _run("video-cut", "cut.py", *ncargs)
-    _run("video-script", "validate.py", "--work-dir", work_dir, "--mode", args.edit_mode)
-    assemble_video_path = video
-    if cut:
-        cargs = [str(video), "--work-dir", str(work_dir)]
-        if args.target_duration:
-            cargs += ["--target-duration", args.target_duration]
-        if args.allow_sparse_cut:
-            cargs.append("--allow-sparse-cut")
-        _run("video-cut", "cut.py", *cargs)
-        assemble_video_path = work_dir / "edited_source.mp4"
+                "work_dir 与当前 recap 输入不匹配，拒绝复用既有 narration/clip_plan；"
+                "请使用新的 --work-dir，或删除旧产物后重新运行 Phase A。\n"
+                f"  - {details}")
 
-    narration_for_tts = work_dir / ("narration_mapped.json" if cut else "narration.json")
+    if not cut:
+        # Full mode: a single pause (understand -> agent writes narration.json -> produce).
+        if not narration_json.exists():
+            _understand()
+            _write_run_manifest(work_dir, video, args)
+            _pause(f"{narration_json}")
+            return
+        _reject_stale_manifest()
+        _run("video-script", "validate.py", "--work-dir", work_dir, "--mode", "full")
+        narration_for_tts = narration_json
+        assemble_video_path = video
+    else:
+        # Cut mode: cut-first / narrate-second (two pauses), so narration is authored against the
+        # REAL output timeline — map_narration_to_clips is never used and cannot drop/clamp/desync.
+        if not clip_plan_json.exists():
+            # PASS 1: understand -> agent writes clip_plan.json ONLY.
+            _understand()
+            _write_run_manifest(work_dir, video, args)
+            _pause(f"{clip_plan_json}（只写剪辑计划；解说下一步对着剪好的成片写）")
+            return
+        _reject_stale_manifest()
+        cp_fp = _file_md5(clip_plan_json)
+        # Render the cut from clip_plan (no narration mapping — narration is OUTPUT-time).
+        crender = [str(video), "--work-dir", str(work_dir), "--no-narration-map"]
+        if args.target_duration:
+            crender += ["--target-duration", args.target_duration]
+        _run("video-cut", "cut.py", *crender)
+        if not narration_json.exists():
+            # PASS 2: rebuild the brief (now an OUTPUT-timeline variant) and pause for narration.
+            _understand()
+            _write_phase_ledger(work_dir, clip_plan_fingerprint=cp_fp, edited_source_rendered=True)
+            _pause(f"{narration_json}（用成片 OUTPUT 时间轴写解说，对着 {edited_source}）")
+            return
+        if _cut_narration_is_stale(_read_phase_ledger(work_dir), cp_fp):
+            raise SystemExit(
+                "clip_plan.json 已改变，但 narration.json 仍是对旧剪辑写的，会与剪后画面对不上。"
+                "请删除 narration.json，重跑后按新成片重新写解说。")
+        _write_phase_ledger(work_dir, clip_plan_fingerprint=cp_fp,
+                            narration_fingerprint=_file_md5(narration_json), narration_written=True)
+        _run("video-script", "validate.py", "--work-dir", work_dir, "--mode", "cut_output")
+        narration_for_tts = narration_json
+        assemble_video_path = edited_source
     vargs = ["--work-dir", str(work_dir), "--narration", str(narration_for_tts)]
     if args.mimo_tts_voice:
         vargs += ["--mimo-voice", args.mimo_tts_voice]

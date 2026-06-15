@@ -121,8 +121,26 @@ def test_build_agent_brief_cut_mode_sizes_to_output(monkeypatch, tmp_path):
     assert "CUT OUTPUT" in text
     assert "10 short beats" in text       # 1min output * 10/min = 10 beats (sized to output)
     assert "100 short beats" not in text   # the old source-sized (buggy) count
-    assert "Keep each beat INSIDE one clip" in text
+    assert "step 1 of 2" in text           # A1: cut-first, write clip_plan only (no edited_source yet)
     assert '"target_duration": "1m"' in text
+
+
+def test_build_agent_brief_cut_pass2_is_output_timeline(monkeypatch, tmp_path):
+    """Step 6: once the cut is rendered (edited_source.mp4 exists), the cut brief switches to
+    the PASS-2 output-timeline variant: narrate in OUTPUT time, with the kept clips listed."""
+    monkeypatch.setitem(CONFIG, "edit_mode", "cut")
+    monkeypatch.setitem(CONFIG, "target_duration", "1m")
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    (tmp_path / "edited_source.mp4").write_bytes(b"edited")
+    (tmp_path / "clip_plan_validated.json").write_text(json.dumps({"clips": [
+        {"clip_id": 0, "source_start": 10.0, "source_end": 20.0, "output_start": 0.0, "output_end": 10.0, "reason": "开端"},
+    ]}), encoding="utf-8")
+    scenes = [{"scene_id": 0, "start": 0.0, "end": 60.0, "description": "画面"}]
+    text = build_agent_brief(scenes, [], [], 600.0, tmp_path).read_text(encoding="utf-8")
+    assert "step 2 of 2: write `narration.json` in OUTPUT time" in text
+    assert "Kept clips on the OUTPUT timeline" in text
+    assert "output 0.0–10.0s ← source 10.0–20.0s" in text
+    assert "step 1 of 2" not in text
 
 
 def test_build_agent_brief_thin_substrate_relaxes_density(monkeypatch, tmp_path):

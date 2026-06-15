@@ -1339,6 +1339,32 @@ def _format_research_directive(work_dir, substrate):
     ]
 
 
+def _format_output_clip_list(work_dir):
+    """List the kept clips on the OUTPUT timeline (cut-first/narrate-second pass 2), so the
+    agent narrates against the real rendered cut instead of the source timeline."""
+    path = Path(work_dir) / "clip_plan_validated.json"
+    if not path.exists():
+        return []
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return []
+    clips = (plan.get("clips") if isinstance(plan, dict) else plan) or []
+    out = ["## Kept clips on the OUTPUT timeline", ""]
+    for c in clips:
+        if not isinstance(c, dict):
+            continue
+        try:
+            os_, oe = float(c.get("output_start")), float(c.get("output_end"))
+            ss, se = float(c.get("source_start")), float(c.get("source_end"))
+        except (TypeError, ValueError):
+            continue
+        reason = str(c.get("reason", "")).strip()
+        out.append(f"- output {os_:.1f}–{oe:.1f}s ← source {ss:.1f}–{se:.1f}s" + (f" — {reason}" if reason else ""))
+    out.append("")
+    return out if len(out) > 2 else []
+
+
 def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_duration, work_dir, style="纪录片", *, mimo_overview_enabled=None, mimo_overview_video_path=None):
     """Write a compact brief that tells the agent exactly how to author recap artifacts."""
     effective_rate = CONFIG["speech_rate"] * CONFIG["speech_safety_margin"]
@@ -1432,43 +1458,47 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
 
     if edit_mode == "cut":
         cut_target_example = target_duration if target_duration != "(not set)" else "30m"
-        lines.extend([
-            "## Required files for cut mode",
-            "",
-            f"Goal: a ~{output_label} recap cut from a {source_label} source. "
-            "The narration must match the CUT output, not the full source.",
-            "First write `clip_plan.json` to choose source footage, then write `narration.json` using ORIGINAL "
-            "source timestamps that fall INSIDE those clips. The CLI concatenates the clips and maps your source "
-            "timestamps onto the shortened timeline.",
-            "",
-            "Cut-mode authoring rules:",
-            "- Size narration to the OUTPUT: aim for the cut-output beat count above, NOT one beat per source minute. "
-            "A beat whose midpoint lands outside every kept clip is DROPPED.",
-            "- Keep each beat INSIDE one clip: do not let a beat's [start, end] cross a clip boundary, or it is clipped "
-            "to that clip and the voiceover ends up describing footage that was cut away.",
-            "- Tell the story in OUTPUT order: order beats by the order their clips will play so the recap reads as one "
-            "continuous arc over the kept footage.",
-            "- If clips reuse overlapping source ranges, tag the beat with `source_clip_id` so it maps to the intended clip.",
-            "",
-            "### clip_plan.json shape",
-            "",
-            "```json",
-            "{",
-            f"  \"target_duration\": \"{cut_target_example}\",",
-            "  \"clips\": [",
-            "    {\"start\": 12.0, \"end\": 38.0, \"reason\": \"关键冲突开端\"}",
-            "  ]",
-            "}",
-            "```",
-            "",
-            "### narration.json shape (source timestamps inside the kept clips)",
-            "",
-            "```json",
-            "[",
-            "  {\"start\": 14.0, \"end\": 19.0, \"narration\": \"解说文本。\", \"pause_after_ms\": 250, \"overlaps_speech\": true}",
-            "]",
-            "```",
-        ])
+        if not (Path(work_dir) / "edited_source.mp4").exists():
+            # PASS 1 of 2 (cut-first): pick the footage. Narration comes AFTER the cut is
+            # rendered, so it can be written against the real OUTPUT timeline — no source->output
+            # mapping, no silent drop/clamp, no desync.
+            lines.extend([
+                "## Cut mode — step 1 of 2: write `clip_plan.json` ONLY",
+                "",
+                f"Goal: a ~{output_label} recap cut from a {source_label} source. First choose the footage; the CLI",
+                "then renders the cut and asks you to narrate against that real output. Do NOT write narration.json yet.",
+                "Select clips for plot causality, key dialogue, reveals, and emotional turns; avoid filler and repeats.",
+                "",
+                "### clip_plan.json shape (original source timestamps)",
+                "",
+                "```json",
+                "{",
+                f"  \"target_duration\": \"{cut_target_example}\",",
+                "  \"clips\": [",
+                "    {\"start\": 12.0, \"end\": 38.0, \"reason\": \"关键冲突开端\"}",
+                "  ]",
+                "}",
+                "```",
+            ])
+        else:
+            # PASS 2 of 2: the cut is rendered (edited_source.mp4); narrate in OUTPUT time.
+            lines.extend(_format_output_clip_list(work_dir))
+            lines.extend([
+                "## Cut mode — step 2 of 2: write `narration.json` in OUTPUT time",
+                "",
+                f"The cut is rendered as `edited_source.mp4` (~{output_label}). Write narration timed to THAT output",
+                "timeline (0 .. total), NOT the original source — your timestamps play exactly where you put them, with",
+                "no mapping and no dropping. Use the kept-clip OUTPUT ranges above to know what is on screen when, tell",
+                "one continuous arc across the cut, and aim for the density guide in the header.",
+                "",
+                "### narration.json shape (OUTPUT timestamps, 0..total)",
+                "",
+                "```json",
+                "[",
+                "  {\"start\": 2.0, \"end\": 7.0, \"narration\": \"解说文本。\", \"pause_after_ms\": 250, \"overlaps_speech\": true}",
+                "]",
+                "```",
+            ])
     else:
         lines.extend([
             "## Required JSON shape",

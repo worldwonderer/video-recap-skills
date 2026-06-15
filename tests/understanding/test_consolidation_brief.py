@@ -173,4 +173,4 @@ def test_build_agent_brief_cut_mode_sizes_to_output(monkeypatch, tmp_path):
     assert "CUT OUTPUT" in text
     assert "10 short beats" in text
     assert "100 short beats" not in text
-    assert "Keep each beat INSIDE one clip" in text
+    assert "step 1 of 2" in text           # A1: cut-first, write clip_plan only (no edited_source yet)

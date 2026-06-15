@@ -456,6 +456,9 @@ def main():
     parser.add_argument("--normalize-only", action="store_true",
                         help="only normalize the clip plan -> clip_plan_validated.json (no render/map); "
                              "lets validate lint the SAME padded/pruned plan the mapper uses")
+    parser.add_argument("--no-narration-map", action="store_true",
+                        help="render edited_source.mp4 but do NOT map narration.json onto the cut "
+                             "(cut-first/narrate-second: narration is authored in OUTPUT time, no mapping)")
     parser.add_argument("--allow-sparse-cut", action="store_true",
                         help="do not block on heavy narration drop / sparse output (e.g. an intentional montage)")
     args = parser.parse_args()
@@ -489,7 +492,7 @@ def main():
         build_edited_source_video(args.video, validated_plan, work_dir, edited_source_path)
 
     narration_path = Path(args.narration) if args.narration else work_dir / "narration.json"
-    if narration_path.exists():
+    if narration_path.exists() and not args.no_narration_map:
         narration = json.loads(narration_path.read_text(encoding="utf-8"))
         mapped = map_narration_to_clips(narration, validated_plan)
         if not mapped:
