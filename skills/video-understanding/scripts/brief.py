@@ -492,6 +492,17 @@ def lint_narration(narration, scenes_analysis=None, *, clip_plan=None, mode="ful
                         "Repeated/overlapping clips require source_clip_id",
                         start=start, end=end,
                     ))
+                if len(matches) == 1:
+                    clip = matches[0]
+                    clip_start = float(clip.get("source_start", clip.get("start", start)))
+                    clip_end = float(clip.get("source_end", clip.get("end", end)))
+                    if start < clip_start or end > clip_end:
+                        warnings.append(_lint_issue(
+                            "warning", idx, "crosses_clip_boundary",
+                            "Narration extends beyond its clip; it will be trimmed to the clip and may describe footage that was cut",
+                            start=start, end=end,
+                            clip_start=round(clip_start, 3), clip_end=round(clip_end, 3),
+                        ))
                 if seg.get("source_clip_id") is not None:
                     try:
                         int(seg.get("source_clip_id"))
@@ -862,12 +873,15 @@ def _format_background_research(research):
     return lines
 
 
-def assess_understanding_substrate(scenes_analysis, asr_result):
+def assess_understanding_substrate(scenes_analysis, asr_result, *, has_story_context=False):
     """Measure how much real signal the writing agent has to work with.
 
-    Recap quality collapses to generic 看图说话 when ASR is empty and the VLM
-    emitted no frame_facts (proven by the demo-vs-qyn artifact comparison), yet
-    the pipeline otherwise produces a brief and runs to completion silently.
+    Recap quality collapses to generic 看图说话 when the agent has no story spine and
+    only literal frame descriptions to paraphrase. A spine is substantial dialogue
+    (ASR) OR researched/given story context — frame-fact VOLUME alone (a visually busy
+    but storyless clip, e.g. an anime whose dialogue ASR could not read) is NOT a spine,
+    so it must not grade as "rich"; otherwise the sparse-substrate warning, the research
+    directive, and the density relief never fire for exactly that cold-narration case.
     """
     scenes = scenes_analysis or []
     asr_chars = sum(len(str(seg.get("text", "")).strip()) for seg in (asr_result or []))
@@ -877,9 +891,10 @@ def assess_understanding_substrate(scenes_analysis, asr_result):
 
     has_asr = asr_chars >= 20
     has_facts = scenes_with_facts > 0
+    has_story_spine = asr_chars >= 200 or bool(has_story_context)
     if not has_asr and not has_facts and avg_desc < 25:
         level = "empty"
-    elif (has_asr or has_facts) and (scenes_with_facts >= max(1, len(scenes) // 2) or asr_chars >= 200):
+    elif (has_asr or has_facts) and has_story_spine:
         level = "rich"
     else:
         level = "thin"
@@ -889,6 +904,7 @@ def assess_understanding_substrate(scenes_analysis, asr_result):
         "scene_count": len(scenes),
         "scenes_with_frame_facts": scenes_with_facts,
         "avg_description_len": avg_desc,
+        "has_story_context": bool(has_story_context),
     }
 
 
@@ -1250,6 +1266,80 @@ def _load_mimo_overview_for_brief(work_dir, scenes_analysis, enabled=None, video
         return {}
     return overview if _mimo_overview_matches_current_inputs(overview, scenes_analysis, video_path=video_path) else {}
 
+def _parse_target_seconds(value):
+    """Parse a cut-mode target duration ("30m" / "600" / "1h5m" / "00:30:00") to seconds.
+
+    Mirrors video-cut's parser closely enough to size the brief; returns None on anything
+    unparseable so the brief simply falls back to the source duration.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if value > 0 else None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    try:
+        if ":" in text:
+            parts = [float(p) for p in text.split(":")]
+            if any(p < 0 for p in parts):
+                return None
+            if len(parts) == 2:
+                seconds = parts[0] * 60 + parts[1]
+            elif len(parts) == 3:
+                seconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
+            else:
+                return None
+            return seconds if seconds > 0 else None
+        factors = {"ms": 0.001, "s": 1, "m": 60, "h": 3600}
+        seconds = 0.0
+        matched = False
+        pos = 0
+        for m in re.finditer(r"([0-9]+(?:\.[0-9]+)?)(ms|s|m|h)?", text):
+            if m.start() != pos:
+                break
+            pos = m.end()
+            matched = True
+            seconds += float(m.group(1)) * factors[m.group(2) or "s"]
+        if not matched or pos != len(text):
+            return None
+        return seconds if seconds > 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _format_research_directive(work_dir, substrate):
+    """A loud, actionable research-first directive when the agent has a title/context but
+    no background_research.json, or when the substrate is too thin to write real commentary.
+
+    The narration's quality ceiling is how much story context the agent has: with only
+    frame descriptions it can only narrate pixels. This pushes the agent to research the
+    title first (see references/research-guide.md) instead of silently writing 看图说话.
+    """
+    if (Path(work_dir) / "background_research.json").exists():
+        return []  # already researched; _format_background_research surfaces it
+    context = str(CONFIG.get("context_info") or "").strip()
+    thin = substrate.get("level") in ("thin", "empty") if substrate else False
+    if not context and not thin:
+        return []
+    why = "the substrate is thin" if thin else "you have a title/context but no background_research.json"
+    return [
+        "## ⚑ Research the story FIRST (do this before writing narration)",
+        "",
+        f"Reason: {why}. Engaging recap commentary (motive, stakes, relationships) needs story",
+        "context the frames alone do not carry — without it the narration can only describe pixels.",
+        "1. Pull the title/keywords from `--context`, the filename, or the user's description"
+        + (f" (context: {context})." if context else "."),
+        "2. Use any available web-search/browser tool to look up synopsis, characters, and",
+        "   relationships (see `references/research-guide.md`).",
+        "3. Write `work_dir/background_research.json`, then re-read this brief and write narration",
+        "   that names people and reads the picture through the plot.",
+        "4. If no tool/network or nothing found: skip — keep beats sparse and strictly grounded in",
+        "   the visible ASR/frame evidence rather than inventing drama.",
+        "",
+    ]
+
+
 def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_duration, work_dir, style="纪录片", *, mimo_overview_enabled=None, mimo_overview_video_path=None):
     """Write a compact brief that tells the agent exactly how to author recap artifacts."""
     effective_rate = CONFIG["speech_rate"] * CONFIG["speech_safety_margin"]
@@ -1260,7 +1350,23 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
     max_gap = CONFIG.get("max_narration_gap_seconds", 11.0)
     edit_mode = CONFIG.get("edit_mode", "full")
     target_duration = CONFIG.get("target_duration") or "(not set)"
-    target_count = max(1, round(video_duration / 60 * target_spm))
+    # Cut mode sizes narration to the OUTPUT (the kept clips), not the full source:
+    # a 2h source otherwise asks for ~1150 beats that the cut drops, leaving narration
+    # describing footage the viewer never sees.
+    output_seconds = video_duration
+    if edit_mode == "cut":
+        target_seconds = _parse_target_seconds(CONFIG.get("target_duration"))
+        if target_seconds:
+            output_seconds = min(video_duration, target_seconds)
+    target_count = max(1, round(output_seconds / 60 * target_spm))
+
+    has_story_context = (Path(work_dir) / "background_research.json").exists()
+    substrate = assess_understanding_substrate(scenes_analysis, asr_result, has_story_context=has_story_context)
+    thin_substrate = substrate.get("level") in ("thin", "empty")
+    beat_count_phrase = f"at most ~{target_count}" if thin_substrate else f"roughly {target_count}"
+    output_label = f"{output_seconds / 60:.0f}min" if output_seconds >= 60 else f"{output_seconds:.0f}s"
+    source_label = f"{video_duration / 60:.0f}min" if video_duration >= 60 else f"{video_duration:.0f}s"
+
     lines = [
         "# Agent Narration Brief",
         "",
@@ -1272,15 +1378,34 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         f"- Source video duration: {video_duration:.1f}s",
         f"- Target duration (cut mode): {target_duration}",
         f"- Effective speech budget: {effective_rate:.2f} Chinese chars/sec after {breath_sec:.2f}s pause allowance",
-        f"- Narration density target: ~{target_spm:.1f} segments/min (minimum {min_spm:.1f}); no gap longer than {max_gap:.0f}s",
-        f"- Aim for roughly {target_count} short beats across the timeline, kept continuous over a ducked original-audio bed",
+    ]
+    if thin_substrate:
+        lines.append(
+            f"- Narration density: substrate is {substrate['level']} — do NOT chase a beat count. "
+            f"Write fewer, grounded beats; skipping a stretch beats narrating pixels "
+            f"(~{target_spm:.1f}/min is a ceiling here, not a quota)."
+        )
+    else:
+        lines.append(
+            f"- Narration density target: ~{target_spm:.1f} segments/min (minimum {min_spm:.1f}); no gap longer than {max_gap:.0f}s"
+        )
+    if edit_mode == "cut":
+        lines.append(
+            f"- Aim for {beat_count_phrase} short beats across the ~{output_label} CUT OUTPUT "
+            f"(sized to the kept clips, NOT the {source_label} source), over a ducked bed"
+        )
+    else:
+        lines.append(
+            f"- Aim for {beat_count_phrase} short beats across the timeline, kept continuous over a ducked original-audio bed"
+        )
+    lines.extend([
         f"- Default pause between beats: {target_pause_ms}ms",
         f"- Context: {CONFIG.get('context_info') or '(none)'}",
         "",
-    ]
+    ])
 
-    substrate = assess_understanding_substrate(scenes_analysis, asr_result)
     lines.extend(_format_substrate_warning(substrate))
+    lines.extend(_format_research_directive(work_dir, substrate))
     lines.extend(_format_background_research(_load_background_research(work_dir)))
     lines.extend(_format_consolidation(_load_consolidation(work_dir, scenes_analysis)))
 
@@ -1305,24 +1430,37 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         ])
 
     if edit_mode == "cut":
+        cut_target_example = target_duration if target_duration != "(not set)" else "30m"
         lines.extend([
             "## Required files for cut mode",
             "",
-            "First write `clip_plan.json` to choose source footage, then write `narration.json` using ORIGINAL source timestamps inside those clips.",
-            "The CLI maps source timestamps to the edited timeline after concatenating clips.",
+            f"Goal: a ~{output_label} recap cut from a {source_label} source. "
+            "The narration must match the CUT output, not the full source.",
+            "First write `clip_plan.json` to choose source footage, then write `narration.json` using ORIGINAL "
+            "source timestamps that fall INSIDE those clips. The CLI concatenates the clips and maps your source "
+            "timestamps onto the shortened timeline.",
+            "",
+            "Cut-mode authoring rules:",
+            "- Size narration to the OUTPUT: aim for the cut-output beat count above, NOT one beat per source minute. "
+            "A beat whose midpoint lands outside every kept clip is DROPPED.",
+            "- Keep each beat INSIDE one clip: do not let a beat's [start, end] cross a clip boundary, or it is clipped "
+            "to that clip and the voiceover ends up describing footage that was cut away.",
+            "- Tell the story in OUTPUT order: order beats by the order their clips will play so the recap reads as one "
+            "continuous arc over the kept footage.",
+            "- If clips reuse overlapping source ranges, tag the beat with `source_clip_id` so it maps to the intended clip.",
             "",
             "### clip_plan.json shape",
             "",
             "```json",
             "{",
-            "  \"target_duration\": \"10m\",",
+            f"  \"target_duration\": \"{cut_target_example}\",",
             "  \"clips\": [",
             "    {\"start\": 12.0, \"end\": 38.0, \"reason\": \"关键冲突开端\"}",
             "  ]",
             "}",
             "```",
             "",
-            "### narration.json shape (source timestamps)",
+            "### narration.json shape (source timestamps inside the kept clips)",
             "",
             "```json",
             "[",
@@ -1345,8 +1483,8 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         "",
         "## Writing rules (dense continuous-bed recap style)",
         "",
-        "1. Narrate continuously across the whole timeline as short punchy beats, keeping the original audio alive underneath as a ducked bed.",
-        f"2. Hit the density target: ~{target_spm:.1f} beats/min (at least {min_spm:.1f}); never leave a gap longer than {max_gap:.0f}s without narration.",
+        "1. Narrate continuously across the recap as short punchy beats over a ducked original-audio bed; in cut mode that means across the kept clips, in output order — not the full source timeline.",
+        "2. Follow the density line near the top of this brief: it already accounts for thin substrate and cut output. Keep a beat at least every few seconds inside a narrated stretch, but never pad with filler just to hit a number.",
         "3. Default `overlaps_speech` to true. The CLI auto-marks a beat as non-overlapping only when it actually lands inside a real silent window.",
         "4. Keep each beat short: roughly one short sentence (1-2 subtitle lines). Shorter is safer for TTS and reads better.",
         "5. Do not describe what the viewer can already see; explain intent, stakes, subtext, relationships, and story logic.",

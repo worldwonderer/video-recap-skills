@@ -3,7 +3,27 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-cut' / 'scripts'))
 import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
-from cut import build_edited_source_video, map_narration_to_clips, normalize_clip_plan, parse_duration_seconds, source_time_to_output_time
+from cut import build_edited_source_video, lint_mapped_narration, map_narration_to_clips, normalize_clip_plan, parse_duration_seconds, source_time_to_output_time
+
+
+def test_lint_mapped_narration_flags_dropped_and_sparse():
+    """Post-map re-lint must surface beats dropped by the mapper and a sparse cut output
+    (the otherwise-invisible half of cut-mode desync)."""
+    mapped = [
+        {"start": 5.0, "end": 8.0, "narration": "一。"},
+        {"start": 50.0, "end": 53.0, "narration": "二。"},
+    ]
+    report = lint_mapped_narration(mapped, original_count=8, output_duration=60.0)
+    codes = {w["code"] for w in report["warnings"]}
+    assert "many_beats_dropped" in codes          # 6/8 dropped
+    assert "low_density_output" in codes          # 2 beats over 60s
+    assert "long_gap_output" in codes             # 42s gap between the two beats
+    assert report["dropped"] == 6
+    assert report["drop_ratio"] == 0.75
+
+    dense = [{"start": float(i * 6), "end": float(i * 6 + 4), "narration": "一句。"} for i in range(10)]
+    healthy = lint_mapped_narration(dense, original_count=10, output_duration=60.0)
+    assert healthy["warnings"] == []
 
 
 def test_parse_duration_seconds_accepts_common_forms():

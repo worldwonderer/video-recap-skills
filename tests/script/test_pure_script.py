@@ -106,6 +106,70 @@ def test_lint_narration_density_metrics_and_warnings(monkeypatch):
     assert cut_report["metrics"] == {}
 
 
+def test_build_agent_brief_cut_mode_sizes_to_output(monkeypatch, tmp_path):
+    """Cut mode must size the beat target to the OUTPUT length, not the source.
+
+    Regression for the 2h->30min complaint: the brief used to ask for ~source/60*spm
+    beats across the whole source timeline, ~75% of which the cut then dropped.
+    """
+    monkeypatch.setitem(CONFIG, "edit_mode", "cut")
+    monkeypatch.setitem(CONFIG, "target_duration", "1m")
+    monkeypatch.setitem(CONFIG, "target_segments_per_minute", 10.0)
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    scenes = [{"scene_id": i, "start": i * 60.0, "end": i * 60.0 + 60.0, "description": "画面"} for i in range(10)]
+    text = build_agent_brief(scenes, [], [], 600.0, tmp_path).read_text(encoding="utf-8")
+    assert "CUT OUTPUT" in text
+    assert "10 short beats" in text       # 1min output * 10/min = 10 beats (sized to output)
+    assert "100 short beats" not in text   # the old source-sized (buggy) count
+    assert "Keep each beat INSIDE one clip" in text
+    assert '"target_duration": "1m"' in text
+
+
+def test_build_agent_brief_thin_substrate_relaxes_density(monkeypatch, tmp_path):
+    """Thin/empty substrate must turn the density target into a ceiling, not a quota,
+    so the agent is not forced to fill beats with 看图说话."""
+    monkeypatch.setitem(CONFIG, "edit_mode", "full")
+    monkeypatch.setitem(CONFIG, "target_duration", "")
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    scenes = [{"scene_id": i, "start": i * 6.0, "end": i * 6.0 + 6.0, "description": "画面"} for i in range(4)]
+    text = build_agent_brief(scenes, [], [], 24.0, tmp_path).read_text(encoding="utf-8")
+    assert "do NOT chase a beat count" in text
+    assert "ceiling here, not a quota" in text
+    assert "segments/min (minimum" not in text  # the strict quota line is replaced when thin
+
+
+def test_build_agent_brief_research_directive_when_context_without_research(monkeypatch, tmp_path):
+    """A title/context with no background_research.json must trigger a loud research-first
+    directive (the root of 'cold' narration: no story context -> only pixels to narrate)."""
+    monkeypatch.setitem(CONFIG, "edit_mode", "full")
+    monkeypatch.setitem(CONFIG, "target_duration", "")
+    monkeypatch.setitem(CONFIG, "context_info", "这是《庆余年》第一集")
+    scenes = [{"scene_id": 0, "start": 0.0, "end": 6.0, "description": "范闲登场与人对峙暗藏机锋"}]
+    asr = [{"start": 1.0, "end": 5.0, "text": "一句对白。"}]
+    text = build_agent_brief(scenes, asr, [], 6.0, tmp_path).read_text(encoding="utf-8")
+    assert "Research the story FIRST" in text
+    assert "庆余年" in text  # the context is echoed into the directive
+
+    (tmp_path / "background_research.json").write_text('{"synopsis": "范闲查案"}', encoding="utf-8")
+    text2 = build_agent_brief(scenes, asr, [], 6.0, tmp_path).read_text(encoding="utf-8")
+    assert "Research the story FIRST" not in text2  # already researched -> directive gone
+
+
+def test_lint_narration_cut_mode_warns_on_clip_boundary_crossing():
+    """A beat that spills past its clip is silently trimmed by the mapper and ends up
+    over cut-away footage -> warn so the agent tightens it inside the clip."""
+    plan = {"clips": [{"clip_id": 0, "source_start": 10.0, "source_end": 20.0}]}
+    crossing = lint_narration([
+        {"start": 12.0, "end": 25.0, "narration": "跨过片段边界的解说。"},  # mid 18.5 in clip, end 25 > 20
+    ], [{"scene_id": 0, "start": 0.0, "end": 30.0}], clip_plan=plan, mode="cut")
+    assert "crosses_clip_boundary" in {i["code"] for i in crossing["warnings"]}
+
+    inside = lint_narration([
+        {"start": 12.0, "end": 18.0, "narration": "完全在片段内。"},
+    ], [{"scene_id": 0, "start": 0.0, "end": 30.0}], clip_plan=plan, mode="cut")
+    assert "crosses_clip_boundary" not in {i["code"] for i in inside["warnings"]}
+
+
 def test_align_narration_to_quiet_sets_overlap_flag_without_moving_beats(monkeypatch):
     """New contract: keep the agent's timing; only (re)compute overlaps_speech."""
     scenes = [{"scene_id": 0, "start": 0.0, "end": 12.0}]
@@ -252,15 +316,54 @@ def test_assess_understanding_substrate_levels():
         [{"scene_id": 0, "start": 0.0, "end": 3.0, "description": "短"}], []
     )
     assert empty["level"] == "empty"
-    rich = assess_understanding_substrate(
-        [
-            {"scene_id": i, "start": float(i), "end": float(i + 1),
-             "description": "画面描述" * 6, "frame_facts": {"1.0": ["动作"]}}
-            for i in range(4)
-        ],
-        [{"start": 0.0, "end": 3.0, "text": "对白" * 60}],
-    )
+
+    facts_scenes = [
+        {"scene_id": i, "start": float(i), "end": float(i + 1),
+         "description": "画面描述" * 6, "frame_facts": {"1.0": ["动作"]}}
+        for i in range(4)
+    ]
+    # Rich requires a story SPINE: substantial dialogue (ASR >= 200 chars) ...
+    rich = assess_understanding_substrate(facts_scenes, [{"start": 0.0, "end": 3.0, "text": "对白" * 120}])
     assert rich["level"] == "rich"
+    # ... or researched/given story context lifts a frame-fact-rich clip to rich.
+    storyful = assess_understanding_substrate(facts_scenes, [], has_story_context=True)
+    assert storyful["level"] == "rich"
+    # Frame-fact-rich but STORYLESS (no dialogue, no context) is thin, NOT rich, so the
+    # cold-narration safeguards (sparse warning, research directive, density relief) fire.
+    # This is the canonical anime case the old volume-only classifier mislabeled "rich".
+    storyless = assess_understanding_substrate(facts_scenes, [])
+    assert storyless["level"] == "thin"
+
+
+def test_parse_target_seconds_table():
+    """_parse_target_seconds must be total (never raise) and parse the documented forms."""
+    from narration import _parse_target_seconds
+    assert _parse_target_seconds("1:30") == 90.0
+    assert _parse_target_seconds("00:30:00") == 1800.0
+    assert _parse_target_seconds("30m") == 1800.0
+    assert _parse_target_seconds("1h5m") == 3900.0
+    assert _parse_target_seconds("600") == 600.0
+    assert _parse_target_seconds(90) == 90.0
+    for bad in ("", None, "abc", "0", "-5", "10x", "1:-30", "1:2:3:4", "  ", "nan", "inf"):
+        assert _parse_target_seconds(bad) is None
+
+
+def test_build_agent_brief_storyless_rich_video_relaxes_and_prompts_research(monkeypatch, tmp_path):
+    """End-to-end for the anime complaint: a frame-fact-rich but storyless video (no
+    dialogue, no research) must now be treated as thin so the density relaxes and the
+    research directive fires — instead of being graded 'rich' and shipping cold."""
+    monkeypatch.setitem(CONFIG, "edit_mode", "full")
+    monkeypatch.setitem(CONFIG, "target_duration", "")
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    scenes = [
+        {"scene_id": i, "start": float(i * 6), "end": float(i * 6 + 6),
+         "description": "人物在画面里走动" * 3, "frame_facts": {str(i * 6): ["走动"]}}
+        for i in range(6)
+    ]
+    text = build_agent_brief(scenes, [], [], 36.0, tmp_path).read_text(encoding="utf-8")
+    assert "do NOT chase a beat count" in text          # density relaxed (FIX D)
+    assert "Research the story FIRST" in text            # research directive (FIX E)
+    assert "segments/min (minimum" not in text           # strict quota line suppressed
 
 
 def test_cut_validate_prefers_raw_plan_when_validated_is_stale(tmp_path):

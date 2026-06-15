@@ -160,3 +160,17 @@ def test_brief_ignores_stale_mimo_overview_when_disabled_or_chunk_mismatch(monke
     monkeypatch.setitem(CONFIG, "mimo_video_overview", True)
     mismatch_text = build_agent_brief(SCENES, ASR, SILENCE, 6.0, tmp_path).read_text(encoding="utf-8")
     assert "STALE MIMO OVERVIEW" not in mismatch_text
+
+
+def test_build_agent_brief_cut_mode_sizes_to_output(monkeypatch, tmp_path):
+    """Cut mode sizes the beat target to the OUTPUT, not the source (brief.py copy)."""
+    monkeypatch.setitem(CONFIG, "edit_mode", "cut")
+    monkeypatch.setitem(CONFIG, "target_duration", "1m")
+    monkeypatch.setitem(CONFIG, "target_segments_per_minute", 10.0)
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    scenes = [{"scene_id": i, "start": i * 60.0, "end": i * 60.0 + 60.0, "description": "画面"} for i in range(10)]
+    text = build_agent_brief(scenes, [], [], 600.0, tmp_path).read_text(encoding="utf-8")
+    assert "CUT OUTPUT" in text
+    assert "10 short beats" in text
+    assert "100 short beats" not in text
+    assert "Keep each beat INSIDE one clip" in text

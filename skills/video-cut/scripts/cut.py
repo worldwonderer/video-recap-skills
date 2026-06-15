@@ -305,6 +305,58 @@ def map_narration_to_clips(narration, validated_plan, min_duration=0.3):
     return mapped
 
 
+def lint_mapped_narration(mapped, original_count, output_duration, *, min_spm=6.0, max_gap_seconds=12.0, drop_ratio_limit=0.3):
+    """Advisory re-lint of narration AFTER it is mapped onto the cut OUTPUT timeline.
+
+    The mapper silently drops beats whose midpoint is outside every kept clip and clamps
+    boundary-crossers, so a narration authored against the full source can pass the
+    source-time validate yet leave the cut sparse or describing footage the viewer never
+    sees. This surfaces that on the real output timeline (loud log + narration_mapped_lint.json);
+    it never blocks the render — a sparse recap can be intentional.
+    """
+    mapped = sorted(mapped or [], key=lambda s: float(s.get("start", 0.0)))
+    mapped_count = len(mapped)
+    original_count = int(original_count or 0)
+    dropped = max(0, original_count - mapped_count)
+    drop_ratio = dropped / original_count if original_count else 0.0
+    out_dur = float(output_duration or 0.0)
+    spm = mapped_count / (out_dur / 60) if out_dur > 0 else 0.0
+    gaps = [float(b["start"]) - float(a["end"]) for a, b in zip(mapped, mapped[1:])]
+    max_gap = max(gaps) if gaps else 0.0
+    covered = sum(max(0.0, float(b["end"]) - float(b["start"])) for b in mapped)
+    coverage = covered / out_dur if out_dur > 0 else 0.0
+
+    warnings = []
+    if drop_ratio >= drop_ratio_limit:
+        warnings.append({
+            "code": "many_beats_dropped",
+            "message": "大量解说段落落在保留片段之外被丢弃——请按保留的片段写解说，而不是整段原片。",
+            "dropped": dropped, "original": original_count, "drop_ratio": round(drop_ratio, 2),
+        })
+    if mapped_count >= 2 and spm and spm < min_spm:
+        warnings.append({
+            "code": "low_density_output",
+            "message": "映射后的解说在成片里偏稀疏——在保留片段内补充解说 beat。",
+            "segments_per_minute": round(spm, 2), "min_segments_per_minute": min_spm,
+        })
+    if max_gap > max_gap_seconds:
+        warnings.append({
+            "code": "long_gap_output",
+            "message": "成片里有一长段没有解说。",
+            "max_gap_seconds": round(max_gap, 2), "max_gap_limit_seconds": max_gap_seconds,
+        })
+    return {
+        "mapped_count": mapped_count,
+        "dropped": dropped,
+        "drop_ratio": round(drop_ratio, 2),
+        "output_duration": round(out_dur, 2),
+        "segments_per_minute": round(spm, 2),
+        "max_gap_seconds": round(max_gap, 2),
+        "coverage": round(coverage, 2),
+        "warnings": warnings,
+    }
+
+
 def _has_audio_stream(video_path):
     cmd = [
         "ffprobe", "-v", "error", "-select_streams", "a:0",
@@ -420,6 +472,11 @@ def main():
         (work_dir / "narration_mapped.json").write_text(
             json.dumps(mapped, ensure_ascii=False, indent=2), encoding="utf-8")
         log(f"映射解说 {len(mapped)} 段 → narration_mapped.json")
+        report = lint_mapped_narration(mapped, len(narration), validated_plan["total_duration"])
+        (work_dir / "narration_mapped_lint.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        for w in report["warnings"]:
+            log(f"  ⚠️ 剪后解说同步: {w['message']} [{w['code']}]")
     log(f"剪辑模式: {len(validated_plan['clips'])} 个片段 → {validated_plan['total_duration']:.1f}s")
 
 

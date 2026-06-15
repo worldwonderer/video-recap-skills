@@ -102,6 +102,14 @@ the shortened timeline. Validate with `--mode cut`.
 {"target_duration": "10m", "clips": [{"start": 12.0, "end": 38.0, "reason": "冲突开端"}]}
 ```
 
+**剪辑模式写作要点（解说要对上剪后的画面，不是原片）：**
+- **按成片时长写**：解说的 beat 数量对齐**目标成片**（brief 头部已按目标时长算好），不是原片时长。中点落在任何保留片段之外的 beat 会被丢弃——别在被剪掉的段落上写解说。
+- **每段落在单个片段内**：一个 beat 的 `[start, end]` 不要跨片段边界，否则会被裁到片段长度，配音就会念到剪掉的画面（`--mode cut` 会以 `crosses_clip_boundary` 警告）。
+- **按成片顺序讲**：beat 按它们所属片段在成片里出现的先后排序，让解说在剪后画面上连成一条线。
+- **重复源区间**：clips 复用了重叠的源区间时，给 beat 标 `source_clip_id`，确保映射到正确片段。
+
+> 片名/题材明确但缺乏剧情上下文时，先按 [背景调研指南](../video-understanding/references/research-guide.md) 写 `background_research.json` 再写解说——否则解说只能"看图说话"。brief 在 substrate 偏薄时会把密度目标降为上限而非配额：宁可少写、写实，也不要为凑数堆画面描述。
+
 ## What this skill does NOT do
 - Does NOT run ASR/VLM or analyze the video — it consumes the understanding index.
 - Does NOT synthesize audio or render video.
