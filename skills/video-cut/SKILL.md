@@ -2,12 +2,12 @@
 name: video-cut
 user-invocable: false
 description: >
- Cut a long video down to selected source ranges (montage / clip assembly) and remap
- timestamped narration onto the shortened timeline. Use when an agent has chosen which
- original-video segments to keep (a clip plan) and needs a single concatenated source
- video plus narration mapped to the new (output) time. Part of the video-recap bundle:
- consumes clip_plan.json + the source video, produces edited_source.mp4 +
- narration_mapped.json. 触发词: 视频剪辑, 剪辑式解说, video cut, clip plan, 拼剪.
+ Cut a long video down to selected source ranges (montage / clip assembly). Part of the
+ video-recap bundle: in the orchestrated (two-pass) flow, consumes clip_plan.json + the
+ source video, produces edited_source.mp4; the agent then writes narration.json against
+ the output timeline. When invoked standalone WITHOUT --no-narration-map, also remaps an
+ existing narration.json → narration_mapped.json (legacy single-pass path).
+ 触发词: 视频剪辑, 剪辑式解说, video cut, clip plan, 拼剪.
 ---
 
 ## What this does
@@ -15,7 +15,8 @@ description: >
 Takes an agent-authored **clip plan** (which source ranges to keep, in order) and:
 1. Validates + enriches it into `clip_plan_validated.json` (clip ids, source/output times, total duration, overlap checks).
 2. Concatenates those source ranges into a single `edited_source.mp4`.
-3. Maps narration written in **original-video time** onto the cut **output** timeline → `narration_mapped.json`.
+3. **(Orchestrated path — default)** Stops here; the agent writes `narration.json` against the output timeline (0 .. total seconds). Invoked by `recap.py` with `--no-narration-map`.
+4. **(Legacy single-pass path)** When invoked directly **without** `--no-narration-map`: maps narration written in original-video time onto the cut output timeline → `narration_mapped.json`.
 
 It is stateless: given the same inputs it reproduces the same outputs. Caching is just
 "reuse `edited_source.mp4` if it is newer than `clip_plan.json`".
@@ -31,7 +32,7 @@ It is stateless: given the same inputs it reproduces the same outputs. Caching i
 `start`/`end` are **original-video seconds** (aliases `source_start`/`source_end` or `in`/`out` accepted).
 Optionally `target_duration` at the object top level (e.g. `"10m"`).
 
-`work_dir/narration.json` (optional) — segments with original-video `start`/`end` + `narration` text.
+`work_dir/narration.json` (optional, legacy single-pass path only) — segments with original-video `start`/`end` + `narration` text, consumed only when `--no-narration-map` is NOT passed.
 Each segment may carry `source_clip_id` to disambiguate when overlapping clips are allowed.
 
 ## Run
@@ -45,13 +46,13 @@ python3 scripts/cut.py <video> --work-dir <work_dir> \
 
 - `clip_plan_validated.json` — normalized clips with `clip_id`, `source_start/end`, `output_start/end`, `duration`.
 - `edited_source.mp4` — the concatenated source video (the new shortened timeline).
-- `narration_mapped.json` — narration with `start`/`end` rewritten to output time and `source_clip_id` set.
+- `narration_mapped.json` — **(legacy single-pass path only)** narration with `start`/`end` rewritten to output time and `source_clip_id` set. NOT produced in the orchestrated flow (`recap.py --no-narration-map`).
 
-Downstream (voiceover + assemble) treat `edited_source.mp4` as the video and `narration_mapped.json` as the narration.
+In the orchestrated flow, downstream (voiceover + assemble) treat `edited_source.mp4` as the video and `narration.json` (written by the agent against the output timeline) as the narration.
 
 ## Notes
 
-- Timestamps in `clip_plan.json` and `narration.json` are always **original-video time**; this tool does the source→output remap.
+- In the legacy single-pass path, timestamps in `clip_plan.json` and `narration.json` are **original-video time**; this tool does the source→output remap. In the orchestrated path, `narration.json` is written by the agent directly in **output-timeline time** — no remap is performed.
 - Overlapping/duplicate source ranges raise an error unless `--allow-overlap` is set; with overlap, narration should set `source_clip_id`.
 - Segments that fall outside every kept clip are dropped (logged).
 

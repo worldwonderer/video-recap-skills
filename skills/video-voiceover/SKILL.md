@@ -5,7 +5,8 @@ description: >
  Synthesize Chinese narration audio (TTS voiceover) from a timestamped narration.json.
  Use to turn a written narration script into per-segment speech audio, with MiMo TTS
  (mimo-v2.5-tts), dynamic speed fitting, and loudness handling. Part of the video-recap bundle:
- consumes narration.json (or an explicit narration_mapped.json), produces tts_segments + tts_meta.json.
+ consumes narration.json (output-timeline time), produces tts_segments + tts_meta.json.
+ In the legacy direct-cut path, narration_mapped.json may be passed explicitly instead.
  触发词: 配音, 语音合成, TTS, 解说配音, voiceover, text to speech, 旁白配音.
 ---
 
@@ -23,9 +24,11 @@ export MIMO_API_KEY=***         # MiMo TTS (or a TTS-specific MIMO_TTS_API_KEY)
 
 ## Input contract
 
-`work_dir/narration.json` (or an explicit `work_dir/narration_mapped.json` in cut mode) — segments with
-`start` / `end` / `narration` (+ optional `pause_after_ms`, `overlaps_speech`). Times are the
-**output-timeline** seconds the audio will be placed at.
+`work_dir/narration.json` — segments with `start` / `end` / `narration` (+ optional `pause_after_ms`,
+`overlaps_speech`). Times are the **output-timeline** seconds the audio will be placed at.
+In the orchestrated cut-mode flow, the agent writes `narration.json` directly against the output
+timeline, and the orchestrator passes it here. In the legacy direct-cut path,
+`narration_mapped.json` may be passed explicitly instead.
 
 ## Run
 
@@ -34,8 +37,8 @@ python3 scripts/voiceover.py --work-dir <work_dir> --narration <narration.json> 
 ```
 
 For direct one-off use, omitting `--narration` reads `work_dir/narration.json`.
-Pass `--narration work_dir/narration_mapped.json` explicitly for cut-mode output;
-the video-recap orchestrator always passes the intended file.
+Pass `--narration work_dir/narration_mapped.json` explicitly only for the legacy direct-cut path;
+the video-recap orchestrator always passes `narration.json`.
 
 ## Output contract
 

@@ -36,8 +36,9 @@ inspection and what the **optional** 剪映 exporter consumes. Times are plain
 - **video** — the source clip(s). In cut mode (with explicit `--source-video`)
   each `clip_plan` entry references the real source range; otherwise a single clip
   spans the rendered input. The clip's `audio` carries the **original-audio ducking
-  automation** (gap-fill: held at `base_gain` between sentences, dipped under each
-  narration window).
+  automation** (continuous bed: dipped under each narration beat; inter-beat gaps shorter
+  than `duck_bridge_seconds` stay ducked — no swell back to `base_gain` between sentences;
+  only lead-in, lead-out, and genuine gaps >= `duck_bridge_seconds` return to `base_gain`).
 - **narration** — the placed TTS beats, one segment each.
 - **bgm** — present only with `BGM_PATH`; a looped bed with its own ducking automation.
 - **subtitle** — the narration lines.

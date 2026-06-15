@@ -26,7 +26,7 @@ A Claude Code plugin: five small, independent skills plus a thin orchestrator. E
 flowchart LR
     research["Story research"] --> understand
     video(["Video"]) --> understand["Understand<br/>scenes·ASR·VLM"] --> script["Script<br/>agent"] --> voiceover["Voiceover<br/>MiMo TTS"] --> assemble["Assemble<br/>mux·subtitles"] --> output(["Recap"])
-    script -. cut mode .-> cut["Cut"] -.-> voiceover
+    understand -. cut mode: cut first .-> cut["Cut<br/>render first"] -.-> script
     classDef io fill:#eef6ff,stroke:#4f86c6,color:#1f2937;
     classDef opt fill:#f3f4f6,stroke:#9ca3af,color:#374151;
     class video,output io;
@@ -37,8 +37,8 @@ flowchart LR
 
 - **One key, runs anywhere.** ASR, VLM, and TTS all go through [Xiaomi MiMo](https://platform.xiaomimimo.com); the only local dependency is `ffmpeg` — no GPU, no model files, no extra service, on macOS / Linux / Windows.
 - **Research before analysis.** Put the plot and characters into `background_research.json` first, and the VLM names people on screen instead of labelling everyone "黑衣男子".
-- **Original audio survives, dynamic mix.** Narration is mixed over a ducked original; between sentences the original and BGM swell back up so there's no dead air.
-- **Cut and review.** `--edit-mode cut` turns a long video into a shorter narrated edit; an LLM review pass flags hallucinations, weak hooks, and a missing throughline before TTS.
+- **Original audio survives, continuous bed.** Narration is mixed over the original ducked into one continuous low bed; the short gaps between sentences no longer let the original pop back up (tunable via `duck_bridge_seconds`) — only the lead-in, lead-out, and pauses longer than that threshold return to full volume.
+- **Cut and review.** `--edit-mode cut` is cut-first/narrate-second: it renders the cut from `clip_plan.json`, then you narrate against that real output timeline, so narration and picture stay in sync by construction. An LLM review pass flags hallucinations, weak hooks, and a missing throughline before TTS.
 - **Keep editing in 剪映.** Optionally export a multi-track 剪映 draft; the core render only needs `ffmpeg` and never depends on 剪映.
 
 ## Installation
@@ -82,7 +82,7 @@ It analyzes the video, writes the narration against that context, and produces `
 Turn /path/to/long.mp4 into a ~10-minute cut-down recap and burn the subtitles in.
 ```
 
-Behind the scenes the orchestrator chains the stages, pausing so the agent can write `narration.json`. Before the first run, check your setup:
+Behind the scenes the orchestrator chains the stages, pausing so the agent can write the narration (cut mode pauses twice: first write `clip_plan.json` to pick the footage, then — once the cut is rendered — write `narration.json` against that output). Before the first run, check your setup:
 
 ```bash
 python3 skills/video-recap/scripts/recap.py --doctor
@@ -94,9 +94,9 @@ python3 skills/video-recap/scripts/recap.py --doctor
 
 | Skill | Does | In → Out (the `work_dir` contract) |
 |---|---|---|
-| **video-understanding** | scene detect · frame extract · ASR (`mimo-v2.5-asr`) · VLM (`mimo-v2.5`) · fuse timeline · build brief (+ optional `--consolidate` index) | `video` → `scenes / asr_result / vlm_analysis / silence_periods / timeline_fusion / agent_narration_brief.md` |
+| **video-understanding** | scene detect · frame extract · ASR (`mimo-v2.5-asr`) · VLM (`mimo-v2.5`) · fuse timeline · build brief (`--consolidate` index on by default) | `video` → `scenes / asr_result / vlm_analysis / silence_periods / timeline_fusion / agent_narration_brief.md` |
 | **video-script** | writing rules (SKILL.md) + review (LLM-as-judge) + lint/validate | `brief + index` → `narration.json` |
-| **video-cut** | clip plan → cut source + remap narration (cut mode) | `clip_plan.json + video` → `edited_source.mp4 + narration_mapped.json` |
+| **video-cut** | clip plan → render the cut (cut-first/narrate-second; narration is written on the output timeline, no remap) | `clip_plan.json + video` → `edited_source.mp4` |
 | **video-voiceover** | synthesize narration audio (MiMo TTS, `mimo-v2.5-tts`) | `narration.json` → `tts_segments/ + tts_meta.json` |
 | **video-assemble** | mux · duck original audio · render subtitles · multi-track timeline (optional 剪映 export) | `video + tts_meta` → `recap_<name>.mp4 + subtitles.srt/.ass + timeline.json` |
 | **video-recap** | orchestrator + `--doctor` | `video` → `recap_<name>.mp4` |
@@ -111,7 +111,7 @@ Run tests with `python3 scripts/test.py`. Do not run bare `pytest` at the reposi
 - `work_dir/narration.json`: the narration script (`narration_lint.json` timing diagnostics, `narration_review.md` review notes)
 - `work_dir/agent_narration_brief.md`: timing and scene brief for the agent
 - `work_dir/vlm_analysis.json` · `asr_result.json` · `silence_periods.json` · `timeline_fusion.json`: understanding artifacts
-- `work_dir/clip_plan.json` · `edited_source.mp4` · `narration_mapped.json`: cut-mode artifacts
+- `work_dir/clip_plan.json` · `edited_source.mp4` · `recap_phase.json`: cut-mode artifacts (narration is written on the output timeline; `recap_phase.json` records cut/narrate progress for deterministic resume)
 - `work_dir/timeline.json` · `work_dir/assembly_manifest.json` · `tts_segments/` · `tts_meta.json`: multi-track timeline, slim render record, and TTS audio
 
 ## References

@@ -26,7 +26,7 @@ https://github.com/user-attachments/assets/92698ec6-0d23-4f9f-8825-c3684ef57aff
 flowchart LR
     research["背景调研"] --> understand
     video(["视频"]) --> understand["理解<br/>场景·ASR·VLM"] --> script["写稿<br/>Agent"] --> voiceover["配音<br/>MiMo TTS"] --> assemble["组装<br/>混音·字幕"] --> output(["Recap"])
-    script -. 剪辑模式 .-> cut["剪辑"] -.-> voiceover
+    understand -. 剪辑模式：先剪后配 .-> cut["剪辑<br/>先剪成片"] -.-> script
     classDef io fill:#eef6ff,stroke:#4f86c6,color:#1f2937;
     classDef opt fill:#f3f4f6,stroke:#9ca3af,color:#374151;
     class video,output io;
@@ -37,8 +37,8 @@ flowchart LR
 
 - **一个 key 跑全程。** ASR、VLM、TTS 全走[小米 MiMo](https://platform.xiaomimimo.com)，本地只装 `ffmpeg`。
 - **先调研再分析。** 先把剧情人物查清楚写进 `background_research.json`。
-- **原声不丢，动态混音。** 解说压低原声后混进去；句子间隙自动让原声和 BGM 顶上来。
-- **能剪、能审。** `--edit-mode cut` 把长视频压成更短的解说剪辑；出稿前一道 LLM 评审挑幻觉、钩子、主线的毛病。
+- **原声不丢，连续铺底。** 解说把原声压成一条连续的低音铺底再混进去；句与句之间的短间隙不再让原声窜起来（桥接阈值 `duck_bridge_seconds` 可调），只有片头引入、片尾收束、以及超过该阈值的长停顿才放回满音量原声。
+- **能剪、能审。** `--edit-mode cut` 先剪后配——先按 `clip_plan.json` 把长视频剪成成片，再对着剪好的成片时间轴写解说，解说与画面天然对齐、不会错位；出稿前一道 LLM 评审挑幻觉、钩子、主线的毛病。
 - **接着在剪映里改。** 可选导出多轨剪映草稿；核心渲染只靠 `ffmpeg`，不装剪映也照常出片。
 
 ## 安装
@@ -82,7 +82,7 @@ export MIMO_TOKEN_PLAN_CLUSTER=cn
 把 /path/to/long.mp4 剪成十分钟左右的解说短片，字幕压进画面。
 ```
 
-背后是编排器把几个阶段串起来跑，中间停下来让 Agent 写 `narration.json`。第一次跑前先自检环境：
+背后是编排器把几个阶段串起来跑，中间停下来让 Agent 写解说（剪辑模式会停两次：先写 `clip_plan.json` 挑片段，剪成成片后再对着成片写 `narration.json`）。第一次跑前先自检环境：
 
 ```bash
 python3 skills/video-recap/scripts/recap.py --doctor
@@ -94,9 +94,9 @@ python3 skills/video-recap/scripts/recap.py --doctor
 
 | Skill | 职责 | 输入 → 输出（`work_dir` 契约） |
 |---|---|---|
-| **video-understanding** | 场景检测 · 抽帧 · ASR（`mimo-v2.5-asr`）· VLM（`mimo-v2.5`）· 时间轴融合 · 生成 brief（可选 `--consolidate` 索引） | `视频` → `scenes / asr_result / vlm_analysis / silence_periods / timeline_fusion / agent_narration_brief.md` |
+| **video-understanding** | 场景检测 · 抽帧 · ASR（`mimo-v2.5-asr`）· VLM（`mimo-v2.5`）· 时间轴融合 · 生成 brief（`--consolidate` 索引默认开） | `视频` → `scenes / asr_result / vlm_analysis / silence_periods / timeline_fusion / agent_narration_brief.md` |
 | **video-script** | 写作规则（SKILL.md）+ 评审（LLM 评委）+ lint/校验 | `brief + 索引` → `narration.json` |
-| **video-cut** | 片段计划 → 拼剪源 + 重映射解说（剪辑模式） | `clip_plan.json + 视频` → `edited_source.mp4 + narration_mapped.json` |
+| **video-cut** | 片段计划 → 拼剪成片（剪辑模式先剪后配，解说按成片时间轴写，无需重映射） | `clip_plan.json + 视频` → `edited_source.mp4` |
 | **video-voiceover** | 合成解说音频（MiMo TTS，`mimo-v2.5-tts`） | `narration.json` → `tts_segments/ + tts_meta.json` |
 | **video-assemble** | 混音 · 压低原声 · 渲染字幕 · 多轨时间线（可选导出剪映） | `视频 + tts_meta` → `recap_<名>.mp4 + subtitles.srt/.ass + timeline.json` |
 | **video-recap** | 编排器 + `--doctor` | `视频` → `recap_<名>.mp4` |
@@ -111,7 +111,7 @@ python3 skills/video-recap/scripts/recap.py --doctor
 - `work_dir/narration.json`：解说脚本（`narration_lint.json` 时间诊断、`narration_review.md` 评审意见）
 - `work_dir/agent_narration_brief.md`：给 Agent 的时间和场景 brief
 - `work_dir/vlm_analysis.json` · `asr_result.json` · `silence_periods.json` · `timeline_fusion.json`：理解产物
-- `work_dir/clip_plan.json` · `edited_source.mp4` · `narration_mapped.json`：剪辑模式产物
+- `work_dir/clip_plan.json` · `edited_source.mp4` · `recap_phase.json`：剪辑模式产物（解说在成片时间轴上写，`recap_phase.json` 记录剪/配进度供断点续跑）
 - `work_dir/timeline.json` · `work_dir/assembly_manifest.json` · `tts_segments/` · `tts_meta.json`：多轨时间线、渲染记录与 TTS 音频
 
 ## 参考文档
