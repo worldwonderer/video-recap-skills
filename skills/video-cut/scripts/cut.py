@@ -299,6 +299,11 @@ def map_narration_to_clips(narration, validated_plan, min_duration=0.3):
         item["source_clip_id"] = clip["clip_id"]
         item["start"] = output_start
         item["end"] = output_end
+        # Tag beats trimmed to a clip edge: their TEXT was written for a longer span and may
+        # now describe footage that was cut away (a stale-text desync the lint surfaces).
+        item["clamped"] = bool(
+            clipped_source_start > source_start + 1e-3 or clipped_source_end < source_end - 1e-3
+        )
         mapped.append(item)
 
     mapped.sort(key=lambda seg: seg["start"])
@@ -311,8 +316,9 @@ def lint_mapped_narration(mapped, original_count, output_duration, *, min_spm=6.
     The mapper silently drops beats whose midpoint is outside every kept clip and clamps
     boundary-crossers, so a narration authored against the full source can pass the
     source-time validate yet leave the cut sparse or describing footage the viewer never
-    sees. This surfaces that on the real output timeline (loud log + narration_mapped_lint.json);
-    it never blocks the render — a sparse recap can be intentional.
+    sees. This surfaces that on the real output timeline (narration_mapped_lint.json) and
+    returns a `blocking` verdict (heavy drop / too sparse / long gap) that the cut stage
+    enforces unless --allow-sparse-cut. Clamped-but-kept beats are surfaced as advisory only.
     """
     mapped = sorted(mapped or [], key=lambda s: float(s.get("start", 0.0)))
     mapped_count = len(mapped)
@@ -345,6 +351,14 @@ def lint_mapped_narration(mapped, original_count, output_duration, *, min_spm=6.
             "message": "成片里有一长段没有解说。",
             "max_gap_seconds": round(max_gap, 2), "max_gap_limit_seconds": max_gap_seconds,
         })
+    clamped = [b for b in mapped if isinstance(b, dict) and b.get("clamped")]
+    if clamped:
+        warnings.append({
+            "code": "clamped_beats",
+            "message": "有解说段被裁到片段边界，文本可能在描述被剪掉的画面——核对并改写这些行。",
+            "count": len(clamped),
+        })
+    blocking_codes = {"many_beats_dropped", "low_density_output", "long_gap_output"}
     return {
         "mapped_count": mapped_count,
         "dropped": dropped,
@@ -353,7 +367,9 @@ def lint_mapped_narration(mapped, original_count, output_duration, *, min_spm=6.
         "segments_per_minute": round(spm, 2),
         "max_gap_seconds": round(max_gap, 2),
         "coverage": round(coverage, 2),
+        "clamped_count": len(clamped),
         "warnings": warnings,
+        "blocking": any(w["code"] in blocking_codes for w in warnings),
     }
 
 
@@ -437,6 +453,11 @@ def main():
     parser.add_argument("--target-duration", default=None, help="target output duration, e.g. 10m / 600 / 00:10:00")
     parser.add_argument("--clip-padding", type=float, default=0.0, help="seconds to pad each clip on both ends")
     parser.add_argument("--allow-overlap", action="store_true", help="allow overlapping/duplicate source ranges")
+    parser.add_argument("--normalize-only", action="store_true",
+                        help="only normalize the clip plan -> clip_plan_validated.json (no render/map); "
+                             "lets validate lint the SAME padded/pruned plan the mapper uses")
+    parser.add_argument("--allow-sparse-cut", action="store_true",
+                        help="do not block on heavy narration drop / sparse output (e.g. an intentional montage)")
     args = parser.parse_args()
 
     work_dir = Path(args.work_dir)
@@ -456,6 +477,10 @@ def main():
         validated_plan["raw_plan_fingerprint"] = value_fingerprint(raw_plan)
     (work_dir / "clip_plan_validated.json").write_text(
         json.dumps(validated_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    if args.normalize_only:
+        print(json.dumps({"status": "normalized", "clips": len(validated_plan["clips"]),
+                          "total_duration": validated_plan["total_duration"]}, ensure_ascii=False))
+        return
 
     edited_source_path = work_dir / "edited_source.mp4"
     if should_reuse_edited_source(edited_source_path, validated_plan, args.video):
@@ -477,6 +502,10 @@ def main():
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         for w in report["warnings"]:
             log(f"  ⚠️ 剪后解说同步: {w['message']} [{w['code']}]")
+        if report.get("blocking") and not args.allow_sparse_cut:
+            raise SystemExit(
+                "剪后解说与保留片段对不上：丢弃过多或成片过稀疏。改 narration.json / clip_plan.json "
+                "让解说落在保留片段内后重跑，或加 --allow-sparse-cut 接受当前映射。详见 narration_mapped_lint.json")
     log(f"剪辑模式: {len(validated_plan['clips'])} 个片段 → {validated_plan['total_duration']:.1f}s")
 
 

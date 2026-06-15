@@ -437,3 +437,41 @@ def test_recap_pause_banner_quiet_when_brief_has_no_research_flag(monkeypatch, t
     recap.main()
 
     assert "理解素材偏薄" not in capsys.readouterr().out
+
+
+def test_recap_cut_normalizes_plan_before_validate(monkeypatch, tmp_path):
+    """Step 4: validate must lint the NORMALIZED clip plan, so recap runs cut --normalize-only
+    BEFORE validate.py in cut mode (then the full cut render after)."""
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "narration.json").write_text(
+        json.dumps([{"start": 10, "end": 12, "narration": "source。"}]), encoding="utf-8")
+    (work / "clip_plan.json").write_text(json.dumps([{"start": 10, "end": 12}]), encoding="utf-8")
+    recap._write_run_manifest(work, video.resolve(), _manifest_args(edit_mode="cut"))
+    calls = []
+
+    def fake_run(skill, script, *cli_args):
+        cli = [str(a) for a in cli_args]
+        calls.append((skill, script, cli))
+        if script == "cut.py" and "--normalize-only" not in cli:
+            (work / "narration_mapped.json").write_text(
+                json.dumps([{"start": 0, "end": 2, "narration": "mapped。"}]), encoding="utf-8")
+            (work / "edited_source.mp4").write_bytes(b"edited")
+        if script == "assemble.py":
+            (work / "output.mp4").write_bytes(b"mp4")
+            (work / "assembly_manifest.json").write_text(
+                json.dumps({"final_output": str(tmp_path / "recap_video.mp4")}), encoding="utf-8")
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--work-dir", str(work), "--edit-mode", "cut"])
+
+    recap.main()
+
+    cut_norm_idx = next(i for i, c in enumerate(calls)
+                        if c[:2] == ("video-cut", "cut.py") and "--normalize-only" in c[2])
+    validate_idx = next(i for i, c in enumerate(calls) if c[:2] == ("video-script", "validate.py"))
+    cut_full_idx = next(i for i, c in enumerate(calls)
+                        if c[:2] == ("video-cut", "cut.py") and "--normalize-only" not in c[2])
+    assert cut_norm_idx < validate_idx < cut_full_idx

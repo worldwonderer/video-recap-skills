@@ -26,6 +26,87 @@ def test_lint_mapped_narration_flags_dropped_and_sparse():
     assert healthy["warnings"] == []
 
 
+def test_lint_mapped_narration_blocking_and_clamped_flags():
+    """Step 4: heavy drop/sparse output is BLOCKING; clamped-but-kept beats are surfaced
+    (advisory, not blocking)."""
+    sparse = [{"start": 5.0, "end": 8.0, "narration": "一。"}, {"start": 50.0, "end": 53.0, "narration": "二。"}]
+    assert lint_mapped_narration(sparse, original_count=8, output_duration=60.0)["blocking"] is True
+
+    dense = [{"start": float(i * 6), "end": float(i * 6 + 4), "narration": "一句。"} for i in range(10)]
+    assert lint_mapped_narration(dense, original_count=10, output_duration=60.0)["blocking"] is False
+
+    clamped = [{"start": 0.0, "end": 4.0, "narration": "一。", "clamped": True},
+               {"start": 5.0, "end": 9.0, "narration": "二。", "clamped": False}]
+    rep = lint_mapped_narration(clamped, original_count=2, output_duration=12.0)
+    assert rep["clamped_count"] == 1
+    assert any(w["code"] == "clamped_beats" for w in rep["warnings"])
+    assert rep["blocking"] is False  # clamp alone (no drop/sparse) does not block
+
+
+def test_map_narration_to_clips_tags_clamped_beats():
+    """Step 4: a beat trimmed to a clip edge is tagged clamped (its text may describe cut footage)."""
+    plan = {"clips": [{"clip_id": 0, "source_start": 10.0, "source_end": 20.0,
+                       "output_start": 0.0, "output_end": 10.0}]}
+    mapped = map_narration_to_clips([
+        {"start": 12.0, "end": 18.0, "narration": "完全在片段内。"},   # not clamped
+        {"start": 15.0, "end": 22.0, "narration": "尾巴越界被裁。"},   # mid 18.5 in clip, end 22>20 -> clamped to 20
+    ], plan)
+    by_text = {m["narration"]: m for m in mapped}
+    assert by_text["完全在片段内。"]["clamped"] is False
+    assert by_text["尾巴越界被裁。"]["clamped"] is True
+
+
+def test_cut_main_normalize_only_writes_validated_plan_without_render(monkeypatch, tmp_path):
+    """Step 4: --normalize-only writes clip_plan_validated.json and skips the render/map."""
+    import sys
+    import json as _json
+    import cut
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"v")
+    (tmp_path / "clip_plan.json").write_text('{"clips":[{"start":10.0,"end":20.0}]}', encoding="utf-8")
+    monkeypatch.setattr("cut.get_video_duration", lambda p: 30.0)
+    rendered = []
+    monkeypatch.setattr("cut.build_edited_source_video", lambda *a, **k: rendered.append(1))
+    monkeypatch.setattr(sys, "argv", ["cut.py", str(video), "--work-dir", str(tmp_path), "--normalize-only"])
+
+    cut.main()
+
+    validated = _json.loads((tmp_path / "clip_plan_validated.json").read_text(encoding="utf-8"))
+    assert validated["clips"]
+    assert rendered == []                                   # no render in normalize-only
+    assert not (tmp_path / "edited_source.mp4").exists()
+
+
+def test_cut_main_blocks_on_heavy_drop_unless_allow_sparse(monkeypatch, tmp_path):
+    """Step 4: a cut whose narration mostly falls outside the kept clips FAILS the preflight
+    (before TTS), unless --allow-sparse-cut is given."""
+    import sys
+    import json as _json
+    import pytest as _pytest
+    import cut
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"v")
+    (tmp_path / "clip_plan.json").write_text('{"clips":[{"start":10.0,"end":20.0}]}', encoding="utf-8")
+    (tmp_path / "narration.json").write_text(_json.dumps([
+        {"start": 12.0, "end": 15.0, "narration": "片段内。"},
+        {"start": 100.0, "end": 103.0, "narration": "片段外一。"},
+        {"start": 110.0, "end": 113.0, "narration": "片段外二。"},
+        {"start": 120.0, "end": 123.0, "narration": "片段外三。"},
+    ]), encoding="utf-8")
+    monkeypatch.setattr("cut.get_video_duration", lambda p: 200.0)
+    monkeypatch.setattr("cut.should_reuse_edited_source", lambda *a, **k: False)
+    monkeypatch.setattr("cut.build_edited_source_video",
+                        lambda *a, **k: (tmp_path / "edited_source.mp4").write_bytes(b"e"))
+    base = ["cut.py", str(video), "--work-dir", str(tmp_path)]
+
+    monkeypatch.setattr(sys, "argv", base)
+    with _pytest.raises(SystemExit):
+        cut.main()
+
+    monkeypatch.setattr(sys, "argv", base + ["--allow-sparse-cut"])
+    cut.main()  # override -> must not raise
+
+
 def test_parse_duration_seconds_accepts_common_forms():
     assert parse_duration_seconds("600") == 600
     assert parse_duration_seconds("10m") == 600

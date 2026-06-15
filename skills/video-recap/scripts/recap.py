@@ -133,6 +133,8 @@ def _continuation_command(video, work_dir, args):
         parts += ["--edit-mode", args.edit_mode]
     if args.target_duration:
         parts += ["--target-duration", args.target_duration]
+    if getattr(args, "allow_sparse_cut", False):
+        parts.append("--allow-sparse-cut")
     if args.skip_asr:
         parts.append("--skip-asr")
     if args.mimo_video_overview:
@@ -167,6 +169,8 @@ def main():
     ap.add_argument("--style", default="纪录片")
     ap.add_argument("--edit-mode", default=os.environ.get("EDIT_MODE", "full"), choices=["full", "cut"])
     ap.add_argument("--target-duration", default=os.environ.get("TARGET_DURATION") or None)
+    ap.add_argument("--allow-sparse-cut", action="store_true",
+                    help="cut mode: accept a sparse/heavily-dropped narration mapping instead of failing the cut preflight")
     ap.add_argument("--skip-asr", action="store_true")
     ap.add_argument("--mimo-video-overview", action="store_true")
     ap.add_argument("--consolidate", action=argparse.BooleanOptionalAction, default=True,
@@ -244,12 +248,22 @@ def main():
             "请使用新的 --work-dir，或删除旧产物后重新运行 Phase A。\n"
             f"  - {details}"
         )
+    if cut:
+        # Normalize the clip plan FIRST (cheap, no render) so validate lints the SAME
+        # padded/pruned clips the mapper uses — otherwise validate sees the raw plan and
+        # can pass a beat the mapper later silently drops.
+        ncargs = [str(video), "--work-dir", str(work_dir), "--normalize-only"]
+        if args.target_duration:
+            ncargs += ["--target-duration", args.target_duration]
+        _run("video-cut", "cut.py", *ncargs)
     _run("video-script", "validate.py", "--work-dir", work_dir, "--mode", args.edit_mode)
     assemble_video_path = video
     if cut:
         cargs = [str(video), "--work-dir", str(work_dir)]
         if args.target_duration:
             cargs += ["--target-duration", args.target_duration]
+        if args.allow_sparse_cut:
+            cargs.append("--allow-sparse-cut")
         _run("video-cut", "cut.py", *cargs)
         assemble_video_path = work_dir / "edited_source.mp4"
 
