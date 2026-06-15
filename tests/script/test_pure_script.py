@@ -366,6 +366,22 @@ def test_build_agent_brief_storyless_rich_video_relaxes_and_prompts_research(mon
     assert "segments/min (minimum" not in text           # strict quota line suppressed
 
 
+def test_build_agent_brief_rich_density_is_a_guide_not_quota(monkeypatch, tmp_path):
+    """Step 1: even with RICH substrate, density is framed as a GUIDE, not a hard quota,
+    so the writer never pads with pixel-filler just to hit a beat count."""
+    monkeypatch.setitem(CONFIG, "edit_mode", "full")
+    monkeypatch.setitem(CONFIG, "target_duration", "")
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    scenes = [{"scene_id": i, "start": float(i * 6), "end": float(i * 6 + 6),
+               "description": "范闲在书房翻看卷宗神色凝重", "frame_facts": {str(i * 6): ["翻书"]}} for i in range(6)]
+    asr = [{"start": 1.0, "end": 5.0, "text": "对" * 250}]  # >= 200 chars -> a real story spine -> rich
+    assert assess_understanding_substrate(scenes, asr)["level"] == "rich"
+    text = build_agent_brief(scenes, asr, [], 36.0, tmp_path).read_text(encoding="utf-8")
+    assert "a GUIDE, not a quota" in text
+    assert "never pad with" in text
+    assert "Narration density target:" not in text  # the old hard-quota phrasing is gone
+
+
 def test_cut_validate_prefers_raw_plan_when_validated_is_stale(tmp_path):
     import sys
     import importlib.util

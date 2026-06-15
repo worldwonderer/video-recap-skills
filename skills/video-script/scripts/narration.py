@@ -547,7 +547,7 @@ def lint_narration(narration, scenes_analysis=None, *, clip_plan=None, mode="ful
         if spm and spm < min_spm:
             warnings.append(_lint_issue(
                 "warning", None, "low_density",
-                "Narration density is below the continuous-bed target; add more short beats",
+                "Narration density is below the continuous-bed guide; add beats only where they add meaning, never filler",
                 segments_per_minute=round(spm, 2), min_segments_per_minute=min_spm,
                 target_segments_per_minute=target_spm,
             ))
@@ -1387,7 +1387,9 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         )
     else:
         lines.append(
-            f"- Narration density target: ~{target_spm:.1f} segments/min (minimum {min_spm:.1f}); no gap longer than {max_gap:.0f}s"
+            f"- Narration density: aim for ~{target_spm:.1f} beats/min for the continuous-bed feel "
+            f"(min ~{min_spm:.1f}, no silent gap over {max_gap:.0f}s) — a GUIDE, not a quota: never pad with "
+            f"filler or pixel-description to hit a number; a meaningful beat beats a filler beat."
         )
     if edit_mode == "cut":
         lines.append(
