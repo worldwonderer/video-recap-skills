@@ -2,5 +2,5 @@
   "name": "video-recap-skills",
   "version": "0.1.0",
   "description": "Turn any video into a Chinese-narration recap on ffmpeg + one Xiaomi MiMo API key: understanding (ASR + VLM) -> narration -> cut -> voiceover -> assemble. A bundle of independent skills + a thin orchestrator. Runs on macOS, Linux, and Windows.",
-  "author": "PiteChen"
+  "author": { "name": "PiteChen" }
 }
