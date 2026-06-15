@@ -403,7 +403,7 @@ def _mimo_endpoint(kind):
         "api_key_source": CONFIG.get(src_key, "MIMO_API_KEY"),
     }
 
-def _call_mimo_endpoint(kind, payload, max_retries=5):
+def _call_mimo_endpoint(kind, payload, max_retries=10):
     settings = _mimo_endpoint(kind)
     return api_call(
         payload,
@@ -414,20 +414,25 @@ def _call_mimo_endpoint(kind, payload, max_retries=5):
         api_key_source=settings["api_key_source"],
     )
 
-def mimo_video_api_call(payload, max_retries=5):
+def mimo_video_api_call(payload, max_retries=10):
     """Call the MiMo video-understanding endpoint."""
     return _call_mimo_endpoint("video", payload, max_retries=max_retries)
 
-def mimo_tts_api_call(payload, max_retries=5):
+def mimo_tts_api_call(payload, max_retries=10):
     """Call the MiMo TTS endpoint."""
     return _call_mimo_endpoint("tts", payload, max_retries=max_retries)
 
-def mimo_asr_api_call(payload, max_retries=5):
+def mimo_asr_api_call(payload, max_retries=10):
     """Call the MiMo speech-recognition (ASR) endpoint."""
     return _call_mimo_endpoint("asr", payload, max_retries=max_retries)
 
-def api_call(payload, max_retries=5, *, api_provider=None, api_url=None, api_key=None, api_key_source=None):
-    """调用 OpenAI-compatible API，带重试"""
+def api_call(payload, max_retries=8, *, api_provider=None, api_url=None, api_key=None, api_key_source=None):
+    """调用 OpenAI-compatible API，带重试。
+
+    长视频理解会发出数百次 VLM/ASR 调用，集群的 429 限流是常态而非错误，所以重试更耐心
+    （更多次数 + 退避封顶 60s + 遵从 Retry-After），避免一次瞬时限流就中止整段理解。
+    集群的配额窗口常以分钟计，所以 429 在没有 Retry-After 时也至少等 10s，给窗口时间复位。
+    """
     endpoint = normalize_api_url(api_url if api_url is not None else CONFIG["api_url"])
     headers = _api_headers(api_provider=api_provider, api_url=endpoint, api_key=api_key)
     data = json.dumps(_prepare_api_payload(payload, api_provider=api_provider, api_url=endpoint)).encode("utf-8")
@@ -440,10 +445,10 @@ def api_call(payload, max_retries=5, *, api_provider=None, api_url=None, api_key
                 return result
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")[:500]
-            wait = 2 ** attempt
+            wait = min(2 ** attempt, 60)
             if e.code == 429:
                 retry_after = e.headers.get("Retry-After")
-                wait = _retry_after_seconds(retry_after, wait)
+                wait = _retry_after_seconds(retry_after, max(wait, 10))
                 log(f"API 速率限制 (尝试 {attempt+1}/{max_retries}), 等待 {wait}s")
             elif e.code == 401:
                 key_name = api_key_source or CONFIG.get("api_key_source", "MIMO_API_KEY")
@@ -470,7 +475,7 @@ def api_call(payload, max_retries=5, *, api_provider=None, api_url=None, api_key
             else:
                 raise RuntimeError(f"API 调用失败 {max_retries} 次: HTTP {e.code} — {body}")
         except (urllib.error.URLError, Exception) as e:
-            wait = 2 ** attempt
+            wait = min(2 ** attempt, 60)
             log(f"API 调用失败 (尝试 {attempt+1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
                 log(f"等待 {wait}s 后重试...")

@@ -1,5 +1,7 @@
 import base64
 import json
+import os
+import time
 from pathlib import Path
 
 from lib import CONFIG
@@ -122,9 +124,16 @@ def _segment_and_transcribe(audio_wav, segments_dir, total_duration, segment_len
     """分段转录长音频"""
     if segment_length is None:
         segment_length = max(5, int(CONFIG.get("asr_segment_seconds", 30) or 30))
+    # 长视频 ASR 是顺序调用；可选节流让调用间隔开，降低踩到集群限流的频率（默认 0=不节流）
+    try:
+        throttle = max(0.0, float(os.environ.get("ASR_THROTTLE_SECONDS", "0") or 0))
+    except ValueError:
+        throttle = 0.0
     results = []
 
     for i, start in enumerate(range(0, int(total_duration), segment_length)):
+        if throttle and i:
+            time.sleep(throttle)
         end = min(start + segment_length, total_duration)
         seg_wav = segments_dir / f"seg_{i:03d}.wav"
 
