@@ -178,6 +178,7 @@ def test_resolve_final_output_overwrites_stable_alias(tmp_path):
 
 
 def test_source_subtitle_mask_filter_toggles_with_config(monkeypatch):
+    monkeypatch.setitem(CONFIG, "burn_subtitles", False)  # isolate the raw ratio from the 2-line band
     monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)
     assert _source_subtitle_mask_filter() is None
 
@@ -188,6 +189,27 @@ def test_source_subtitle_mask_filter_toggles_with_config(monkeypatch):
 
     monkeypatch.setitem(CONFIG, "source_subtitle_mask_ratio", 0.0)  # ratio 0 -> no mask
     assert _source_subtitle_mask_filter() is None
+
+
+def test_mask_band_grows_to_cover_two_line_burned_subtitle(monkeypatch):
+    """Bug: a wrapped 2-line subtitle spilled above the 14% mask band onto the picture.
+    When burning, the band must be tall enough to sit behind the whole 2-line block."""
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", True)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_ratio", 0.14)
+    monkeypatch.setitem(CONFIG, "subtitle_font_size", 42)
+    monkeypatch.setitem(CONFIG, "subtitle_margin_v", 30)
+    monkeypatch.setitem(CONFIG, "subtitle_play_res_y", 720)
+    # burning -> band covers margin_v + 2 lines, larger than the raw 0.14
+    monkeypatch.setitem(CONFIG, "burn_subtitles", True)
+    import re
+    ratio_on = float(re.search(r"ih-ih\*([0-9.]+)", _source_subtitle_mask_filter()).group(1))
+    expected = (30 + 2 * 42 * 1.25 + 12) / 720
+    assert ratio_on >= 0.18, ratio_on
+    assert abs(ratio_on - expected) < 0.01, (ratio_on, expected)
+    # not burning -> stays at the raw 0.14
+    monkeypatch.setitem(CONFIG, "burn_subtitles", False)
+    ratio_off = float(re.search(r"ih-ih\*([0-9.]+)", _source_subtitle_mask_filter()).group(1))
+    assert abs(ratio_off - 0.14) < 0.001, ratio_off
 
 
 def test_apply_narration_speed_atempos_each_segment(monkeypatch, tmp_path):

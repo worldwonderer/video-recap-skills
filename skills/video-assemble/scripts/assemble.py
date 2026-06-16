@@ -249,7 +249,7 @@ def _subtitle_style_config():
         "alignment": CONFIG.get("subtitle_alignment", 2),
         "margin_l": CONFIG.get("subtitle_margin_l", 40),
         "margin_r": CONFIG.get("subtitle_margin_r", 40),
-        "margin_v": CONFIG.get("subtitle_margin_v", 48),
+        "margin_v": CONFIG.get("subtitle_margin_v", 30),
         "max_chars": CONFIG.get("subtitle_max_chars", 20),
         "play_res_x": CONFIG.get("subtitle_play_res_x", 1280),
         "play_res_y": CONFIG.get("subtitle_play_res_y", 720),
@@ -486,6 +486,15 @@ def _source_subtitle_mask_filter():
     if not CONFIG.get("mask_source_subtitles", False):
         return None
     ratio = max(0.0, min(0.5, float(CONFIG.get("source_subtitle_mask_ratio", 0.14) or 0.0)))
+    # When we burn our OWN subtitle (which can wrap to 2 lines), the band must be tall enough to
+    # sit behind the whole block — otherwise a wrapped second line spills above the bar onto the
+    # picture. Size the band to the subtitle geometry (margin_v + 2 lines) and take the larger.
+    if CONFIG.get("burn_subtitles", False):
+        style = _subtitle_style_config()
+        play_res_y = max(1.0, float(style["play_res_y"]))
+        line_h = float(style["font_size"]) * 1.25
+        sub_band = (float(style["margin_v"]) + 2.0 * line_h + 12.0) / play_res_y
+        ratio = min(0.5, max(ratio, sub_band))
     if ratio <= 0:
         return None
     return f"drawbox=x=0:y=ih-ih*{ratio:.3f}:w=iw:h=ih*{ratio:.3f}:color=black@1.0:t=fill"

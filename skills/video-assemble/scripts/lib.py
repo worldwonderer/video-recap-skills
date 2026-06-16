@@ -184,7 +184,7 @@ CONFIG = {
     # 生成解说时使用 speech_rate * safety_margin 作为约束
     "speech_rate": 3.5,
     "speech_safety_margin": 0.85,  # 保守系数：TTS 实际语速有 ±20% 波动
-    "fade_ms": 300,  # TTS fade-in/fade-out 时长(ms)
+    "fade_ms": env_int("FADE_MS", 120, minimum=0),  # 每段 TTS 淡入淡出(ms)；过大会让紧凑的句子一顿一顿，120ms 防爆音又不发闷
     "breath_ms": 250,  # 段间呼吸空间(ms)；连续原声铺底风格用短停顿保持节奏
     # 解说密度目标（连续原声铺底的高密度 recap 风格；写入 brief 并由 lint 检查）
     "target_segments_per_minute": 9.6,   # 目标解说密度（段/分钟）
@@ -218,7 +218,7 @@ CONFIG = {
     "narration_tighten": env_bool("NARRATION_TIGHTEN", True),  # 段落内把句子紧贴上一句实际收尾播放，句间间隔稳定≤tight_pause，杜绝"一句解说一段空白"的卡顿
     "narration_run_gap_seconds": env_float("NARRATION_RUN_GAP_SECONDS", 1.6, minimum=0.0),  # 作者留白超过此值=新段落（让精彩原声透出）；小于则视为同一连续段落
     "narration_tight_pause_seconds": env_float("NARRATION_TIGHT_PAUSE_SECONDS", 0.35, minimum=0.0),  # 段落内句间固定间隔(秒)
-    "narration_max_pull_seconds": env_float("NARRATION_MAX_PULL_SECONDS", 2.5, minimum=0.0),  # 收紧时一句最多比作者标注提前的秒数（漂移上限，防脱节）
+    "narration_max_pull_seconds": env_float("NARRATION_MAX_PULL_SECONDS", 1.2, minimum=0.0),  # 收紧时一句最多比作者标注提前的秒数（漂移上限，越小越贴画面）
     "narration_tail_pad_seconds": 0.1,  # 解说尾部最少留白；短 slot 会自动压低 delay 避免截断
     "quiet_overlap_min_ratio": 0.8,  # 解说段至少多少比例落在安静窗口内才标记为非对白重叠
     "visual_beat_max_seconds": 18.0,  # 单段解说超过该时长且跨多个帧锚点时给 lint 提醒
