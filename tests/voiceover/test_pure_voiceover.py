@@ -60,6 +60,42 @@ def test_synthesize_segment_reuses_only_matching_cache(monkeypatch, tmp_path):
     assert (tts_dir / "narr_000.wav").read_text(encoding="utf-8") == "audio:第二版。"
 
 
+def test_synthesize_segment_block_truncation_accounts_for_narration_speed(monkeypatch, tmp_path):
+    # assemble speeds every segment up by narration_speed before placement, so the slot holds
+    # raw_dur / narration_speed. A block whose RAW tts overflows the slot but fits after the 1.3x
+    # speedup must NOT be truncated; only a block that overflows even then is trimmed.
+    monkeypatch.setitem(CONFIG, "tts_dynamic_params", False)
+    monkeypatch.setitem(CONFIG, "narration_speed", 1.3)
+    monkeypatch.setitem(CONFIG, "mimo_tts_model", "mimo-v2.5-tts")
+    calls = []
+
+    def fake_run_tts(engine, text, output_wav, rate="+0%", pitch="+0Hz", emotion=None):
+        calls.append(text)
+        output_wav.write_text(text, encoding="utf-8")
+
+    monkeypatch.setattr("voiceover._run_tts_engine", fake_run_tts)
+    monkeypatch.setattr("voiceover._get_audio_duration",
+                        lambda p: len(Path(p).read_text(encoding="utf-8")) * 0.3 if Path(p).exists() else 0.0)
+    tts_dir = tmp_path / "tts_segments"
+    tts_dir.mkdir()
+
+    # slot 12s, pause 0.2s -> available 11.8s; raw budget = 11.8 * 1.3 * 1.2 ≈ 18.4s.
+    # 50-char block -> raw 15s: over the old 14.2s (available*1.2) budget, but fits the speed-aware one.
+    block = "情节推进。" * 10
+    res = _synthesize_segment(0, {"start": 0.0, "end": 12.0, "narration": block, "pause_after_ms": 200},
+                              [block], tts_dir, "mimo-tts")
+    assert calls == [block]                       # exactly one TTS call -> NOT truncated
+    assert res["narration"] == block
+
+    # 100-char block -> raw 30s: overflows even after the speedup -> still truncated (two calls).
+    calls.clear()
+    huge = "情节推进。" * 20
+    res2 = _synthesize_segment(1, {"start": 0.0, "end": 12.0, "narration": huge, "pause_after_ms": 200},
+                               [huge], tts_dir, "mimo-tts")
+    assert len(calls) == 2                         # re-synthesized after truncation
+    assert len(res2["narration"]) < len(huge)
+
+
 def test_synthesize_segment_rejects_cache_when_wav_bytes_change(monkeypatch, tmp_path):
     narration = [{"start": 0.0, "end": 2.0, "narration": "第一版。"}]
     tts_dir = tmp_path / "tts_segments"

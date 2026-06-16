@@ -94,10 +94,14 @@ def _synthesize_segment(i, seg, narration, tts_dir, engine):
     seg_slot = seg["end"] - seg["start"]
     seg_pause = seg.get("pause_after_ms", CONFIG.get("breath_ms", 250)) / 1000
     available = max(0.5, seg_slot - seg_pause)
-    atempo_max = 1.2
-    if dur > available * atempo_max and len(text) > 5:
+    # assemble speeds every segment up by narration_speed (global atempo) BEFORE placement, so the
+    # slot actually holds raw_dur / narration_speed; fold that in (plus the local per-segment adjust
+    # headroom atempo_max) or a 1.3x-authored BLOCK gets needlessly truncated into a clipped fragment.
+    narration_speed = float(CONFIG.get("narration_speed", 1.0) or 1.0)
+    raw_budget = available * narration_speed * 1.2
+    if dur > raw_budget and len(text) > 5:
         chars_per_sec = len(text) / dur if dur > 0 else 3.0
-        target_chars = max(5, int(available * atempo_max * chars_per_sec) - 1)
+        target_chars = max(5, int(raw_budget * chars_per_sec) - 1)
         truncated = _truncate_at_sentence(text, target_chars)
         if truncated and len(truncated) >= 5 and truncated != text:
             text = truncated
