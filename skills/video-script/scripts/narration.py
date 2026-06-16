@@ -267,7 +267,10 @@ def _scene_available_seconds(start, end, pause_after_ms=None):
 
 
 def _recommended_char_budget(start, end, pause_after_ms=None):
-    effective_rate = CONFIG["speech_rate"] * CONFIG["speech_safety_margin"]
+    # account for the global narration atempo (CONFIG['narration_speed']) so a beat's text
+    # is budgeted against the FINAL sped-up audio, not the raw TTS rate — otherwise windows
+    # are over-sized and the bed shows long silent gaps between sentences.
+    effective_rate = CONFIG["speech_rate"] * CONFIG["speech_safety_margin"] * float(CONFIG.get("narration_speed", 1.0) or 1.0)
     available = _scene_available_seconds(start, end, pause_after_ms)
     return max(0, int(available * effective_rate))
 
@@ -308,6 +311,10 @@ def _normalise_narration_segment(seg, scenes_analysis=None):
     for optional_key in ("source_start", "source_end", "source_clip_id"):
         if optional_key in seg:
             item[optional_key] = seg[optional_key]
+    # carry the per-beat emotion/tone tag (MiMo TTS instruct) through lint untouched
+    emotion = seg.get("emotion")
+    if isinstance(emotion, str) and emotion.strip():
+        item["emotion"] = emotion.strip()
     if scenes_analysis:
         parent = _find_scene_for_midpoint(scenes_analysis, item["start"], item["end"])
         if parent:
@@ -433,7 +440,10 @@ def lint_narration(narration, scenes_analysis=None, *, clip_plan=None, mode="ful
 
             char_count = _text_char_count(text)
             budget = _recommended_char_budget(start, end, pause)
-            estimated_tts_seconds = char_count / max(CONFIG.get("speech_rate", 3.5), 0.1)
+            # estimate at the REAL playback rate (after the narration_speed atempo); otherwise a
+            # beat sized to its 1.3x-sped slot looks "over budget" when it actually fits.
+            play_rate = max(CONFIG.get("speech_rate", 3.5) * float(CONFIG.get("narration_speed", 1.0) or 1.0), 0.1)
+            estimated_tts_seconds = char_count / play_rate
             slot_seconds = _scene_available_seconds(start, end, pause)
             if budget < 5:
                 warnings.append(_lint_issue(
@@ -441,7 +451,7 @@ def lint_narration(narration, scenes_analysis=None, *, clip_plan=None, mode="ful
                     "Narration slot is very short; TTS may be clipped",
                     start=start, end=end, budget_chars=budget,
                 ))
-            elif char_count > budget:
+            elif estimated_tts_seconds > slot_seconds:
                 warnings.append(_lint_issue(
                     "warning", idx, "over_budget", "Text may exceed the available TTS slot",
                     start=start, end=end, budget_chars=budget, actual_chars=char_count,
@@ -557,6 +567,35 @@ def lint_narration(narration, scenes_analysis=None, *, clip_plan=None, mode="ful
                 "A gap between narration beats exceeds the continuous-bed maximum",
                 max_gap_seconds=round(max_gap, 2), max_gap_limit_seconds=max_gap_limit,
             ))
+
+        # Continuous-bed CLUSTERING: density means tight RUNS of narration, NOT filling the whole
+        # timeline. It is fine to step back and let strong original audio play; what's forbidden is
+        # the stutter — one beat, a silent gap, one beat, a silent gap (解说-空白-解说-空白). Estimate
+        # each beat's spoken end (speech_rate * narration_speed) and flag beats STRANDED by gaps on
+        # BOTH sides, so the agent clusters sentences instead of isolating them.
+        if len(sorted_segments) >= 5:
+            play_rate = CONFIG["speech_rate"] * float(CONFIG.get("narration_speed", 1.0) or 1.0)
+            spoken_ends = [s["start"] + s["char_count"] / play_rate for s in sorted_segments]
+            cb_gap = CONFIG.get("continuous_bed_gap_seconds", 1.0)
+            joins = [sorted_segments[i + 1]["start"] - spoken_ends[i] for i in range(len(sorted_segments) - 1)]
+            runs = 1 + sum(1 for g in joins if g > cb_gap)   # number of tight narration clusters
+            stranded = 0
+            for i in range(1, len(sorted_segments) - 1):     # edges can sit next to a deliberate pause
+                if joins[i - 1] > cb_gap and joins[i] > cb_gap:
+                    stranded += 1
+            stranded_ratio = stranded / len(sorted_segments)
+            metrics["narration_runs"] = runs
+            metrics["avg_run_length"] = round(len(sorted_segments) / runs, 2)
+            metrics["stranded_beats"] = stranded
+            if stranded_ratio > 0.3:
+                warnings.append(_lint_issue(
+                    "warning", None, "choppy_narration",
+                    "Narration is choppy — too many lone beats stranded by silent gaps (解说-空白-解说). "
+                    "Cluster sentences into tight runs (<=1s apart within a run); leave the original audio "
+                    "room only at a genuinely strong moment, never between every sentence",
+                    stranded_beats=stranded, segment_count=len(sorted_segments),
+                    continuous_bed_gap_seconds=cb_gap,
+                ))
 
     report = {
         "ok": not errors,
@@ -1367,7 +1406,10 @@ def _format_output_clip_list(work_dir):
 
 def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_duration, work_dir, style="纪录片", *, mimo_overview_enabled=None, mimo_overview_video_path=None):
     """Write a compact brief that tells the agent exactly how to author recap artifacts."""
-    effective_rate = CONFIG["speech_rate"] * CONFIG["speech_safety_margin"]
+    # account for the global narration atempo (CONFIG['narration_speed']) so a beat's text
+    # is budgeted against the FINAL sped-up audio, not the raw TTS rate — otherwise windows
+    # are over-sized and the bed shows long silent gaps between sentences.
+    effective_rate = CONFIG["speech_rate"] * CONFIG["speech_safety_margin"] * float(CONFIG.get("narration_speed", 1.0) or 1.0)
     breath_sec = CONFIG.get("breath_ms", 250) / 1000
     target_pause_ms = CONFIG.get("breath_ms", 250)
     target_spm = CONFIG.get("target_segments_per_minute", 9.6)
@@ -1415,6 +1457,14 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
             f"- Narration density: aim for ~{target_spm:.1f} beats/min for the continuous-bed feel "
             f"(min ~{min_spm:.1f}, no silent gap over {max_gap:.0f}s) — a GUIDE, not a quota: never pad with "
             f"filler or pixel-description to hit a number; a meaningful beat beats a filler beat."
+        )
+        lines.append(
+            "- Density = TIGHT RUNS, not wall-to-wall talk. WITHIN a stretch of narration keep sentences "
+            "nearly back-to-back (≤ ~1s apart): size each beat's window to its own text (chars / the speech "
+            "budget above) and start the next beat right after it. You MAY pull back and let the original "
+            "audio breathe at a genuinely strong moment — a key line, a big action beat, the music. What is "
+            "FORBIDDEN is the stutter: one sentence, a silent gap, one sentence, a silent gap — never strand "
+            "single beats with gaps on both sides."
         )
     if edit_mode == "cut":
         lines.append(
@@ -1495,7 +1545,7 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
                 "",
                 "```json",
                 "[",
-                "  {\"start\": 2.0, \"end\": 7.0, \"narration\": \"解说文本。\", \"pause_after_ms\": 250, \"overlaps_speech\": true}",
+                "  {\"start\": 2.0, \"end\": 7.0, \"narration\": \"解说文本。\", \"pause_after_ms\": 250, \"overlaps_speech\": true, \"emotion\": \"紧张\"}",
                 "]",
                 "```",
             ])
@@ -1505,7 +1555,7 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
             "",
             "```json",
             "[",
-            "  {\"start\": 5.0, \"end\": 10.0, \"narration\": \"解说文本。\", \"pause_after_ms\": 250, \"overlaps_speech\": true}",
+            "  {\"start\": 5.0, \"end\": 10.0, \"narration\": \"解说文本。\", \"pause_after_ms\": 250, \"overlaps_speech\": true, \"emotion\": \"平静\"}",
             "]",
             "```",
         ])
@@ -1521,7 +1571,16 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         "5. Do not describe what the viewer can already see; explain intent, stakes, subtext, relationships, and story logic.",
         "6. Keep timing visually local: if one line spans many frame-fact timestamps, split it or tighten start/end around the pictured beat.",
         "7. In cut mode, select clips for plot causality, key dialogue, reveals, and emotional turns; avoid filler and repeated shots.",
-        "8. After writing, run: `python3 skills/video-recap/scripts/recap.py <video> --work-dir <work_dir>`.",
+        "8. Give EVERY beat an `emotion` (MiMo TTS reads it as the delivery — flat narration sounds robotic). Match the beat's stakes: a reveal is 惊讶/震惊, a threat 紧张/深沉, a loss 悲伤/怅然, a quip 俏皮, calm setup 平静. Vary it across beats so the read breathes; the hook and the payoff should NOT sound the same.",
+        "9. After writing, run: `python3 skills/video-recap/scripts/recap.py <video> --work-dir <work_dir>`.",
+        "",
+        "## Per-beat emotion (`emotion` field → MiMo TTS instruct)",
+        "",
+        "Each beat's `emotion` is a short Chinese tone tag MiMo-v2.5-tts follows. Pick 1-2 that fit the beat:",
+        "- 基础情绪: 开心 悲伤 愤怒 恐惧 惊讶 兴奋 委屈 平静 冷漠",
+        "- 复合情绪: 怅然 欣慰 无奈 愧疚 释然 嫉妒 厌倦 忐忑 动情",
+        "- 整体语调: 温柔 高冷 活泼 严肃 慵懒 俏皮 深沉 干练 凌厉",
+        "You may combine, e.g. \"紧张 深沉\" or \"无奈\". Default to 平静 only for neutral setup; a recap mostly lives in 紧张/深沉/惊讶/悲伤/动情.",
         "",
         "## Recap craft (what separates a real recap from captions)",
         "",

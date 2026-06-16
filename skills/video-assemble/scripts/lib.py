@@ -211,7 +211,7 @@ CONFIG = {
     "jianying_bundle_media": env_bool("JIANYING_BUNDLE_MEDIA", True),  # 默认开：macOS 剪映沙箱读不到外部路径，须把素材拷进草稿目录
     "bgm_volume": env_float("BGM_VOLUME", 0.18, minimum=0.0),  # BGM 铺底音量
     "bgm_ducking_volume": env_float("BGM_DUCKING_VOLUME", 0.10, minimum=0.0),  # 旁白时 BGM 压低到的音量
-    "narration_speed": env_float("NARRATION_SPEED", 1.2, minimum=0.5),  # 解说整体提速(atempo)，默认偏快适配短视频；长片可设 1.0
+    "narration_speed": env_float("NARRATION_SPEED", 1.3, minimum=0.5),  # 解说整体提速(atempo)，默认偏快适配短视频；长片可设 1.0
     "mask_source_subtitles": env_bool("MASK_SOURCE_SUBTITLES", True),  # 遮挡原片烧录字幕（默认开；无烧录字幕素材设 false）
     "source_subtitle_mask_ratio": env_float("SOURCE_SUBTITLE_MASK_RATIO", 0.14, minimum=0.0),  # 底部遮挡比例
     "narration_delay_seconds": 1.5,  # 解说延迟放置秒数，让画面先出现再解说
@@ -249,7 +249,7 @@ CONFIG = {
     "clip_padding": env_float("CLIP_PADDING", 0.0, minimum=0.0),  # cut 模式片段两端扩展秒数
     "clip_padding_source": "env" if os.environ.get("CLIP_PADDING") else "default",
     "allow_clip_overlap": env_bool("ALLOW_CLIP_OVERLAP", False),  # cut 模式是否允许重复/重叠使用原片
-    "burn_subtitles": False,  # 烧录字幕到视频（需要重编码）
+    "burn_subtitles": env_bool("BURN_SUBTITLES", True),  # 烧录解说字幕（默认开；遮挡原字幕后需自带字幕，否则字幕区空白）
     "force_video_reencode": env_bool("FORCE_VIDEO_REENCODE", False),  # 组装时重编码视频，修复部分容器时间戳问题
     # 成片末端整体响度归一（默认混音偏轻，归一后更接近常见短视频响度；样片约 -11.9，默认取更安全的 -14）
     "final_loudnorm": env_bool("FINAL_LOUDNORM", True),  # 组装末端做一次整体响度归一

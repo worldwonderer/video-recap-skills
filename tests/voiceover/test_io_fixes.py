@@ -28,7 +28,7 @@ def test_run_tts_engine_retries_then_raises_and_cleans_partial(monkeypatch, tmp_
     output.write_bytes(b"stale-partial")
     calls = []
 
-    def boom(text, path, rate="+0%", pitch="+0Hz"):
+    def boom(text, path, rate="+0%", pitch="+0Hz", emotion=None):
         calls.append(1)
         raise RuntimeError("mimo down")
 

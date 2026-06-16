@@ -991,7 +991,8 @@ def main():
     ap.add_argument("--tts-meta", default=None, help="tts_meta.json (default: <work-dir>/tts_meta.json)")
     ap.add_argument("--recap-stem", default=None, help="final recap filename stem (default: video stem)")
     ap.add_argument("--output-dir", default=None)
-    ap.add_argument("--burn-subtitles", action="store_true")
+    ap.add_argument("--burn-subtitles", action=argparse.BooleanOptionalAction, default=None,
+                    help="burn narration subtitles into the video (default on; --no-burn-subtitles to disable)")
     ap.add_argument("--source-video", default=None,
                     help="original source video (cut mode) so timeline.json / 剪映 export reference the real clips")
     ap.add_argument("--export-jianying", action="store_true",
@@ -1003,8 +1004,8 @@ def main():
                     help="do NOT copy media into the draft — reference in place (only if 剪映 can read those paths; macOS 剪映 usually cannot)")
     args = ap.parse_args()
     work_dir = Path(args.work_dir)
-    if args.burn_subtitles:
-        CONFIG["burn_subtitles"] = True
+    if args.burn_subtitles is not None:
+        CONFIG["burn_subtitles"] = args.burn_subtitles
     if args.source_video:
         CONFIG["source_video"] = args.source_video
         CONFIG["source_video_explicit"] = True

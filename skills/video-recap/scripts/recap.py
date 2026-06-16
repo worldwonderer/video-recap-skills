@@ -182,8 +182,8 @@ def _continuation_command(video, work_dir, args):
         parts += ["--mimo-tts-voice", args.mimo_tts_voice]
     if getattr(args, "allow_partial_tts", False):
         parts.append("--allow-partial-tts")
-    if getattr(args, "burn_subtitles", False):
-        parts.append("--burn-subtitles")
+    if getattr(args, "burn_subtitles", None) is not None:
+        parts.append("--burn-subtitles" if args.burn_subtitles else "--no-burn-subtitles")
     if getattr(args, "output_dir", None):
         parts += ["--output-dir", args.output_dir]
     if getattr(args, "export_jianying", False):
@@ -214,7 +214,8 @@ def main():
     ap.add_argument("--mimo-tts-voice", default=None, help="MiMo TTS voice")
     ap.add_argument("--allow-partial-tts", action="store_true",
                     help="allow video-voiceover to continue when some narration segments fail TTS")
-    ap.add_argument("--burn-subtitles", action="store_true")
+    ap.add_argument("--burn-subtitles", action=argparse.BooleanOptionalAction, default=None,
+                    help="burn narration subtitles into the video (default on; --no-burn-subtitles to disable)")
     ap.add_argument("--output-dir", default=None)
     ap.add_argument("--export-jianying", action="store_true",
                     help="also export an OPTIONAL 剪映/JianYing draft (decoupled; never required)")
@@ -333,8 +334,8 @@ def main():
     aargs = [str(assemble_video_path), "--work-dir", str(work_dir), "--recap-stem", video.stem]
     if args.output_dir:
         aargs += ["--output-dir", args.output_dir]
-    if args.burn_subtitles:
-        aargs.append("--burn-subtitles")
+    if args.burn_subtitles is not None:
+        aargs.append("--burn-subtitles" if args.burn_subtitles else "--no-burn-subtitles")
     if cut:
         # let the timeline / 剪映 export reference the original clips, not edited_source.mp4
         aargs += ["--source-video", str(video)]

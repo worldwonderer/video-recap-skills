@@ -106,6 +106,39 @@ def test_lint_narration_density_metrics_and_warnings(monkeypatch):
     assert cut_report["metrics"] == {}
 
 
+def test_lint_flags_choppy_stranded_narration(tmp_path, monkeypatch):
+    # The forbidden pattern: one short beat, a silent gap, one beat, a gap... (解说-空白-解说).
+    # beats/min can look fine, but every sentence is stranded -> choppy_narration must fire.
+    monkeypatch.setitem(CONFIG, "speech_rate", 3.5)
+    monkeypatch.setitem(CONFIG, "narration_speed", 1.3)
+    segs = [{"start": i * 5.0, "end": i * 5.0 + 1.6, "narration": "一句解说。"} for i in range(8)]
+    report = lint_narration(segs, mode="full", work_dir=tmp_path)
+    codes = {w["code"] for w in report["warnings"]}
+    assert "choppy_narration" in codes
+    assert report["metrics"]["stranded_beats"] >= 4
+
+
+def test_lint_accepts_tight_runs_with_intentional_pause(monkeypatch):
+    # Two tight back-to-back runs with ONE deliberate pause between them (great original audio)
+    # is the GOOD shape -> NOT choppy, even though there is a long silent stretch.
+    monkeypatch.setitem(CONFIG, "speech_rate", 3.5)
+    monkeypatch.setitem(CONFIG, "speech_safety_margin", 0.85)
+    monkeypatch.setitem(CONFIG, "narration_speed", 1.3)
+    rate = 3.5 * 0.85 * 1.3
+    segs = []
+    for run_start in (0.0, 40.0):                 # two clusters, ~25s apart
+        t = run_start
+        for _ in range(5):
+            txt = "这是一句连续紧凑的解说词。"
+            end = t + sum(1 for c in txt if c not in "，。") / rate
+            segs.append({"start": round(t, 2), "end": round(end, 2), "narration": txt})
+            t = end
+    report = lint_narration(segs, mode="full")
+    codes = {w["code"] for w in report["warnings"]}
+    assert "choppy_narration" not in codes
+    assert report["metrics"]["narration_runs"] == 2
+
+
 def test_build_agent_brief_cut_mode_sizes_to_output(monkeypatch, tmp_path):
     """Cut mode must size the beat target to the OUTPUT length, not the source.
 

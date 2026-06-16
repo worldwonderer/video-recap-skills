@@ -36,7 +36,7 @@ def test_synthesize_segment_reuses_only_matching_cache(monkeypatch, tmp_path):
     tts_dir.mkdir()
     calls = []
 
-    def fake_run_tts(engine, text, output_wav, rate="+0%", pitch="+0Hz"):
+    def fake_run_tts(engine, text, output_wav, rate="+0%", pitch="+0Hz", emotion=None):
         calls.append(text)
         output_wav.write_bytes(f"audio:{text}".encode("utf-8"))
 
@@ -66,7 +66,7 @@ def test_synthesize_segment_rejects_cache_when_wav_bytes_change(monkeypatch, tmp
     tts_dir.mkdir()
     calls = []
 
-    def fake_run_tts(engine, text, output_wav, rate="+0%", pitch="+0Hz"):
+    def fake_run_tts(engine, text, output_wav, rate="+0%", pitch="+0Hz", emotion=None):
         calls.append(text)
         output_wav.write_bytes(f"audio:{text}:call{len(calls)}".encode("utf-8"))
 
@@ -294,6 +294,33 @@ def test_mimo_tts_writes_decoded_audio(monkeypatch, tmp_path):
     assert payload["audio"] == {"format": "wav", "voice": "冰糖"}
     assert payload["messages"][1] == {"role": "assistant", "content": "这是小米 MiMo 配音。"}
     assert "语速略慢" in payload["messages"][0]["content"]
+
+
+def test_mimo_tts_injects_per_beat_emotion(monkeypatch, tmp_path):
+    import base64
+
+    seen = []
+
+    def fake_api_call(payload):
+        seen.append(payload)
+        return {"choices": [{"message": {"audio": {"data": base64.b64encode(b"x").decode("ascii")}}}]}
+
+    monkeypatch.setattr("voiceover.mimo_tts_api_call", fake_api_call)
+    # emotion routed into the user-message instruction (MiMo instruct-TTS)
+    _tts_mimo("就在这一刻，所有人都沉默了。", tmp_path / "e.wav", emotion="紧张 深沉")
+    instruction = seen[0]["messages"][0]["content"]
+    assert "紧张 深沉" in instruction
+    # no emotion -> still an expressive (non-robotic) directive, no leftover tag
+    _tts_mimo("普通解说。", tmp_path / "n.wav")
+    assert "「" not in seen[1]["messages"][0]["content"]
+    assert "有起伏" in seen[1]["messages"][0]["content"]
+
+
+def test_tts_cache_key_changes_with_emotion():
+    base = {"start": 0.0, "end": 2.0, "narration": "测试。"}
+    k_plain = voiceover._tts_segment_cache_key("mimo-tts", 0, base, "测试。", "+0%", "+0Hz")
+    k_emo = voiceover._tts_segment_cache_key("mimo-tts", 0, {**base, "emotion": "悲伤"}, "测试。", "+0%", "+0Hz")
+    assert k_plain != k_emo, "changing a beat's emotion must invalidate its TTS cache"
 
 
 

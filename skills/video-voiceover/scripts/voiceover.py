@@ -88,7 +88,7 @@ def _synthesize_segment(i, seg, narration, tts_dir, engine):
     if cached:
         return cached
 
-    _run_tts_engine(engine, text, output_wav, rate=rate, pitch=pitch)
+    _run_tts_engine(engine, text, output_wav, rate=rate, pitch=pitch, emotion=seg.get("emotion"))
 
     dur = _get_audio_duration(output_wav)
     seg_slot = seg["end"] - seg["start"]
@@ -101,7 +101,7 @@ def _synthesize_segment(i, seg, narration, tts_dir, engine):
         truncated = _truncate_at_sentence(text, target_chars)
         if truncated and len(truncated) >= 5 and truncated != text:
             text = truncated
-            _run_tts_engine(engine, text, output_wav, rate=rate, pitch=pitch)
+            _run_tts_engine(engine, text, output_wav, rate=rate, pitch=pitch, emotion=seg.get("emotion"))
             dur = _get_audio_duration(output_wav)
 
     _write_tts_segment_cache(output_wav, cache_key, text, dur, _parse_rate_offset(rate))
@@ -120,7 +120,7 @@ def _build_tts_segment_result(index, seg, text, output_wav, duration, rate_offse
         "pause_after_ms": seg.get("pause_after_ms", CONFIG.get("breath_ms", 250)),
         "overlaps_speech": seg.get("overlaps_speech", True),
     }
-    for optional_key in ("source_start", "source_end", "source_clip_id"):
+    for optional_key in ("source_start", "source_end", "source_clip_id", "emotion"):
         if optional_key in seg:
             result[optional_key] = seg[optional_key]
     return result
@@ -198,7 +198,7 @@ def synthesize_tts(narration, work_dir):
     return segments, engine
 
 
-def _run_tts_engine(engine, text, output_wav, rate="+0%", pitch="+0Hz"):
+def _run_tts_engine(engine, text, output_wav, rate="+0%", pitch="+0Hz", emotion=None):
     """Run one TTS engine with retry and remove partial files after failures."""
     retries = max(1, CONFIG.get("tts_retries", 3))
     last_error = None
@@ -207,7 +207,7 @@ def _run_tts_engine(engine, text, output_wav, rate="+0%", pitch="+0Hz"):
         try:
             _cleanup_partial_tts_outputs(output_wav)
             if engine == "mimo-tts":
-                _tts_mimo(text, output_wav, rate=rate, pitch=pitch)
+                _tts_mimo(text, output_wav, rate=rate, pitch=pitch, emotion=emotion)
             else:
                 raise RuntimeError(
                     f"不支持的 TTS 引擎: {engine}。当前仅支持 mimo-tts。"
@@ -288,6 +288,7 @@ def _tts_segment_cache_key(engine, index, seg, source_text, rate, pitch):
         "pause_after_ms": pause,
         "rate": rate,
         "pitch": pitch,
+        "emotion": (str(seg.get("emotion")).strip() if seg.get("emotion") else ""),
         "settings": tts_settings_fingerprint(engine),
     }
     return stable_hash(payload)
@@ -369,8 +370,13 @@ def tts_settings_fingerprint(engine=None):
     }
 
 
-def _mimo_tts_style_instruction(rate="+0%", pitch="+0Hz"):
+def _mimo_tts_style_instruction(rate="+0%", pitch="+0Hz", emotion=None):
     style = CONFIG.get("mimo_tts_style") or "自然、清晰、适合中文视频解说。"
+    emo = str(emotion).strip() if emotion else ""
+    if emo:
+        tone = f"用「{emo}」的情绪和语气演绎这句解说，代入感强、有起伏，不要平铺直叙。"
+    else:
+        tone = "语气有感染力、有起伏，像在给观众讲故事，不要平淡机械。"
     rate_offset = _parse_rate_offset(rate)
     if rate_offset >= 0.06:
         speed = "语速略快，但吐字保持清楚。"
@@ -379,15 +385,18 @@ def _mimo_tts_style_instruction(rate="+0%", pitch="+0Hz"):
     else:
         speed = "语速中等，节奏稳定。"
     pitch_hint = "疑问句或情绪抬升处可自然微升调。" if pitch and pitch != "+0Hz" else "音调自然。"
-    return f"{style} {speed} {pitch_hint}"
+    return f"{style} {tone} {speed} {pitch_hint}"
 
 
-def _tts_mimo(text, output_path, rate="+0%", pitch="+0Hz"):
-    """使用 Xiaomi MiMo-V2.5-TTS 合成，返回 wav 音频。"""
+def _tts_mimo(text, output_path, rate="+0%", pitch="+0Hz", emotion=None):
+    """使用 Xiaomi MiMo-V2.5-TTS 合成，返回 wav 音频。
+
+    MiMo-v2.5-tts 是 instruct-TTS：user 消息里的自然语言指令控制整句的情绪/语气/语速。
+    每段 narration 的 `emotion` 标签即写进该指令，让解说有起伏、不机械。"""
     payload = {
         "model": CONFIG.get("mimo_tts_model", "mimo-v2.5-tts"),
         "messages": [
-            {"role": "user", "content": _mimo_tts_style_instruction(rate, pitch)},
+            {"role": "user", "content": _mimo_tts_style_instruction(rate, pitch, emotion)},
             {"role": "assistant", "content": text},
         ],
         "audio": {
