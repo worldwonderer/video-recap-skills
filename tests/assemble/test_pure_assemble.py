@@ -4,7 +4,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-a
 import json
 import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
-from assemble import _adjust_tts_speed, _apply_narration_speed, _assembly_manifest_payload, _build_audio_filter_complex, _build_timed_narration, _build_video_clips, _emit_timeline, _resolve_final_output, _value_fingerprint, _escape_ass_text, _generate_ass, _generate_srt, _seconds_to_ass_time, _seconds_to_srt_time, _source_subtitle_mask_filter, _subtitle_burn_filter, assemble_video, assembly_settings_fingerprint, final_loudnorm_filter
+from assemble import _wrap_subtitle_text, _adjust_tts_speed, _apply_narration_speed, _assembly_manifest_payload, _build_audio_filter_complex, _build_timed_narration, _build_video_clips, _emit_timeline, _resolve_final_output, _value_fingerprint, _escape_ass_text, _generate_ass, _generate_srt, _seconds_to_ass_time, _seconds_to_srt_time, _source_subtitle_mask_filter, _subtitle_burn_filter, assemble_video, assembly_settings_fingerprint, final_loudnorm_filter
 from lib import CONFIG
 
 
@@ -705,3 +705,14 @@ def test_assemble_video_uses_silent_original_track_when_source_has_no_audio(monk
     assert "anullsrc=channel_layout=stereo:sample_rate=48000" in joined
     assert "[2:a]volume=" in joined
     assert output.exists()
+
+
+def test_wrap_subtitle_text_balances_and_never_orphans_punctuation():
+    # Bug: a 2-line wrap force-broke at max_chars+5 and dropped the trailing "。" alone on line 2.
+    out = _wrap_subtitle_text("这婴儿还在襁褓里，脑子里却装着一个现代人将死的记忆。", max_chars=20)
+    lines = out.split("\n")
+    assert len(lines) == 2
+    assert lines[0].endswith("，") and lines[1].endswith("。")   # punctuation stays on its line, no orphan
+    assert all(len(c) >= 3 for c in lines)                        # neither line is a lone punctuation mark
+    # short text stays on one line
+    assert _wrap_subtitle_text("短句。", max_chars=20) == "短句。"

@@ -300,27 +300,26 @@ def assembly_settings_fingerprint():
 
 
 def _wrap_subtitle_text(text, max_chars=20, line_break="\n"):
-    """将长文本按标点/字数换行，适配字幕显示"""
+    """把过长字幕折成均衡的两行：在最接近中点的标点处断开，标点跟在上一行末尾，
+    绝不让结尾的句号/逗号单独掉到第二行（之前的强制断行会孤立标点、两行严重失衡）。"""
+    text = text.strip()
     if len(text) <= max_chars:
         return text
-    # 优先在标点处断行
-    lines = []
-    current = ""
-    for ch in text:
-        current += ch
-        if ch in "，。！？、；：—" and len(current) >= max_chars * 0.6:
-            lines.append(current)
-            current = ""
-        elif len(current) >= max_chars + 5:
-            # 强制断行
-            lines.append(current)
-            current = ""
-    if current:
-        lines.append(current)
-    # SRT 最多两行
-    if len(lines) > 2:
-        lines = [lines[0], "".join(lines[1:])]
-    return line_break.join(lines)
+    puncts = "，。！？、；：…—,.!?;:"
+    mid = len(text) / 2
+    # 候选断点 = 标点之后的位置（标点留在上一行）；排除最后一个字符，避免孤立结尾标点
+    best = None
+    for i, ch in enumerate(text[:-1]):
+        if ch in puncts:
+            cut = i + 1
+            if best is None or abs(cut - mid) < abs(best - mid):
+                best = cut
+    if best is None:                       # 没有可用标点 → 从中点附近断开
+        best = int(round(mid))
+    line1, line2 = text[:best].strip(), text[best:].strip()
+    if not line1 or not line2:             # 退化情形 → 保持一行，不强行制造孤行
+        return text
+    return line_break.join([line1, line2])
 
 
 def _subtitle_entries(narration):
