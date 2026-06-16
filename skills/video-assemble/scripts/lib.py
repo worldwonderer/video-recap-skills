@@ -159,7 +159,7 @@ CONFIG = {
     "mimo_tts_voice_source": "env" if os.environ.get("MIMO_TTS_VOICE") else "default",
     "mimo_tts_style": os.environ.get(
         "MIMO_TTS_STYLE",
-        "自然、清晰、适合中文视频解说；语速中等，情绪克制但有故事感。",
+        "自然、清晰、有感染力，像在给观众讲故事；随剧情起伏，该紧张时紧张、该动情时动情，不平铺直叙。",
     ),
     "mimo_tts_style_source": "env" if os.environ.get("MIMO_TTS_STYLE") else "default",
     "mimo_media_resolution": os.environ.get("MIMO_MEDIA_RESOLUTION", "default"),
