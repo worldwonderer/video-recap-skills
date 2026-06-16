@@ -8,7 +8,7 @@ from lib import CONFIG
 from lib import log, run_cmd, get_video_duration
 from timeline import build_timeline, save_timeline
 
-SUBTITLE_RENDER_VERSION = 1
+SUBTITLE_RENDER_VERSION = 2
 ASSEMBLY_MANIFEST = "assembly_manifest.json"
 
 
@@ -322,8 +322,54 @@ def _wrap_subtitle_text(text, max_chars=20, line_break="\n"):
     return line_break.join([line1, line2])
 
 
+def _split_subtitle_chunks(text, max_chars):
+    """Split one narration block (often several sentences) into short display chunks.
+
+    A block is synthesized as one continuous TTS utterance for fluent prosody, but showing the
+    whole paragraph as a single subtitle would force a tall multi-line band and lag the picture.
+    So we cut the block at punctuation into clauses, then greedily pack adjacent clauses into
+    chunks of at most `max_chars` — each chunk renders as ONE readable line synced to its slice of
+    the block's audio. Punctuation stays attached to its clause; we never orphan a lone mark."""
+    text = str(text).strip()
+    if not text:
+        return []
+    breakers = "，。！？、；：…—,.!?;:"
+    clauses, buf = [], ""
+    for ch in text:
+        buf += ch
+        if ch in breakers:
+            clauses.append(buf)
+            buf = ""
+    if buf.strip():
+        clauses.append(buf)
+    # Any single clause longer than max_chars is hard-wrapped so no chunk ever exceeds one line.
+    sized = []
+    for clause in clauses:
+        if len(clause) <= max_chars:
+            sized.append(clause)
+        else:
+            for i in range(0, len(clause), max_chars):
+                sized.append(clause[i:i + max_chars])
+    chunks, cur = [], ""
+    for clause in sized:
+        if cur and len(cur) + len(clause) > max_chars:
+            chunks.append(cur)
+            cur = clause
+        else:
+            cur += clause
+    if cur.strip():
+        chunks.append(cur)
+    return [c.strip() for c in chunks if c.strip()]
+
+
 def _subtitle_entries(narration):
-    """Collect subtitle entries from final TTS segment placement."""
+    """Collect subtitle entries from final TTS segment placement.
+
+    Each placed segment is split into short one-line chunks and its played window
+    [actual_place_start, actual_place_end] is distributed across them in proportion to character
+    count — karaoke-style timing that keeps each line on screen only while it is roughly being
+    spoken, instead of holding a whole paragraph for the segment's full duration."""
+    max_chars = int(CONFIG.get("subtitle_max_chars", 20))
     entries = []
     for seg in narration:
         if not isinstance(seg, dict):
@@ -338,7 +384,20 @@ def _subtitle_entries(narration):
             continue
         if end - start < 0.1:
             continue
-        entries.append({"start": start, "end": end, "text": text})
+        chunks = _split_subtitle_chunks(text, max_chars)
+        if not chunks:
+            continue
+        if len(chunks) == 1:
+            entries.append({"start": start, "end": end, "text": chunks[0]})
+            continue
+        total_chars = sum(len(c) for c in chunks) or 1
+        span = end - start
+        cursor = start
+        for i, chunk in enumerate(chunks):
+            chunk_end = end if i == len(chunks) - 1 else cursor + span * (len(chunk) / total_chars)
+            if chunk_end - cursor >= 0.05:
+                entries.append({"start": cursor, "end": chunk_end, "text": chunk})
+            cursor = chunk_end
     return entries
 
 
@@ -485,14 +544,16 @@ def _source_subtitle_mask_filter():
     if not CONFIG.get("mask_source_subtitles", False):
         return None
     ratio = max(0.0, min(0.5, float(CONFIG.get("source_subtitle_mask_ratio", 0.14) or 0.0)))
-    # When we burn our OWN subtitle (which can wrap to 2 lines), the band must be tall enough to
-    # sit behind the whole block — otherwise a wrapped second line spills above the bar onto the
-    # picture. Size the band to the subtitle geometry (margin_v + 2 lines) and take the larger.
+    # When we burn our OWN subtitle the band must sit behind it, but our subtitles are split into
+    # short ONE-LINE chunks (see _subtitle_entries), so the band only needs to cover a single line
+    # plus its bottom margin — never two. Sizing for one line keeps the black bar small so it does
+    # not compress the picture (a 2-line band ate ~23% of the height). Take the larger of the raw
+    # ratio and this single-line need.
     if CONFIG.get("burn_subtitles", False):
         style = _subtitle_style_config()
         play_res_y = max(1.0, float(style["play_res_y"]))
         line_h = float(style["font_size"]) * 1.25
-        sub_band = (float(style["margin_v"]) + 2.0 * line_h + 12.0) / play_res_y
+        sub_band = (float(style["margin_v"]) + line_h + 10.0) / play_res_y
         ratio = min(0.5, max(ratio, sub_band))
     if ratio <= 0:
         return None

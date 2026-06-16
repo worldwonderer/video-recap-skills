@@ -4,7 +4,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-a
 import json
 import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
-from assemble import _wrap_subtitle_text, _adjust_tts_speed, _apply_narration_speed, _assembly_manifest_payload, _build_audio_filter_complex, _build_timed_narration, _build_video_clips, _emit_timeline, _resolve_final_output, _value_fingerprint, _escape_ass_text, _generate_ass, _generate_srt, _seconds_to_ass_time, _seconds_to_srt_time, _source_subtitle_mask_filter, _subtitle_burn_filter, assemble_video, assembly_settings_fingerprint, final_loudnorm_filter
+from assemble import _wrap_subtitle_text, _split_subtitle_chunks, _subtitle_entries, _adjust_tts_speed, _apply_narration_speed, _assembly_manifest_payload, _build_audio_filter_complex, _build_timed_narration, _build_video_clips, _emit_timeline, _resolve_final_output, _value_fingerprint, _escape_ass_text, _generate_ass, _generate_srt, _seconds_to_ass_time, _seconds_to_srt_time, _source_subtitle_mask_filter, _subtitle_burn_filter, assemble_video, assembly_settings_fingerprint, final_loudnorm_filter
 from lib import CONFIG
 
 
@@ -191,21 +191,21 @@ def test_source_subtitle_mask_filter_toggles_with_config(monkeypatch):
     assert _source_subtitle_mask_filter() is None
 
 
-def test_mask_band_grows_to_cover_two_line_burned_subtitle(monkeypatch):
-    """Bug: a wrapped 2-line subtitle spilled above the 14% mask band onto the picture.
-    When burning, the band must be tall enough to sit behind the whole 2-line block."""
+def test_mask_band_stays_one_line_small_when_burning(monkeypatch):
+    """Subtitles are split into short ONE-LINE chunks, so the burned-in band must size for a single
+    line + margin (small), NOT two lines. A 2-line band ate ~23% of the height and compressed the
+    picture; a one-line band keeps it near the raw mask ratio."""
     monkeypatch.setitem(CONFIG, "mask_source_subtitles", True)
     monkeypatch.setitem(CONFIG, "source_subtitle_mask_ratio", 0.14)
     monkeypatch.setitem(CONFIG, "subtitle_font_size", 42)
     monkeypatch.setitem(CONFIG, "subtitle_margin_v", 30)
     monkeypatch.setitem(CONFIG, "subtitle_play_res_y", 720)
-    # burning -> band covers margin_v + 2 lines, larger than the raw 0.14
     monkeypatch.setitem(CONFIG, "burn_subtitles", True)
     import re
     ratio_on = float(re.search(r"ih-ih\*([0-9.]+)", _source_subtitle_mask_filter()).group(1))
-    expected = (30 + 2 * 42 * 1.25 + 12) / 720
-    assert ratio_on >= 0.18, ratio_on
-    assert abs(ratio_on - expected) < 0.01, (ratio_on, expected)
+    one_line = (30 + 42 * 1.25 + 10) / 720
+    assert ratio_on == pytest.approx(max(0.14, one_line), abs=0.005), ratio_on
+    assert ratio_on < 0.16, ratio_on            # stays small — never the old ~0.23 two-line band
     # not burning -> stays at the raw 0.14
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
     ratio_off = float(re.search(r"ih-ih\*([0-9.]+)", _source_subtitle_mask_filter()).group(1))
@@ -537,6 +537,25 @@ def test_build_audio_filter_complex_releases_long_gaps(monkeypatch):
     assert fc.count("(-0.650)") == 2
 
 
+def test_build_audio_filter_complex_original_blocks_play_full_volume(monkeypatch):
+    # New default model: narration comes in BLOCKS that duck the original, and the deliberate
+    # stretches BETWEEN blocks are "original blocks" that play at FULL volume (idle=1.0). A short
+    # bridge (1.5s) keeps within-block micro-gaps ducked but lets the between-block gap swell to 1.0.
+    monkeypatch.setitem(CONFIG, "ducking_mode", "fixed")
+    monkeypatch.setitem(CONFIG, "idle_orig_volume", 1.0)
+    monkeypatch.setitem(CONFIG, "speech_ducking_volume", 0.2)
+    monkeypatch.setitem(CONFIG, "duck_fade_seconds", 0.3)
+    monkeypatch.setitem(CONFIG, "duck_bridge_seconds", 1.5)
+    fc = _build_audio_filter_complex([
+        {"actual_place_start": 0.0, "actual_place_end": 8.0, "overlaps_speech": True},    # narration block
+        {"actual_place_start": 14.0, "actual_place_end": 22.0, "overlaps_speech": True},  # next block; 6s gap = original block
+    ])
+    assert "volume='max(0,min(1,1.0" in fc            # full-volume original baseline (was 0.85)
+    assert fc.count("(-0.800)") == 2                  # 1.0 -> 0.2 under each block, two separate dips
+    assert "min(t-0.00,8.00-t)/0.3" in fc            # first block ducks, then releases to full
+    assert "min(t-14.00,22.00-t)/0.3" in fc          # second block ducks; the 6s gap stays full between
+
+
 def test_build_audio_filter_complex_bridged_mixed_levels_flatten_to_min(monkeypatch):
     # A bridged span mixing a speech beat (0.2) and a quiet beat (0.12) flattens to the MIN
     # level across the span — matching variable_ducking_keyframes so the 剪映 draft == the mp4.
@@ -716,3 +735,33 @@ def test_wrap_subtitle_text_balances_and_never_orphans_punctuation():
     assert all(len(c) >= 3 for c in lines)                        # neither line is a lone punctuation mark
     # short text stays on one line
     assert _wrap_subtitle_text("短句。", max_chars=20) == "短句。"
+
+
+def test_split_subtitle_chunks_breaks_block_into_short_one_line_pieces():
+    block = "这婴儿还在襁褓里，脑子里却装着一个现代人将死的记忆。他叫范闲，注定要搅动这座庙堂。"
+    chunks = _split_subtitle_chunks(block, max_chars=20)
+    assert len(chunks) >= 2                                   # a long block is split, not shown whole
+    assert all(len(c) <= 20 for c in chunks)                 # every piece fits one line
+    assert "".join(chunks) == block.replace(" ", "")          # no text lost
+    assert all(c == c.strip() and c for c in chunks)          # no empty / whitespace-only chunk
+    # a short block stays a single chunk
+    assert _split_subtitle_chunks("他叫范闲。", max_chars=20) == ["他叫范闲。"]
+    assert _split_subtitle_chunks("   ", max_chars=20) == []
+
+
+def test_subtitle_entries_distribute_block_window_across_chunks():
+    # one placed block of 12s -> several timed one-line entries spanning [start, end] with no gaps
+    entries = _subtitle_entries([
+        {
+            "start": 0.0, "end": 12.0,
+            "actual_place_start": 2.0, "actual_place_end": 14.0,
+            "narration": "这婴儿还在襁褓里，脑子里却装着一个现代人将死的记忆。他叫范闲，注定要搅动这座庙堂。",
+        }
+    ])
+    assert len(entries) >= 2
+    assert entries[0]["start"] == pytest.approx(2.0)         # first chunk starts at the audio start
+    assert entries[-1]["end"] == pytest.approx(14.0)         # last chunk ends at the audio end
+    for a, b in zip(entries, entries[1:]):
+        assert b["start"] == pytest.approx(a["end"])         # contiguous, karaoke-style
+        assert a["end"] > a["start"]
+    assert all(len(e["text"]) <= 20 for e in entries)        # each line is short

@@ -534,68 +534,69 @@ def lint_narration(narration, scenes_analysis=None, *, clip_plan=None, mode="ful
                 previous_index=prev["index"], previous_end=prev["end"], start=curr["start"], end=curr["end"],
             ))
 
-    # Density / continuous-bed style check (full mode only; cut-mode density must be
-    # measured on the mapped output timeline, not the source timestamps used here).
+    # Block-coverage check (full mode only; cut-mode density is measured on the mapped output
+    # timeline, not the source timestamps used here). Model: narration is delivered in BLOCKS — each
+    # beat is a few sentences synthesized as ONE fluent TTS utterance — and the deliberate stretches
+    # BETWEEN blocks are "original-audio blocks" that play at full volume. We aim for roughly 7:3
+    # narrated:original, so we flag (a) wall-to-wall narration that never lets the original breathe,
+    # (b) long under-narrated stretches, (c) no deliberate original-audio gaps at all, and (d) beats
+    # fragmented into single short sentences that would synthesize as choppy per-sentence audio.
     metrics = {}
     if mode == "full" and len(sorted_segments) >= 2:
         span = sorted_segments[-1]["end"] - sorted_segments[0]["start"]
-        gaps = [curr["start"] - prev["end"] for prev, curr in zip(sorted_segments, sorted_segments[1:])]
-        max_gap = max(gaps) if gaps else 0.0
-        spm = len(sorted_segments) / (span / 60) if span > 0 else 0.0
-        min_spm = CONFIG.get("min_segments_per_minute", 6.24)
-        target_spm = CONFIG.get("target_segments_per_minute", 9.6)
-        max_gap_limit = CONFIG.get("max_narration_gap_seconds", 11.0)
+        play_rate = max(CONFIG["speech_rate"] * float(CONFIG.get("narration_speed", 1.0) or 1.0), 0.1)
+        spoken = [s["char_count"] / play_rate for s in sorted_segments]
+        spoken_ends = [sorted_segments[i]["start"] + spoken[i] for i in range(len(sorted_segments))]
+        narrated_seconds = sum(spoken)
+        coverage = narrated_seconds / span if span > 0 else 0.0
+        orig_min = CONFIG.get("original_block_min_seconds", 2.5)
+        orig_gaps = [sorted_segments[i + 1]["start"] - spoken_ends[i] for i in range(len(sorted_segments) - 1)]
+        original_blocks = sum(1 for g in orig_gaps if g >= orig_min)
+        avg_chars = sum(s["char_count"] for s in sorted_segments) / len(sorted_segments)
+        cov_target = CONFIG.get("narration_coverage_target", 0.7)
+        cov_max = CONFIG.get("narration_coverage_max", 0.85)
+        cov_min = CONFIG.get("narration_coverage_min", 0.5)
+        block_min_chars = CONFIG.get("narration_block_min_chars", 16)
         metrics = {
             "segment_count": len(sorted_segments),
             "timeline_span_seconds": round(span, 2),
-            "segments_per_minute": round(spm, 2),
-            "max_gap_seconds": round(max_gap, 2),
-            "target_segments_per_minute": target_spm,
-            "min_segments_per_minute": min_spm,
-            "max_gap_limit_seconds": max_gap_limit,
+            "narrated_seconds": round(narrated_seconds, 2),
+            "narration_coverage": round(coverage, 2),
+            "coverage_target": cov_target,
+            "original_block_count": original_blocks,
+            "avg_block_chars": round(avg_chars, 1),
         }
-        if spm and spm < min_spm:
+        if coverage > cov_max:
             warnings.append(_lint_issue(
-                "warning", None, "low_density",
-                "Narration density is below the continuous-bed guide; add beats only where they add meaning, never filler",
-                segments_per_minute=round(spm, 2), min_segments_per_minute=min_spm,
-                target_segments_per_minute=target_spm,
+                "warning", None, "no_original_blocks",
+                "Narration is nearly wall-to-wall — the original audio never gets to breathe. Pull back at a "
+                "few strong moments and write NO narration there so the original plays at full volume "
+                "(aim ~7:3 narrated:original).",
+                narration_coverage=round(coverage, 2), coverage_max=cov_max,
             ))
-        if max_gap > max_gap_limit:
+        elif coverage < cov_min:
             warnings.append(_lint_issue(
-                "warning", None, "long_gap",
-                "A gap between narration beats exceeds the continuous-bed maximum",
-                max_gap_seconds=round(max_gap, 2), max_gap_limit_seconds=max_gap_limit,
+                "warning", None, "under_narrated",
+                "Large stretches have no narration — the recap goes quiet too long. Add blocks so narration "
+                "covers most of the timeline (aim ~7:3 narrated:original).",
+                narration_coverage=round(coverage, 2), coverage_min=cov_min,
             ))
-
-        # Continuous-bed CLUSTERING: density means tight RUNS of narration, NOT filling the whole
-        # timeline. It is fine to step back and let strong original audio play; what's forbidden is
-        # the stutter — one beat, a silent gap, one beat, a silent gap (解说-空白-解说-空白). Estimate
-        # each beat's spoken end (speech_rate * narration_speed) and flag beats STRANDED by gaps on
-        # BOTH sides, so the agent clusters sentences instead of isolating them.
-        if len(sorted_segments) >= 5:
-            play_rate = CONFIG["speech_rate"] * float(CONFIG.get("narration_speed", 1.0) or 1.0)
-            spoken_ends = [s["start"] + s["char_count"] / play_rate for s in sorted_segments]
-            cb_gap = CONFIG.get("continuous_bed_gap_seconds", 1.0)
-            joins = [sorted_segments[i + 1]["start"] - spoken_ends[i] for i in range(len(sorted_segments) - 1)]
-            runs = 1 + sum(1 for g in joins if g > cb_gap)   # number of tight narration clusters
-            stranded = 0
-            for i in range(1, len(sorted_segments) - 1):     # edges can sit next to a deliberate pause
-                if joins[i - 1] > cb_gap and joins[i] > cb_gap:
-                    stranded += 1
-            stranded_ratio = stranded / len(sorted_segments)
-            metrics["narration_runs"] = runs
-            metrics["avg_run_length"] = round(len(sorted_segments) / runs, 2)
-            metrics["stranded_beats"] = stranded
-            if stranded_ratio > 0.3:
-                warnings.append(_lint_issue(
-                    "warning", None, "choppy_narration",
-                    "Narration is choppy — too many lone beats stranded by silent gaps (解说-空白-解说). "
-                    "Cluster sentences into tight runs (<=1s apart within a run); leave the original audio "
-                    "room only at a genuinely strong moment, never between every sentence",
-                    stranded_beats=stranded, segment_count=len(sorted_segments),
-                    continuous_bed_gap_seconds=cb_gap,
-                ))
+        if original_blocks == 0 and span >= 3 * orig_min:
+            warnings.append(_lint_issue(
+                "warning", None, "no_original_breaks",
+                "No deliberate original-audio blocks — narration runs end-to-end with no gap for a strong "
+                "original moment (a key line, an action beat, the music). Leave a few multi-second gaps "
+                "between blocks where the original plays alone.",
+                original_block_min_seconds=orig_min,
+            ))
+        if len(sorted_segments) >= 8 and avg_chars < block_min_chars:
+            warnings.append(_lint_issue(
+                "warning", None, "fragmented_beats",
+                "Beats are fragmented into single short sentences; each is synthesized as a separate TTS "
+                "utterance, which sounds choppy. Merge adjacent sentences into BLOCKS of 2-4 sentences "
+                "(one continuous thought) so each block speaks as one fluent utterance.",
+                avg_block_chars=round(avg_chars, 1), block_min_chars=block_min_chars,
+            ))
 
     report = {
         "ok": not errors,
@@ -1412,20 +1413,22 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
     effective_rate = CONFIG["speech_rate"] * CONFIG["speech_safety_margin"] * float(CONFIG.get("narration_speed", 1.0) or 1.0)
     breath_sec = CONFIG.get("breath_ms", 250) / 1000
     target_pause_ms = CONFIG.get("breath_ms", 250)
-    target_spm = CONFIG.get("target_segments_per_minute", 9.6)
-    min_spm = CONFIG.get("min_segments_per_minute", 6.24)
-    max_gap = CONFIG.get("max_narration_gap_seconds", 11.0)
     edit_mode = CONFIG.get("edit_mode", "full")
     target_duration = CONFIG.get("target_duration") or "(not set)"
     # Cut mode sizes narration to the OUTPUT (the kept clips), not the full source:
-    # a 2h source otherwise asks for ~1150 beats that the cut drops, leaving narration
+    # a 2h source otherwise asks for blocks that the cut drops, leaving narration
     # describing footage the viewer never sees.
     output_seconds = video_duration
     if edit_mode == "cut":
         target_seconds = _parse_target_seconds(CONFIG.get("target_duration"))
         if target_seconds:
             output_seconds = min(video_duration, target_seconds)
-    target_count = max(1, round(output_seconds / 60 * target_spm))
+    # Block count from coverage, not beats/min: narrate ~coverage_target of the timeline in blocks of
+    # ~block_seconds each, leaving the rest as original-audio blocks. Big blocks ⇒ far fewer beats
+    # than the old per-sentence model (a 5min recap ⇒ ~20 blocks, not ~48 sentences).
+    cov_target = CONFIG.get("narration_coverage_target", 0.7)
+    block_seconds = CONFIG.get("narration_block_seconds", 9.0)
+    target_count = max(1, round(output_seconds * cov_target / block_seconds))
 
     has_story_context = (Path(work_dir) / "background_research.json").exists()
     substrate = assess_understanding_substrate(scenes_analysis, asr_result, has_story_context=has_story_context)
@@ -1449,31 +1452,30 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
     if thin_substrate:
         lines.append(
             f"- Narration density: substrate is {substrate['level']} — do NOT chase a beat count. "
-            f"Write fewer, grounded beats; skipping a stretch beats narrating pixels "
-            f"(~{target_spm:.1f}/min is a ceiling here, not a quota)."
+            f"Write fewer, grounded blocks; skipping a stretch beats narrating pixels."
         )
     else:
         lines.append(
-            f"- Narration density: aim for ~{target_spm:.1f} beats/min for the continuous-bed feel "
-            f"(min ~{min_spm:.1f}, no silent gap over {max_gap:.0f}s) — a GUIDE, not a quota: never pad with "
-            f"filler or pixel-description to hit a number; a meaningful beat beats a filler beat."
+            "- Narration in BLOCKS, ~7:3. Write narration as BLOCKS — each beat is a few sentences (one "
+            "continuous thought) that gets synthesized as ONE fluent TTS utterance. Aim for narration to "
+            "cover roughly 70% of the timeline and leave ~30% as deliberate ORIGINAL-AUDIO blocks: "
+            "multi-second gaps with NO narration where a strong original moment (a key line, an action beat, "
+            "the music) plays at full volume."
         )
         lines.append(
-            "- Density = TIGHT RUNS, not wall-to-wall talk. WITHIN a stretch of narration keep sentences "
-            "nearly back-to-back (≤ ~1s apart): size each beat's window to its own text (chars / the speech "
-            "budget above) and start the next beat right after it. You MAY pull back and let the original "
-            "audio breathe at a genuinely strong moment — a key line, a big action beat, the music. What is "
-            "FORBIDDEN is the stutter: one sentence, a silent gap, one sentence, a silent gap — never strand "
-            "single beats with gaps on both sides."
+            "- A block alternates with an original block: speak a block, then step back for a few seconds and "
+            "let the scene play, then the next block. What is FORBIDDEN is the per-sentence stutter — one "
+            "short sentence, a gap, one short sentence, a gap — and wall-to-wall talk that never lets the "
+            "original breathe. Size each block's window to its own text (chars / the speech budget above)."
         )
     if edit_mode == "cut":
         lines.append(
-            f"- Aim for {beat_count_phrase} short beats across the ~{output_label} CUT OUTPUT "
-            f"(sized to the kept clips, NOT the {source_label} source), over a ducked bed"
+            f"- Aim for {beat_count_phrase} narration BLOCKS across the ~{output_label} CUT OUTPUT "
+            f"(sized to the kept clips, NOT the {source_label} source), ~7:3 over the original audio"
         )
     else:
         lines.append(
-            f"- Aim for {beat_count_phrase} short beats across the timeline, kept continuous over a ducked original-audio bed"
+            f"- Aim for {beat_count_phrase} narration BLOCKS across the timeline, ~7:3 narrated:original audio"
         )
     lines.extend([
         f"- Default pause between beats: {target_pause_ms}ms",
@@ -1548,9 +1550,11 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
                 "",
                 "### narration.json shape (OUTPUT timestamps, 0..total)",
                 "",
+                "Each beat is a BLOCK (a few sentences spoken as one fluent utterance); size end-start to the",
+                "block's text, then leave a few-second gap before the next block for an original-audio moment.",
                 "```json",
                 "[",
-                "  {\"start\": 2.0, \"end\": 7.0, \"narration\": \"解说文本。\", \"pause_after_ms\": 250, \"overlaps_speech\": true, \"emotion\": \"紧张\"}",
+                "  {\"start\": 2.0, \"end\": 13.0, \"narration\": \"范闲表面是个闲散少爷，背地里却握着监察院的暗线。这一次，他要赌上身家去查母亲的死。\", \"pause_after_ms\": 250, \"overlaps_speech\": true, \"emotion\": \"紧张\"}",
                 "]",
                 "```",
             ])
@@ -1558,30 +1562,33 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         lines.extend([
             "## Required JSON shape",
             "",
+            "Each beat is a BLOCK (a few sentences spoken as one fluent utterance); size end-start to the",
+            "block's text, then leave a few-second gap before the next block for an original-audio moment.",
             "```json",
             "[",
-            "  {\"start\": 5.0, \"end\": 10.0, \"narration\": \"解说文本。\", \"pause_after_ms\": 250, \"overlaps_speech\": true, \"emotion\": \"平静\"}",
+            "  {\"start\": 5.0, \"end\": 16.0, \"narration\": \"范闲表面是个闲散少爷，背地里却握着监察院的暗线。这一次，他要赌上身家去查母亲的死。\", \"pause_after_ms\": 250, \"overlaps_speech\": true, \"emotion\": \"平静\"}",
             "]",
             "```",
         ])
 
     lines.extend([
         "",
-        "## Writing rules (dense continuous-bed recap style)",
+        "## Writing rules (block recap style)",
         "",
-        "1. Narrate continuously across the recap as short punchy beats over a ducked original-audio bed; in cut mode that means across the kept clips, in output order — not the full source timeline.",
-        "2. Follow the density line near the top of this brief: it already accounts for thin substrate and cut output. Keep a beat at least every few seconds inside a narrated stretch, but never pad with filler just to hit a number.",
+        "1. Narrate in BLOCKS, ~7:3. Tell the story as a sequence of narration BLOCKS over the original audio; in cut mode that means across the kept clips, in output order. Leave ~30% of the timeline as deliberate original-audio blocks (no narration) where a strong moment plays at full volume.",
+        "2. Follow the density line near the top of this brief: it already accounts for thin substrate and cut output. Narration should cover most (~70%) of the timeline, but never pad with filler just to hit a number; a meaningful block beats a filler block.",
         "3. Default `overlaps_speech` to true. The CLI auto-marks a beat as non-overlapping only when it actually lands inside a real silent window.",
-        "4. Make each beat ONE COMPLETE sentence (subject + predicate), not a dangling fragment — each beat is its own TTS utterance, so a fragment reads with an odd, clipped intonation. Keep it short (1-2 subtitle lines); if a thought needs two clauses, keep them in the SAME beat rather than splitting mid-sentence.",
+        "4. Make each beat a BLOCK of 2-4 COMPLETE sentences (one continuous thought), NOT a lone short fragment — the whole block is synthesized in ONE TTS call, so write it to read aloud naturally end-to-end; that connected prosody is what makes the voice flow instead of sounding choppy. Size its end-start to fit the block's text at the speech budget above.",
         "5. Do not describe what the viewer can already see; explain intent, stakes, subtext, relationships, and story logic.",
-        "6. Keep timing visually local: if one line spans many frame-fact timestamps, split it or tighten start/end around the pictured beat.",
+        "6. Keep timing visually local: anchor each block's start/end to the stretch of footage it covers; don't let a block run far past what is on screen.",
         "7. In cut mode, select clips for plot causality, key dialogue, reveals, and emotional turns; avoid filler and repeated shots.",
-        "8. Give every beat an `emotion`, but keep it STEADY across a run — shift it only at a real emotional turn (a reveal, a loss, a threat), NOT every sentence. Emotion that jumps every beat makes the voice lurch and sound choppy. Use a calm base (平静/深沉/严肃) for most of a section and save 震惊/悲伤/紧张 for the actual turns.",
-        "9. After writing, run: `python3 skills/video-recap/scripts/recap.py <video> --work-dir <work_dir>`.",
+        "8. Give every block an `emotion` that fits its whole arc; keep it STEADY across the block (it is one utterance) and shift only at a real emotional turn between blocks. Use a calm base (平静/深沉/严肃) for most of a section and save 震惊/悲伤/紧张 for the actual turns.",
+        "9. Between blocks, leave a gap of a few seconds with NO narration so the original audio plays alone — pick those spots at genuinely strong original moments, not arbitrarily.",
+        "10. After writing, run: `python3 skills/video-recap/scripts/recap.py <video> --work-dir <work_dir>`.",
         "",
-        "## Per-beat emotion (`emotion` field → MiMo TTS instruct)",
+        "## Per-block emotion (`emotion` field → MiMo TTS instruct)",
         "",
-        "Each beat's `emotion` is a short Chinese tone tag MiMo-v2.5-tts follows. Pick 1-2 that fit the beat:",
+        "Each block's `emotion` is a short Chinese tone tag MiMo-v2.5-tts follows for the whole utterance. Pick 1-2 that fit the block:",
         "- 基础情绪: 开心 悲伤 愤怒 恐惧 惊讶 兴奋 委屈 平静 冷漠",
         "- 复合情绪: 怅然 欣慰 无奈 愧疚 释然 嫉妒 厌倦 忐忑 动情",
         "- 整体语调: 温柔 高冷 活泼 严肃 慵懒 俏皮 深沉 干练 凌厉",

@@ -75,68 +75,70 @@ def test_lint_narration_warns_when_segment_spans_too_many_visual_beats(monkeypat
     assert "visual_beat_too_broad" in codes
 
 
-def test_lint_narration_density_metrics_and_warnings(monkeypatch):
-    monkeypatch.setitem(CONFIG, "target_segments_per_minute", 9.6)
-    monkeypatch.setitem(CONFIG, "min_segments_per_minute", 6.24)
-    monkeypatch.setitem(CONFIG, "max_narration_gap_seconds", 11.0)
+def test_lint_block_coverage_metrics_and_warnings(monkeypatch):
+    monkeypatch.setitem(CONFIG, "speech_rate", 3.5)
+    monkeypatch.setitem(CONFIG, "narration_speed", 1.3)
 
+    # Under-narrated: two tiny blocks over a long span -> coverage far below the ~0.7 target.
     sparse = lint_narration([
-        {"start": 0.0, "end": 4.0, "narration": "第一句。", "pause_after_ms": 250},
-        {"start": 40.0, "end": 44.0, "narration": "很久之后的第二句。", "pause_after_ms": 250},
+        {"start": 0.0, "end": 4.0, "narration": "第一句话。", "pause_after_ms": 250},
+        {"start": 60.0, "end": 64.0, "narration": "很久之后的第二句话。", "pause_after_ms": 250},
     ], mode="full")
     sparse_codes = {issue["code"] for issue in sparse["warnings"]}
-    assert "low_density" in sparse_codes
-    assert "long_gap" in sparse_codes
+    assert "under_narrated" in sparse_codes
+    assert sparse["metrics"]["narration_coverage"] < 0.5
     assert sparse["metrics"]["segment_count"] == 2
-    assert sparse["metrics"]["max_gap_seconds"] == 36.0
 
-    dense = []
+    # Healthy block layout: a few big blocks covering most of the span, with deliberate
+    # original-audio gaps between them -> no coverage/fragmentation warnings.
+    block = "范闲表面是个闲散少爷背地里却握着监察院最深的暗线这一次他押上全部身家也要查清楚母亲当年究竟为何而死"
+    healthy = []
     t = 0.0
-    for _ in range(10):
-        dense.append({"start": round(t, 2), "end": round(t + 4.5, 2),
-                      "narration": "一句紧凑的解说。", "pause_after_ms": 250})
-        t += 6.0
-    dense_report = lint_narration(dense, mode="full")
-    dense_codes = {issue["code"] for issue in dense_report["warnings"]}
-    assert "low_density" not in dense_codes
-    assert "long_gap" not in dense_codes
-    assert dense_report["metrics"]["segments_per_minute"] >= CONFIG["min_segments_per_minute"]
+    for _ in range(6):
+        healthy.append({"start": round(t, 2), "end": round(t + 12.0, 2), "narration": block, "pause_after_ms": 250})
+        t += 16.0
+    report = lint_narration(healthy, mode="full")
+    codes = {issue["code"] for issue in report["warnings"]}
+    assert "under_narrated" not in codes
+    assert "no_original_blocks" not in codes
+    assert "fragmented_beats" not in codes
+    assert 0.45 <= report["metrics"]["narration_coverage"] <= 0.85
+    assert report["metrics"]["original_block_count"] >= 2
 
+    # cut mode -> coverage lint is skipped (measured on the mapped output timeline elsewhere)
     cut_report = lint_narration(sparse, mode="cut")
     assert cut_report["metrics"] == {}
 
 
-def test_lint_flags_choppy_stranded_narration(tmp_path, monkeypatch):
-    # The forbidden pattern: one short beat, a silent gap, one beat, a gap... (解说-空白-解说).
-    # beats/min can look fine, but every sentence is stranded -> choppy_narration must fire.
+def test_lint_flags_fragmented_beats(tmp_path, monkeypatch):
+    # The forbidden pattern: many lone short sentences instead of blocks -> each synthesizes as a
+    # separate choppy TTS utterance, so fragmented_beats must fire.
     monkeypatch.setitem(CONFIG, "speech_rate", 3.5)
     monkeypatch.setitem(CONFIG, "narration_speed", 1.3)
-    segs = [{"start": i * 5.0, "end": i * 5.0 + 1.6, "narration": "一句解说。"} for i in range(8)]
+    segs = [{"start": i * 5.0, "end": i * 5.0 + 1.6, "narration": "一句短解说。"} for i in range(8)]
     report = lint_narration(segs, mode="full", work_dir=tmp_path)
     codes = {w["code"] for w in report["warnings"]}
-    assert "choppy_narration" in codes
-    assert report["metrics"]["stranded_beats"] >= 4
+    assert "fragmented_beats" in codes
+    assert report["metrics"]["avg_block_chars"] < 16
 
 
-def test_lint_accepts_tight_runs_with_intentional_pause(monkeypatch):
-    # Two tight back-to-back runs with ONE deliberate pause between them (great original audio)
-    # is the GOOD shape -> NOT choppy, even though there is a long silent stretch.
+def test_lint_flags_wall_to_wall_narration_with_no_original_blocks(monkeypatch):
+    # The user's complaint: narration nearly wall-to-wall, the original never gets to breathe.
     monkeypatch.setitem(CONFIG, "speech_rate", 3.5)
-    monkeypatch.setitem(CONFIG, "speech_safety_margin", 0.85)
     monkeypatch.setitem(CONFIG, "narration_speed", 1.3)
-    rate = 3.5 * 0.85 * 1.3
+    rate = 3.5 * 1.3
+    block = "这是一段连续不断的解说词没有给原声留下任何空隙一路讲到底"
+    spoken = len(block) / rate
     segs = []
-    for run_start in (0.0, 40.0):                 # two clusters, ~25s apart
-        t = run_start
-        for _ in range(5):
-            txt = "这是一句连续紧凑的解说词。"
-            end = t + sum(1 for c in txt if c not in "，。") / rate
-            segs.append({"start": round(t, 2), "end": round(end, 2), "narration": txt})
-            t = end
+    t = 0.0
+    for _ in range(6):
+        segs.append({"start": round(t, 2), "end": round(t + spoken + 0.05, 2), "narration": block})
+        t += spoken + 0.1                          # next block starts right after -> no original gap
     report = lint_narration(segs, mode="full")
     codes = {w["code"] for w in report["warnings"]}
-    assert "choppy_narration" not in codes
-    assert report["metrics"]["narration_runs"] == 2
+    assert "no_original_blocks" in codes
+    assert report["metrics"]["original_block_count"] == 0
+    assert report["metrics"]["narration_coverage"] > 0.85
 
 
 def test_build_agent_brief_cut_mode_sizes_to_output(monkeypatch, tmp_path):
@@ -147,13 +149,12 @@ def test_build_agent_brief_cut_mode_sizes_to_output(monkeypatch, tmp_path):
     """
     monkeypatch.setitem(CONFIG, "edit_mode", "cut")
     monkeypatch.setitem(CONFIG, "target_duration", "1m")
-    monkeypatch.setitem(CONFIG, "target_segments_per_minute", 10.0)
     monkeypatch.setitem(CONFIG, "context_info", "")
     scenes = [{"scene_id": i, "start": i * 60.0, "end": i * 60.0 + 60.0, "description": "画面"} for i in range(10)]
     text = build_agent_brief(scenes, [], [], 600.0, tmp_path).read_text(encoding="utf-8")
     assert "CUT OUTPUT" in text
-    assert "10 short beats" in text       # 1min output * 10/min = 10 beats (sized to output)
-    assert "100 short beats" not in text   # the old source-sized (buggy) count
+    assert "narration BLOCKS across the ~1min CUT OUTPUT" in text   # sized to 1min output (~5 blocks)
+    assert "47 narration BLOCKS" not in text                        # NOT the source-sized (10min) count
     assert "step 1 of 2" in text           # A1: cut-first, write clip_plan only (no edited_source yet)
     assert '"target_duration": "1m"' in text
 
@@ -185,7 +186,7 @@ def test_build_agent_brief_thin_substrate_relaxes_density(monkeypatch, tmp_path)
     scenes = [{"scene_id": i, "start": i * 6.0, "end": i * 6.0 + 6.0, "description": "画面"} for i in range(4)]
     text = build_agent_brief(scenes, [], [], 24.0, tmp_path).read_text(encoding="utf-8")
     assert "do NOT chase a beat count" in text
-    assert "ceiling here, not a quota" in text
+    assert "grounded blocks" in text                # thin -> fewer, grounded blocks (no quota)
     assert "segments/min (minimum" not in text  # the strict quota line is replaced when thin
 
 
@@ -442,8 +443,8 @@ def test_build_agent_brief_rich_density_is_a_guide_not_quota(monkeypatch, tmp_pa
     asr = [{"start": 1.0, "end": 5.0, "text": "对" * 250}]  # >= 200 chars -> a real story spine -> rich
     assert assess_understanding_substrate(scenes, asr)["level"] == "rich"
     text = build_agent_brief(scenes, asr, [], 36.0, tmp_path).read_text(encoding="utf-8")
-    assert "a GUIDE, not a quota" in text
-    assert "never pad with" in text
+    assert "Narration in BLOCKS, ~7:3" in text       # block model is the headline guidance
+    assert "never pad with" in text                  # still framed as a guide, not a quota
     assert "Narration density target:" not in text  # the old hard-quota phrasing is gone
 
 
