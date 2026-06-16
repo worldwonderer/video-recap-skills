@@ -214,7 +214,11 @@ CONFIG = {
     "narration_speed": env_float("NARRATION_SPEED", 1.3, minimum=0.5),  # 解说整体提速(atempo)，默认偏快适配短视频；长片可设 1.0
     "mask_source_subtitles": env_bool("MASK_SOURCE_SUBTITLES", True),  # 遮挡原片烧录字幕（默认开；无烧录字幕素材设 false）
     "source_subtitle_mask_ratio": env_float("SOURCE_SUBTITLE_MASK_RATIO", 0.14, minimum=0.0),  # 底部遮挡比例
-    "narration_delay_seconds": 1.5,  # 解说延迟放置秒数，让画面先出现再解说
+    "narration_delay_seconds": 1.5,  # 解说延迟放置秒数，让画面先出现再解说（仅用于段落起点）
+    "narration_tighten": env_bool("NARRATION_TIGHTEN", True),  # 段落内把句子紧贴上一句实际收尾播放，句间间隔稳定≤tight_pause，杜绝"一句解说一段空白"的卡顿
+    "narration_run_gap_seconds": env_float("NARRATION_RUN_GAP_SECONDS", 1.6, minimum=0.0),  # 作者留白超过此值=新段落（让精彩原声透出）；小于则视为同一连续段落
+    "narration_tight_pause_seconds": env_float("NARRATION_TIGHT_PAUSE_SECONDS", 0.35, minimum=0.0),  # 段落内句间固定间隔(秒)
+    "narration_max_pull_seconds": env_float("NARRATION_MAX_PULL_SECONDS", 2.5, minimum=0.0),  # 收紧时一句最多比作者标注提前的秒数（漂移上限，防脱节）
     "narration_tail_pad_seconds": 0.1,  # 解说尾部最少留白；短 slot 会自动压低 delay 避免截断
     "quiet_overlap_min_ratio": 0.8,  # 解说段至少多少比例落在安静窗口内才标记为非对白重叠
     "visual_beat_max_seconds": 18.0,  # 单段解说超过该时长且跨多个帧锚点时给 lint 提醒

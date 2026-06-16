@@ -825,11 +825,24 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
     last_written_end = 0  # 追踪已写入位置，防止重叠
     prev_pause_samples = 0  # 前一段的 pause_after_ms，控制段间间隔
     skipped_count = 0  # 因 WAV 缺失/损坏/重采样失败而被跳过的段数
-    placed_count = 0  # 真正写入音频的段数；防止“成功”生成全静音旁白
+    placed_count = 0  # 真正写入音频的段数；防止"成功"生成全静音旁白
+    prev_authored_end = None  # 上一段作者标注的结束时间，用于判断"段落"边界
+    run_gap = float(CONFIG.get("narration_run_gap_seconds", 1.6))   # 作者留白 > 此值 = 新段落
+    tighten = bool(CONFIG.get("narration_tighten", True))
+    tight_pause_samples = int(max(0.0, float(CONFIG.get("narration_tight_pause_seconds", 0.35))) * sample_rate)
+    # 漂移上限：收紧时一句最多比作者标注的时间提前 max_pull 秒，避免整段解说被全部压到前面、与画面脱节
+    max_pull_samples = int(max(0.0, float(CONFIG.get("narration_max_pull_seconds", 2.5))) * sample_rate)
 
     for seg in tts_segments:
         wav_path = seg["audio_path"]
         seg_pause_ms = seg.get("pause_after_ms", CONFIG.get("breath_ms", 250))
+        # 段落收紧：同一段落内（与上一句作者留白 <= run_gap）把这一句紧贴上一句的实际收尾播放，
+        # 句间间隔固定为 tight_pause，不受 slot 内居中延迟 / TTS 时长波动影响。段落之间（作者特意留
+        # 的大留白，让精彩原声透出）才放回原声。这样句间间隔稳定、不会出现"一句解说一段空白"。
+        cur_authored_start = float(seg.get("start", 0.0))
+        is_run_start = (placed_count == 0 or prev_authored_end is None
+                        or cur_authored_start - prev_authored_end > run_gap)
+        prev_authored_end = float(seg.get("end", cur_authored_start))
 
         if not os.path.exists(wav_path):
             seg["actual_place_start"] = seg["start"]
@@ -874,9 +887,15 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         end_boundary = int(min(seg["end"], video_duration) * sample_rate)
 
         # 段间间隔：使用前一段的 pause_after_ms（来自 narration.json）
-        # 第一段无延迟，后续段在前段结束后等待前段的 pause
         min_start_with_pause = last_written_end + prev_pause_samples
-        actual_start = max(start_sample, min_start_with_pause)
+        if tighten and not is_run_start:
+            # 段落内：紧贴上一句的实际收尾播放，句间间隔固定为 tight_pause（不被 slot 内居中延迟撑大），
+            # 但不早于"作者标注起始 - max_pull"，防止整段被压到前面与画面脱节。
+            drift_floor = int(cur_authored_start * sample_rate) - max_pull_samples
+            actual_start = max(last_written_end + tight_pause_samples, drift_floor)
+        else:
+            # 段落起点（或关闭收紧）：尊重作者标注的起始 + 入场延迟，让画面/原声先立住
+            actual_start = max(start_sample, min_start_with_pause)
         actual_start = min(actual_start, end_boundary)  # 不超出 slot 边界
 
         # 根据实际可用空间决定是否加速

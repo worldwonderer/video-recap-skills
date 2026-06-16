@@ -172,5 +172,71 @@ def test_partial_skip_does_not_log_all_skipped_warning(monkeypatch, tmp_path):
     _build_timed_narration(segments, out, 5.0, tmp_path)
 
     assert not any("全部" in m and "跳过" in m for m in logs), logs
+
+
+def test_run_tightening_packs_within_run_and_respects_boundary(monkeypatch, tmp_path):
+    """Within a narration run, beats pack to a fixed tight gap after the previous beat's ACTUAL
+    audio end (no slot-centering delay) so the spoken gap stays ≤ tight_pause; a deliberate
+    authored gap > run_gap starts a new run anchored at its authored time. Anti-stutter ≤1s."""
+    from lib import CONFIG
+    monkeypatch.setitem(CONFIG, "narration_tighten", True)
+    monkeypatch.setitem(CONFIG, "narration_delay_seconds", 0.0)
+    monkeypatch.setitem(CONFIG, "narration_tight_pause_seconds", 0.35)
+    monkeypatch.setitem(CONFIG, "narration_run_gap_seconds", 1.6)
+    monkeypatch.setitem(CONFIG, "narration_max_pull_seconds", 100.0)  # isolate tight-packing from the drift cap
+    monkeypatch.setitem(CONFIG, "fade_ms", 0)
+
+    w = _write_wav(tmp_path / "a.wav", duration=0.8)
+
+    def seg(i, start, end):
+        return {"index": i, "start": start, "end": end, "narration": f"句{i}。",
+                "audio_path": str(w), "audio_duration": 0.8}
+
+    # run 1: beats 0,1,2 in wide 4s slots but authored contiguous (gap 0) -> pack tight to the front.
+    # run 2: beat 3 after a 3s authored gap (> run_gap) -> new run, anchored to its authored start.
+    segments = [seg(0, 0.0, 4.0), seg(1, 4.0, 8.0), seg(2, 8.0, 12.0), seg(3, 15.0, 19.0)]
+    _build_timed_narration(segments, tmp_path / "out.wav", 30.0, tmp_path)
+
+    gap01 = segments[1]["actual_place_start"] - segments[0]["actual_place_end"]
+    gap12 = segments[2]["actual_place_start"] - segments[1]["actual_place_end"]
+    assert abs(gap01 - 0.35) < 0.05, gap01      # within-run gap == tight_pause, not the 4s slot slack
+    assert abs(gap12 - 0.35) < 0.05, gap12
+    assert segments[2]["actual_place_start"] < 3.0          # run packed to the front (far before authored 8s)
+    assert segments[3]["actual_place_start"] >= 14.9        # run boundary respects the deliberate pause
+
+
+def test_run_tightening_off_keeps_slot_placement(monkeypatch, tmp_path):
+    """With narration_tighten off, beats keep the slot-anchored placement (regression guard)."""
+    from lib import CONFIG
+    monkeypatch.setitem(CONFIG, "narration_tighten", False)
+    monkeypatch.setitem(CONFIG, "narration_delay_seconds", 0.0)
+    monkeypatch.setitem(CONFIG, "fade_ms", 0)
+    w = _write_wav(tmp_path / "a.wav", duration=0.8)
+    segments = [
+        {"index": 0, "start": 0.0, "end": 4.0, "narration": "句0。", "audio_path": str(w), "audio_duration": 0.8},
+        {"index": 1, "start": 4.0, "end": 8.0, "narration": "句1。", "audio_path": str(w), "audio_duration": 0.8},
+    ]
+    _build_timed_narration(segments, tmp_path / "out.wav", 30.0, tmp_path)
+    # beat 1 stays anchored near its authored 4.0s slot, not packed right after beat 0
+    assert segments[1]["actual_place_start"] >= 3.9
+
+
+def test_run_tightening_drift_cap_keeps_narration_near_picture(monkeypatch, tmp_path):
+    """The drift cap stops a long contiguous run from packing entirely to the front: no beat plays
+    more than narration_max_pull_seconds before its authored time, so narration stays near picture."""
+    from lib import CONFIG
+    monkeypatch.setitem(CONFIG, "narration_tighten", True)
+    monkeypatch.setitem(CONFIG, "narration_delay_seconds", 0.0)
+    monkeypatch.setitem(CONFIG, "narration_tight_pause_seconds", 0.35)
+    monkeypatch.setitem(CONFIG, "narration_run_gap_seconds", 1.6)
+    monkeypatch.setitem(CONFIG, "narration_max_pull_seconds", 2.0)
+    monkeypatch.setitem(CONFIG, "fade_ms", 0)
+    w = _write_wav(tmp_path / "a.wav", duration=0.8)
+    # one long contiguous run authored across a wide span (5s slots); without the cap, the last
+    # beat would pack to ~3s; with the 2s cap it must stay within 2s of its authored 20s start.
+    segments = [{"index": i, "start": i * 5.0, "end": i * 5.0 + 5.0, "narration": f"句{i}。",
+                 "audio_path": str(w), "audio_duration": 0.8} for i in range(5)]
+    _build_timed_narration(segments, tmp_path / "out.wav", 40.0, tmp_path)
+    assert segments[4]["actual_place_start"] >= 5.0 * 4 - 2.0 - 0.01      # within max_pull of authored 20s
     # The good segment was actually placed (non-zero-width window).
     assert segments[0]["actual_place_end"] - segments[0]["actual_place_start"] > 0.1
