@@ -1103,8 +1103,13 @@ def _preflight_burn_subtitles():
     """Fail before the (re-encoding) render when burn-in is on but ffmpeg lacks the libass
     `subtitles` filter. _subtitle_burn_filter burns even the .ass through `subtitles=`, so
     that is the required capability. Defense-in-depth: the orchestrator (recap.py) preflights
-    this earlier, but assemble.py can be run standalone."""
+    this earlier, but assemble.py can be run standalone. Only fires when ffmpeg EXISTS but
+    can't burn — an absent ffmpeg fails the render regardless and would also break the mocked,
+    ffmpeg-less test environment."""
+    import shutil
     if not CONFIG.get("burn_subtitles", False):
+        return
+    if shutil.which("ffmpeg") is None:
         return
     if "subtitles" not in _ffmpeg_filters():
         raise SystemExit(

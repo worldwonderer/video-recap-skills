@@ -11,8 +11,9 @@ import pytest  # noqa: E402
 import assemble  # noqa: E402
 
 
-def test_preflight_raises_when_filter_missing(monkeypatch):
+def test_preflight_raises_when_present_but_filter_missing(monkeypatch):
     monkeypatch.setitem(assemble.CONFIG, "burn_subtitles", True)
+    monkeypatch.setattr(shutil, "which", lambda _n: "/usr/bin/ffmpeg")
     monkeypatch.setattr(assemble, "_ffmpeg_filters", lambda: {"scale", "atempo"})
     with pytest.raises(SystemExit, match="subtitles/libass"):
         assemble._preflight_burn_subtitles()
@@ -20,8 +21,22 @@ def test_preflight_raises_when_filter_missing(monkeypatch):
 
 def test_preflight_ok_when_filter_present(monkeypatch):
     monkeypatch.setitem(assemble.CONFIG, "burn_subtitles", True)
+    monkeypatch.setattr(shutil, "which", lambda _n: "/usr/bin/ffmpeg")
     monkeypatch.setattr(assemble, "_ffmpeg_filters", lambda: {"subtitles", "scale"})
     assemble._preflight_burn_subtitles()  # must not raise
+
+
+def test_preflight_noop_when_ffmpeg_absent(monkeypatch):
+    # ffmpeg absent entirely → guard stays out of it (render fails later regardless), so the
+    # mocked, ffmpeg-less test/CI environment is never blocked.
+    monkeypatch.setitem(assemble.CONFIG, "burn_subtitles", True)
+    monkeypatch.setattr(shutil, "which", lambda _n: None)
+
+    def _boom():
+        raise AssertionError("must not probe filters when ffmpeg is absent")
+
+    monkeypatch.setattr(assemble, "_ffmpeg_filters", _boom)
+    assemble._preflight_burn_subtitles()  # must not raise, must not probe
 
 
 def test_preflight_skipped_when_burn_off(monkeypatch):

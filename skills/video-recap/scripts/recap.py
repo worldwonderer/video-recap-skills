@@ -101,13 +101,25 @@ def _burn_subtitles_intended(args):
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _ffmpeg_present_but_cannot_burn():
+    """True only when ffmpeg EXISTS but lacks the libass `subtitles` filter — the specific
+    "subtitle-burn environment unsupported" case. Returns False when ffmpeg is absent
+    entirely: that is a more fundamental problem that surfaces at the first stage (understand
+    calls ffprobe/ffmpeg) and is reported by doctor, so this guard stays narrow — and does
+    not fire in mocked, ffmpeg-less test environments."""
+    import shutil
+    if shutil.which("ffmpeg") is None:
+        return False
+    return not ffmpeg_has_subtitles_filter()
+
+
 def _preflight_burn_subtitles(args):
     """Fail fast BEFORE any understanding/VLM/ASR/TTS spend when subtitle burn-in is on but
-    this ffmpeg lacks the libass `subtitles` filter. Without it the run only dies at the
-    final assemble `-vf subtitles=` step — after the whole expensive pipeline has run."""
+    this ffmpeg can't burn it. Without it the run only dies at the final assemble
+    `-vf subtitles=` step — after the whole expensive pipeline has run."""
     if not _burn_subtitles_intended(args):
         return
-    if not ffmpeg_has_subtitles_filter():
+    if _ffmpeg_present_but_cannot_burn():
         raise SystemExit(
             "字幕烧录已开启，但当前 ffmpeg 不支持 subtitles/libass 滤镜，整条流程会跑到最后渲染才失败。\n"
             "  解决其一：(1) 安装带 libass 的 ffmpeg；(2) 加 --no-burn-subtitles 关闭烧录"

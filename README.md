@@ -53,6 +53,8 @@ sudo apt install ffmpeg                     # Debian/Ubuntu
 choco install ffmpeg                        # Windows（或 scoop / winget install ffmpeg）
 ```
 
+字幕默认烧进画面，需要带 **libass（`subtitles` 滤镜）** 的 ffmpeg——上面这些包基本都自带。如果你的 ffmpeg 没编 libass，开跑前会立刻报错并提示（也可以加 `--no-burn-subtitles` 只出 `.srt` 外挂字幕）。用 `python3 scripts/recap.py --doctor` 自检。
+
 **③ 配 MiMo API Key**（一个 key 同时驱动 ASR / VLM / TTS，放环境变量、别写进仓库）：
 
 ```bash

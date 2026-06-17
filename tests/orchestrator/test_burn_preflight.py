@@ -46,16 +46,16 @@ def test_burn_intended_env_token_forms(monkeypatch, raw, expected):
     assert recap._burn_subtitles_intended(_args()) is expected
 
 
-def test_preflight_raises_when_unsupported(monkeypatch):
+def test_preflight_raises_when_present_but_cannot_burn(monkeypatch):
     monkeypatch.delenv("BURN_SUBTITLES", raising=False)
-    monkeypatch.setattr(recap, "ffmpeg_has_subtitles_filter", lambda: False)
+    monkeypatch.setattr(recap, "_ffmpeg_present_but_cannot_burn", lambda: True)
     with pytest.raises(SystemExit, match="subtitles/libass"):
         recap._preflight_burn_subtitles(_args())
 
 
-def test_preflight_ok_when_supported(monkeypatch):
+def test_preflight_ok_when_can_burn(monkeypatch):
     monkeypatch.delenv("BURN_SUBTITLES", raising=False)
-    monkeypatch.setattr(recap, "ffmpeg_has_subtitles_filter", lambda: True)
+    monkeypatch.setattr(recap, "_ffmpeg_present_but_cannot_burn", lambda: False)
     recap._preflight_burn_subtitles(_args())  # must not raise
 
 
@@ -63,8 +63,29 @@ def test_preflight_does_not_probe_when_burn_off(monkeypatch):
     def _boom():
         raise AssertionError("must not probe ffmpeg when burn is off")
 
-    monkeypatch.setattr(recap, "ffmpeg_has_subtitles_filter", _boom)
+    monkeypatch.setattr(recap, "_ffmpeg_present_but_cannot_burn", _boom)
     recap._preflight_burn_subtitles(_args(burn_subtitles=False))  # must not raise
+
+
+def test_cannot_burn_false_when_ffmpeg_absent(monkeypatch):
+    # ffmpeg absent entirely → this guard stays out of it (fails later / reported by doctor)
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda _n: None)
+    assert recap._ffmpeg_present_but_cannot_burn() is False
+
+
+def test_cannot_burn_true_when_present_without_filter(monkeypatch):
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda _n: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(recap, "ffmpeg_has_subtitles_filter", lambda: False)
+    assert recap._ffmpeg_present_but_cannot_burn() is True
+
+
+def test_cannot_burn_false_when_present_with_filter(monkeypatch):
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda _n: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(recap, "ffmpeg_has_subtitles_filter", lambda: True)
+    assert recap._ffmpeg_present_but_cannot_burn() is False
 
 
 def test_review_pointer_prints_verdict(tmp_path, capsys):
