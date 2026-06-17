@@ -2,21 +2,19 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-Plugin-purple)
-![Powered by MiMo](https://img.shields.io/badge/AI-Xiaomi%20MiMo-green)
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
-![Cross-platform](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-informational)
+![Powered by Xiaomi MiMo](https://img.shields.io/badge/AI-Xiaomi%20MiMo-green)
 
 中文 · [English](README.en.md)
 
-**把任何视频做成中文解说 recap——在 Claude Code 里一句话搞定。** 本地只要 `ffmpeg` 和一个小米 MiMo 的 API Key，不要 GPU、不用下载模型。
+**一句话，把视频做成中文解说 recap。** 在 Claude Code 里说一声就开跑，本地只要 `ffmpeg` 加一个小米 MiMo 的 API Key——不用 GPU、不下模型，macOS / Linux / Windows 都能跑。
 
 ## 演示
 
 https://github.com/user-attachments/assets/92698ec6-0d23-4f9f-8825-c3684ef57aff
 
-成片之外，还能一键导出**剪映草稿**接着手动精修——原片片段、解说、BGM、字幕各成一轨：
+成片之外，还能一键导出**剪映草稿**手动精修——原片、解说、BGM、字幕各一轨：
 
-![导出的剪映草稿：原片片段、解说、BGM、字幕，各自独立可编辑](docs/jianying-export.png)
+<img alt="导出的剪映草稿：原片、解说、BGM、字幕各一轨" src="docs/jianying-export.png" width="70%">
 
 ## 这是什么
 
@@ -35,11 +33,11 @@ flowchart LR
 
 ## 为什么用它
 
-- **一个 key 跑全程。** ASR、VLM、TTS 全走[小米 MiMo](https://platform.xiaomimimo.com)，本地只装 `ffmpeg`。
-- **先调研再分析。** 先把剧情人物查清楚写进 `background_research.json`。
-- **解说成块，原声也成块（约 7:3）。** 解说写成一段段连续的解说块，整块一次配音、更连贯；块与块之间留出原声块——精彩原声整段放回满音量，不再被全程压低（节奏阈值 `duck_bridge_seconds` 可调）。字幕拆成短句逐句跟读，底部遮挡只占一行高度，不压画面。
-- **能剪、能审。** `--edit-mode cut` 先剪后配——先按 `clip_plan.json` 把长视频剪成成片，再对着剪好的成片时间轴写解说，解说与画面天然对齐、不会错位；出稿前一道 LLM 评审挑幻觉、钩子、主线的毛病。
-- **接着在剪映里改。** 可选导出多轨剪映草稿；核心渲染只靠 `ffmpeg`，不装剪映也照常出片。
+- **一个 key 跑全程。** ASR、VLM、TTS 全走[小米 MiMo](https://platform.xiaomimimo.com)，本地除了 `ffmpeg` 没别的依赖。
+- **先查资料再写稿。** 跑前把剧情、人物查清楚存进 `background_research.json`，VLM 才认得出谁是谁。
+- **解说成块，原声也成块。** 解说一段段连着讲、整块一次配音，段间留白把精彩原声整段放回满音量——大致七三开。
+- **先剪后配，画面不串。** `--edit-mode cut` 先把长视频剪成成片，再对着成片写解说，时间轴天然对齐；出稿前还有一道 LLM 评审挑幻觉、钩子和主线。
+- **能接着在剪映里改。** 可选导出多轨剪映草稿，原片、解说、BGM、字幕各占一轨；核心渲染只靠 `ffmpeg`，不装剪映照样出片。
 
 ## 安装
 

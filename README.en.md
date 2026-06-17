@@ -2,21 +2,19 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-Plugin-purple)
-![Powered by MiMo](https://img.shields.io/badge/AI-Xiaomi%20MiMo-green)
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
-![Cross-platform](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-informational)
+![Powered by Xiaomi MiMo](https://img.shields.io/badge/AI-Xiaomi%20MiMo-green)
 
 [中文](README.md) · English
 
-**Turn any video into a Chinese-narration recap — from one sentence inside Claude Code.** All it needs locally is `ffmpeg` and one Xiaomi MiMo API key. No GPU, no model downloads.
+**Turn any video into a Chinese-narration recap, from one sentence inside Claude Code.** All it needs locally is `ffmpeg` and one Xiaomi MiMo API key — no GPU, no model downloads, on macOS / Linux / Windows.
 
 ## Demo
 
 https://github.com/user-attachments/assets/92698ec6-0d23-4f9f-8825-c3684ef57aff
 
-Beyond the rendered MP4, you can export a **剪映/JianYing draft** to keep editing by hand — original clips, narration, BGM, and subtitles each on their own track, with the ducking as editable volume keyframes:
+Beyond the rendered MP4, you can export a **剪映/JianYing draft** to keep editing by hand — original clips, narration, BGM, and subtitles each on their own track:
 
-![Exported 剪映 draft: original clips, narration, BGM, and subtitles, each independently editable](docs/jianying-export.png)
+<img alt="Exported 剪映 draft: original clips, narration, BGM, and subtitles each on their own track" src="docs/jianying-export.png" width="70%">
 
 ## What is it?
 
@@ -35,11 +33,11 @@ flowchart LR
 
 ## Why use it?
 
-- **One key, runs anywhere.** ASR, VLM, and TTS all go through [Xiaomi MiMo](https://platform.xiaomimimo.com); the only local dependency is `ffmpeg` — no GPU, no model files, no extra service, on macOS / Linux / Windows.
-- **Research before analysis.** Put the plot and characters into `background_research.json` first, and the VLM names people on screen instead of labelling everyone "黑衣男子".
-- **Narration in blocks, original in blocks (~7:3).** Narration is written as continuous blocks, each synthesized as one fluent utterance; between blocks the original audio plays back at FULL volume instead of being ducked the whole way through (pacing tunable via `duck_bridge_seconds`). Subtitles are split into short one-line chunks and the masking band is only one line tall, so it never compresses the picture.
-- **Cut and review.** `--edit-mode cut` is cut-first/narrate-second: it renders the cut from `clip_plan.json`, then you narrate against that real output timeline, so narration and picture stay in sync by construction. An LLM review pass flags hallucinations, weak hooks, and a missing throughline before TTS.
-- **Keep editing in 剪映.** Optionally export a multi-track 剪映 draft; the core render only needs `ffmpeg` and never depends on 剪映.
+- **One key, runs anywhere.** ASR, VLM, and TTS all go through [Xiaomi MiMo](https://platform.xiaomimimo.com); `ffmpeg` is the only local dependency.
+- **Research before you write.** Get the plot and characters into `background_research.json` first, so the VLM actually knows who's who.
+- **Narration in blocks, original in blocks.** Narration plays in connected blocks, each voiced in one pass; in the gaps between, the original audio plays at full volume — roughly 7:3.
+- **Cut first, no drift.** `--edit-mode cut` renders the cut first, then you narrate against that timeline, so picture and voice stay in sync; an LLM pass reviews the draft before TTS.
+- **Keep editing in 剪映.** Optionally export a multi-track 剪映 draft — original, narration, BGM, and subtitles each on a track; the core render needs only `ffmpeg`.
 
 ## Installation
 
