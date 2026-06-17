@@ -60,7 +60,7 @@ Cut mode (`--edit-mode cut --target-duration 10m`) also requires `clip_plan.json
 Rerun the **same command** (narration.json now exists):
 
 ```bash
-python3 scripts/recap.py <video> --work-dir <work_dir>          # [--edit-mode cut] [--burn-subtitles]
+python3 scripts/recap.py <video> --work-dir <work_dir>          # [--edit-mode cut] [--no-burn-subtitles]
 ```
 
 This validates the narration, (cut: builds `edited_source.mp4`), synthesizes the voiceover, and
@@ -80,7 +80,7 @@ python3 scripts/recap.py --doctor
 ## Options (passed through to the stage skills)
 `--context`, `--scene-threshold`, `--style`, `--edit-mode {full,cut}`, `--target-duration`,
 `--skip-asr`, `--mimo-video-overview`, `--consolidate`, `--consolidate-asr`, `--mimo-tts-voice`,
-`--burn-subtitles`, `--output-dir`.
+`--no-burn-subtitles` (burn is on by default), `--output-dir`.
 
 ## What this skill does NOT do
 - Does NOT write narration.json / clip_plan.json — the agent authors those (see the video-script skill).

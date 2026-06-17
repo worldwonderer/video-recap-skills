@@ -20,6 +20,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from doctor import ffmpeg_has_subtitles_filter
+
 BUNDLE = Path(__file__).resolve().parents[2]  # the skills/ directory
 RUN_MANIFEST = "recap_run_manifest.json"
 ASSEMBLY_MANIFEST = "assembly_manifest.json"
@@ -85,6 +87,50 @@ def _load_json(path):
         return json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return None
+
+
+def _burn_subtitles_intended(args):
+    """Effective burn-subtitles state at orchestrator level. Mirrors video-assemble's
+    CONFIG default `env_bool("BURN_SUBTITLES", True)` (burn is ON by default); an explicit
+    CLI flag (--burn-subtitles / --no-burn-subtitles) overrides the env."""
+    if getattr(args, "burn_subtitles", None) is not None:
+        return bool(args.burn_subtitles)
+    raw = os.environ.get("BURN_SUBTITLES")
+    if raw is None or raw == "":
+        return True
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _preflight_burn_subtitles(args):
+    """Fail fast BEFORE any understanding/VLM/ASR/TTS spend when subtitle burn-in is on but
+    this ffmpeg lacks the libass `subtitles` filter. Without it the run only dies at the
+    final assemble `-vf subtitles=` step — after the whole expensive pipeline has run."""
+    if not _burn_subtitles_intended(args):
+        return
+    if not ffmpeg_has_subtitles_filter():
+        raise SystemExit(
+            "字幕烧录已开启，但当前 ffmpeg 不支持 subtitles/libass 滤镜，整条流程会跑到最后渲染才失败。\n"
+            "  解决其一：(1) 安装带 libass 的 ffmpeg；(2) 加 --no-burn-subtitles 关闭烧录"
+            "（仍输出 .srt 外挂字幕）。\n"
+            "  自检：python3 skills/video-recap/scripts/doctor.py")
+
+
+def _print_narration_review_pointer(work_dir):
+    """Surface the advisory narration review to the user at delivery — it is otherwise
+    buried in the video-script stage and never echoed by the orchestrator. Pointer only:
+    never blocks (validate.py is the hard gate). Silent when no review was run."""
+    review_md = Path(work_dir) / "narration_review.md"
+    if not review_md.exists():
+        return
+    data = _load_json(Path(work_dir) / "narration_review.json")
+    if isinstance(data, dict):
+        findings = [f for f in (data.get("findings") or []) if isinstance(f, dict)]
+        n_err = sum(1 for f in findings if f.get("severity") == "error")
+        tag = str(data.get("verdict") or "见文件")
+        print(f"[video-recap] 📋 解说评审（建议性，不拦截）: {tag} · "
+              f"{len(findings)} 条意见（error {n_err}）→ {review_md}")
+    else:
+        print(f"[video-recap] 📋 解说评审意见 → {review_md}")
 
 
 def _settings_for_compare(settings):
@@ -232,6 +278,10 @@ def main():
     if not args.video:
         ap.error("video is required (unless --doctor)")
 
+    # Fail fast before any expensive understanding/VLM/ASR/TTS work if the run will burn
+    # subtitles but this ffmpeg can't (otherwise it only blows up at the final render).
+    _preflight_burn_subtitles(args)
+
     video = Path(args.video).resolve()
     work_dir = Path(args.work_dir).resolve() if args.work_dir else video.parent / f"work_dir_{video.stem}"
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -336,6 +386,8 @@ def main():
         aargs += ["--output-dir", args.output_dir]
     if args.burn_subtitles is not None:
         aargs.append("--burn-subtitles" if args.burn_subtitles else "--no-burn-subtitles")
+    # env-only burn intent (BURN_SUBTITLES) is propagated implicitly: assemble re-derives it
+    # via the same env_bool default the preflight used, so the two agree by shared env.
     if cut:
         # let the timeline / 剪映 export reference the original clips, not edited_source.mp4
         aargs += ["--source-video", str(video)]
@@ -350,6 +402,7 @@ def main():
     final_dir = Path(args.output_dir) if args.output_dir else work_dir.parent
     final_output = _read_assembly_output(work_dir) or (final_dir / ("recap_" + video.stem + ".mp4"))
     print(f"[video-recap] ✅ 完成: {final_output}")
+    _print_narration_review_pointer(work_dir)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,28 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Fail faster and surface the content review, without adding new artifacts or stages.
+
+### Added
+
+- **Subtitle-burn preflight (fail fast).** Burning subtitles needs an ffmpeg built with the
+  libass `subtitles` filter. The orchestrator now checks this at the very start of a run — before
+  any understanding / VLM / ASR / TTS spend — and exits with a clear message (install a
+  libass-enabled ffmpeg, or pass `--no-burn-subtitles`) instead of dying at the final render after
+  the whole pipeline has run. `video-assemble` keeps the same guard for standalone runs.
+- **Narration review surfaced at delivery.** When an advisory `narration_review.md` exists, the
+  orchestrator prints its verdict + the path on completion, so the content risk report (weak hook /
+  no through-line / pacing) is visible at the end of a run instead of buried in the script stage.
+  Still advisory — `validate.py` remains the only hard gate.
+
+### Fixed
+
+- **Docs: subtitle burn-in is on by default.** The READMEs and SKILL.md described burn-in as
+  opt-in via `--burn-subtitles`, but it has been on by default (opt out with `--no-burn-subtitles`)
+  — corrected the wording across both READMEs and the assemble / orchestrator SKILL.md.
+
 ## [0.2.1] - 2026-06-17
 
 A delivery-quality release: narration now plays in blocks with the original audio breathing

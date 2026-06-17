@@ -97,7 +97,7 @@ python3 skills/video-recap/scripts/recap.py --doctor
 
 ## 输出
 
-- `recap_<video>.mp4`：成片（固定输出名，每次运行原地覆盖，迭代解说时刷新同一文件）。`subtitles.srt`（加 `--burn-subtitles` 时还有 `subtitles.ass`）
+- `recap_<video>.mp4`：成片（固定输出名，每次运行原地覆盖，迭代解说时刷新同一文件）。`subtitles.srt`（默认烧录字幕，同时产出 `subtitles.ass`；`--no-burn-subtitles` 关闭）
 - `work_dir/narration.json`：解说脚本（`narration_lint.json` 时间诊断、`narration_review.md` 评审意见）
 - `work_dir/agent_narration_brief.md`：给 Agent 的时间和场景 brief
 - `work_dir/vlm_analysis.json` · `asr_result.json` · `silence_periods.json` · `timeline_fusion.json`：理解产物

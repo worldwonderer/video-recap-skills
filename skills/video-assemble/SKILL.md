@@ -13,8 +13,8 @@ description: >
 
 1. Mixes the narration audio segments onto the source video at their placed times.
 2. **Ducks** the original audio under narration (fixed / sidechain / zone modes).
-3. Renders **subtitles** from the narration placement → `subtitles.srt` (+ `subtitles.ass`,
-   burned in with `--burn-subtitles`).
+3. Renders **subtitles** from the narration placement → `subtitles.srt` (+ `subtitles.ass`
+   when burning, which is **on by default**; `--no-burn-subtitles` to disable).
 4. Optional final **loudness normalization** to a target LUFS.
 
 ## Input contract
@@ -27,7 +27,7 @@ description: >
 
 ```bash
 python3 scripts/assemble.py <video> --work-dir <work_dir> \
-  [--recap-stem <name>] [--output-dir <dir>] [--burn-subtitles]
+  [--recap-stem <name>] [--output-dir <dir>] [--no-burn-subtitles]
   [--source-video <orig.mp4>] [--export-jianying [--jianying-out <dir>]]
 ```
 
@@ -35,7 +35,7 @@ python3 scripts/assemble.py <video> --work-dir <work_dir> \
 
 - `recap_<stem>.mp4` — the final recap video (written to `--output-dir` or `work_dir`'s parent). It is the stable output alias, overwritten in place on every run so iterating on the narration refreshes the same file.
 - `work_dir/output.mp4` — the in-place render.
-- `subtitles.srt` — narration subtitles; `subtitles.ass` when `--burn-subtitles` is used.
+- `subtitles.srt` — narration subtitles; `subtitles.ass` when burning subtitles (on by default).
 - `timeline.json` — backend-neutral multi-track model (video / original-audio / narration / BGM / subtitle tracks with ducking automation). Always written.
 - `assembly_manifest.json` — a slim render record: the input/source paths, the cut-mode source fingerprint (proving a stale ambient `SOURCE_VIDEO` did not leak into a full-mode export), the render settings, and the final output path.
 - 剪映 draft folder (`recap_<stem>/draft_content.json` + `draft_info.json` + `draft_meta_info.json`) — only with `--export-jianying`.
@@ -46,9 +46,11 @@ python3 scripts/assemble.py <video> --work-dir <work_dir> \
 - Subtitle look: `SUBTITLE_FONT_SIZE`, `SUBTITLE_MARGIN_V`, `SUBTITLE_MAX_CHARS`, etc.
 - Ducking / loudness: the original swells to `IDLE_ORIG_VOLUME` in the gaps and ducks to `SPEECH_DUCKING_VOLUME` under narration (`DUCK_FADE_SECONDS` smooths the transition); also `DUCKING_MODE`, `ZONE_DUCKING_VOLUME`, `FINAL_LOUDNORM`, `TARGET_LUFS`.
 - BGM (optional): set `BGM_PATH` to any audio file; it loops to length and ducks under narration (`BGM_VOLUME` / `BGM_DUCKING_VOLUME`).
-- Burning subtitles requires an ffmpeg with `subtitles`/libass support.
+- Burning subtitles requires an ffmpeg with `subtitles`/libass support; assemble (and the
+  recap orchestrator) preflight this and fail fast with a clear message if it is missing.
 
 ## What this skill does NOT do
 - Does NOT generate narration or synthesize TTS.
 - Does NOT re-transcribe or alter timing decisions — it consumes placement from tts_meta.json.
-- Burning subtitles is opt-in (`--burn-subtitles`); it does not re-encode unless asked.
+- Burning subtitles is **on by default** (`--no-burn-subtitles` to turn it off); when on, it
+  re-encodes the video to draw the subtitle band.

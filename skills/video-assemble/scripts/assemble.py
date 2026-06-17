@@ -1075,6 +1075,43 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
     log(f"解说音轨: {video_duration:.1f}s, {len(tts_segments)} 段")
 
 
+def _ffmpeg_filters():
+    """ffmpeg's compiled-in filter names. Independent copy of
+    skills/video-recap/scripts/doctor.py:_ffmpeg_filters (skills share no code) — keep the
+    parse in sync with that copy."""
+    import shutil
+    import subprocess
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return set()
+    try:
+        result = subprocess.run(["ffmpeg", "-hide_banner", "-filters"],
+                                text=True, capture_output=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if result.returncode != 0:
+        return set()
+    filters = set()
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] and parts[0][0] in ".TSCAPN|":
+            filters.add(parts[1])
+    return filters
+
+
+def _preflight_burn_subtitles():
+    """Fail before the (re-encoding) render when burn-in is on but ffmpeg lacks the libass
+    `subtitles` filter. _subtitle_burn_filter burns even the .ass through `subtitles=`, so
+    that is the required capability. Defense-in-depth: the orchestrator (recap.py) preflights
+    this earlier, but assemble.py can be run standalone."""
+    if not CONFIG.get("burn_subtitles", False):
+        return
+    if "subtitles" not in _ffmpeg_filters():
+        raise SystemExit(
+            "字幕烧录已开启，但当前 ffmpeg 不支持 subtitles/libass 滤镜，渲染会在最后一步失败。\n"
+            "  解决：安装带 libass 的 ffmpeg，或加 --no-burn-subtitles 关闭烧录（仍输出 .srt 外挂字幕）。")
+
+
 def main():
     import argparse
     import json
@@ -1117,6 +1154,7 @@ def main():
         CONFIG["jianying_bundle_media"] = True
     if args.jianying_no_bundle_media:
         CONFIG["jianying_bundle_media"] = False
+    _preflight_burn_subtitles()  # fail before the render if burn-in is on but ffmpeg lacks libass
     tts_meta = Path(args.tts_meta) if args.tts_meta else work_dir / "tts_meta.json"
     tts_segments = json.loads(tts_meta.read_text(encoding="utf-8"))["segments"]
     output_path = work_dir / "output.mp4"

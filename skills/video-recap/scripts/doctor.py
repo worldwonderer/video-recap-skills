@@ -51,6 +51,15 @@ def _ffmpeg_filters() -> set[str]:
     return filters
 
 
+def ffmpeg_has_subtitles_filter() -> bool:
+    """True when this ffmpeg can burn subtitles — its filter list includes the libass
+    `subtitles` filter. The render burns even the .ass file through `subtitles=` (see
+    video-assemble assemble.py:_subtitle_burn_filter), so this — not the `ass` filter — is
+    the exact capability `--burn-subtitles` needs. Reused by the orchestrator preflight
+    (recap.py) to fail fast before any API spend."""
+    return "subtitles" in _ffmpeg_filters()
+
+
 def _asr_status() -> dict[str, object]:
     configured = bool(CONFIG.get("mimo_asr_api_key"))
     return {
