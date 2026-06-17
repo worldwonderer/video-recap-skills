@@ -48,6 +48,9 @@ python3 scripts/assemble.py <video> --work-dir <work_dir> \
 - BGM (optional): set `BGM_PATH` to any audio file; it loops to length and ducks under narration (`BGM_VOLUME` / `BGM_DUCKING_VOLUME`).
 - Burning subtitles requires an ffmpeg with `subtitles`/libass support; assemble (and the
   recap orchestrator) preflight this and fail fast with a clear message if it is missing.
+- During original-audio blocks (the narration gaps), the original dialogue (from `asr_result.json`)
+  is also burned as subtitles so the band is never blank while the original speaks — `SUBTITLE_ORIGINAL_IN_GAPS`
+  (default on). In cut mode the ASR is remapped from source to the output timeline via the clip plan.
 
 ## What this skill does NOT do
 - Does NOT generate narration or synthesize TTS.

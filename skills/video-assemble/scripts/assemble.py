@@ -409,11 +409,178 @@ def _subtitle_entries(narration):
     return entries
 
 
-def _generate_srt(narration, work_dir):
-    """将解说脚本转为 SRT 字幕文件，使用实际音频放置时间"""
+_MIN_GAP_TO_SUBTITLE = 0.8     # shortest original-audio gap (s) worth subtitling
+_MIN_READABLE_SECONDS = 0.3    # shortest on-screen time (s) for an original-dialogue line
+_MIN_ASR_CLIP_OVERLAP = 0.05   # shortest ASR↔clip overlap (s) to keep when remapping to output
+
+
+def _karaoke_chunks(text, start, end, max_chars):
+    """Split `text` into short one-line chunks and distribute [start,end] across them in
+    proportion to character count (same karaoke timing _subtitle_entries uses for narration)."""
+    chunks = _split_subtitle_chunks(text, max_chars)
+    if not chunks or end - start < 0.1:
+        return []
+    if len(chunks) == 1:
+        return [{"start": start, "end": end, "text": chunks[0]}]
+    total_chars = sum(len(c) for c in chunks) or 1
+    span = end - start
+    out, cursor = [], start
+    for i, chunk in enumerate(chunks):
+        chunk_end = end if i == len(chunks) - 1 else cursor + span * (len(chunk) / total_chars)
+        if out and chunk_end - cursor < 0.05:
+            out[-1]["text"] += chunk
+            out[-1]["end"] = chunk_end
+        else:
+            out.append({"start": cursor, "end": chunk_end, "text": chunk})
+        cursor = chunk_end
+    return out
+
+
+def _load_work_json(work_dir, name):
+    path = Path(work_dir) / name
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+
+
+def _load_original_asr(work_dir):
+    """The original speech transcription (asr_result.json), SOURCE-time, cleaned to
+    {start,end,text} with text and a positive span. [] when absent/unparseable."""
+    segs = []
+    for s in _load_work_json(work_dir, "asr_result.json") or []:
+        if not isinstance(s, dict):
+            continue
+        try:
+            start, end = float(s["start"]), float(s["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        text = str(s.get("text", "")).strip()
+        if text and end > start:
+            segs.append({"start": start, "end": end, "text": text})
+    return segs
+
+
+def _output_clip_spans(work_dir):
+    """Cut-mode source→output clip spans from clip_plan_validated.json (or clip_plan.json),
+    each {source_start, source_end, output_start, output_end}. None in full mode (no cut)."""
+    plan = _load_work_json(work_dir, "clip_plan_validated.json") or _load_work_json(work_dir, "clip_plan.json")
+    if not plan:
+        return None
+    entries = plan.get("clips", plan) if isinstance(plan, dict) else plan
+    if not isinstance(entries, list):
+        return None
+    spans, cursor = [], 0.0
+    for c in entries:
+        if not isinstance(c, dict):
+            continue
+        try:
+            ss = float(c.get("source_start", c.get("start")))
+            se = float(c.get("source_end", c.get("end")))
+        except (TypeError, ValueError):
+            continue
+        if se - ss <= 0:
+            continue
+        out_s, out_e = c.get("output_start"), c.get("output_end")
+        if out_s is None or out_e is None:
+            out_s, out_e = cursor, cursor + (se - ss)
+            cursor += se - ss
+        else:
+            out_s, out_e = float(out_s), float(out_e)
+            cursor = max(cursor, out_e)
+        spans.append({"source_start": ss, "source_end": se, "output_start": out_s, "output_end": out_e})
+    return spans or None
+
+
+def _map_asr_to_output(asr_segs, clip_spans):
+    """Map SOURCE-time ASR segments onto the OUTPUT timeline. Full mode (clip_spans None) is
+    identity; cut mode intersects each ASR span with each kept clip (a straddling line yields one
+    fragment per clip; lines in cut-away footage are dropped)."""
+    if clip_spans is None:
+        return [dict(s) for s in asr_segs]
+    out = []
+    for seg in asr_segs:
+        for c in clip_spans:
+            ov_s, ov_e = max(seg["start"], c["source_start"]), min(seg["end"], c["source_end"])
+            if ov_e - ov_s <= _MIN_ASR_CLIP_OVERLAP:
+                continue
+            out.append({
+                "start": c["output_start"] + (ov_s - c["source_start"]),
+                "end": c["output_start"] + (ov_e - c["source_start"]),
+                "text": seg["text"],
+            })
+    return out
+
+
+def _narration_gap_windows(tts_segments, video_duration, min_gap=_MIN_GAP_TO_SUBTITLE):
+    """OUTPUT-timeline stretches with NO narration (the original-audio blocks): the complement of
+    the merged narration placement windows within [0, video_duration], keeping gaps >= min_gap."""
+    placed = sorted(
+        (_seg_place_window(s) for s in tts_segments if isinstance(s, dict)), key=lambda w: w[0])
+    merged = []
+    for s, e in placed:
+        if e - s <= 0:
+            continue
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    gaps, cursor = [], 0.0
+    for s, e in merged:
+        if s - cursor >= min_gap:
+            gaps.append((cursor, s))
+        cursor = max(cursor, e)
+    if video_duration - cursor >= min_gap:
+        gaps.append((cursor, float(video_duration)))
+    return gaps
+
+
+def _original_gap_subtitle_entries(tts_segments, work_dir, video_duration):
+    """Subtitle entries for the ORIGINAL dialogue during the original-audio blocks (narration
+    gaps), so the band is not blank while the original speaks. Off unless we are burning and
+    subtitle_original_in_gaps is set; no-op when there is no ASR. Cut mode remaps ASR to output."""
+    # Only fill the gaps when we are masking the source's own subs (else they already show there
+    # and ours would double). subtitle_original_in_gaps is the explicit override.
+    if not (CONFIG.get("burn_subtitles", False)
+            and CONFIG.get("mask_source_subtitles", False)
+            and CONFIG.get("subtitle_original_in_gaps", True)):
+        return []
+    asr = _load_original_asr(work_dir)
+    if not asr:
+        return []
+    gaps = _narration_gap_windows(tts_segments, video_duration)
+    if not gaps:
+        return []
+    mapped = _map_asr_to_output(asr, _output_clip_spans(work_dir))
+    max_chars = int(CONFIG.get("subtitle_max_chars", 20))
+    entries = []
+    for seg in mapped:
+        for g_s, g_e in gaps:
+            cs, ce = max(seg["start"], g_s), min(seg["end"], g_e)
+            if ce - cs < _MIN_READABLE_SECONDS:  # too short to read
+                continue
+            entries.extend(_karaoke_chunks(seg["text"], cs, ce, max_chars))
+    return entries
+
+
+def _combined_subtitle_entries(narration, work_dir, video_duration):
+    """Narration subtitle entries plus original-dialogue entries in the gaps, sorted by start.
+    Original entries are confined to narration gaps, so they never overlap narration entries."""
+    entries = list(_subtitle_entries(narration))
+    entries.extend(_original_gap_subtitle_entries(narration, work_dir, video_duration))
+    entries.sort(key=lambda x: (x["start"], x["end"]))
+    return entries
+
+
+def _generate_srt(narration, work_dir, video_duration=None):
+    """将解说脚本转为 SRT 字幕文件，使用实际音频放置时间。video_duration 给定时，原声留白处补烧原声字幕。"""
     srt_lines = []
-    # entries are already split into short one-line chunks by _subtitle_entries, so no wrapping here.
-    for idx, entry in enumerate(_subtitle_entries(narration), start=1):
+    entries = (_subtitle_entries(narration) if video_duration is None
+               else _combined_subtitle_entries(narration, work_dir, video_duration))
+    # entries are already split into short one-line chunks, so no wrapping here.
+    for idx, entry in enumerate(entries, start=1):
         start_ts = _seconds_to_srt_time(entry["start"])
         end_ts = _seconds_to_srt_time(entry["end"])
         srt_lines.append(str(idx))
@@ -438,8 +605,9 @@ def _escape_ass_text(text):
     )
 
 
-def _generate_ass(narration, work_dir):
-    """Generate an ASS subtitle file for readable hard-sub rendering."""
+def _generate_ass(narration, work_dir, video_duration=None):
+    """Generate an ASS subtitle file for readable hard-sub rendering. video_duration given ⇒ also
+    burn the original dialogue (from ASR) during the original-audio gaps."""
     style = _subtitle_style_config()
     ass_lines = [
         "[Script Info]",
@@ -467,8 +635,10 @@ def _generate_ass(narration, work_dir):
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
-    # entries are already split into short one-line chunks by _subtitle_entries, so no wrapping here.
-    for entry in _subtitle_entries(narration):
+    entries = (_subtitle_entries(narration) if video_duration is None
+               else _combined_subtitle_entries(narration, work_dir, video_duration))
+    # entries are already split into short one-line chunks, so no wrapping here.
+    for entry in entries:
         text = _escape_ass_text(entry["text"])
         ass_lines.append(
             "Dialogue: 0,"
@@ -742,12 +912,12 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
     narration_wav = work_dir / "narration.wav"
     _build_timed_narration(tts_segments, narration_wav, video_duration, work_dir)
 
-    # 始终生成 SRT 字幕文件
-    srt_path = _generate_srt(tts_segments, work_dir)
+    # 始终生成 SRT 字幕文件（原声留白处补烧原声字幕，传入成片时长以计算留白区间）
+    srt_path = _generate_srt(tts_segments, work_dir, video_duration)
     log(f"字幕文件: {srt_path}")
     ass_path = None
     if CONFIG.get("burn_subtitles", False):
-        ass_path = _generate_ass(tts_segments, work_dir)
+        ass_path = _generate_ass(tts_segments, work_dir, video_duration)
         log(f"压制字幕文件: {ass_path}")
 
     # 可选 BGM：作为一条独立音轨（input [2:a]）混入，旁白处自动压低
