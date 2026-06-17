@@ -765,3 +765,19 @@ def test_subtitle_entries_distribute_block_window_across_chunks():
         assert b["start"] == pytest.approx(a["end"])         # contiguous, karaoke-style
         assert a["end"] > a["start"]
     assert all(len(e["text"]) <= 20 for e in entries)        # each line is short
+
+
+def test_subtitle_entries_never_drops_a_sub_threshold_chunk():
+    # A trailing chunk whose proportional slice is < 0.05s must be folded into the previous line,
+    # not silently dropped — otherwise its text would vanish from the burned subtitles.
+    entries = _subtitle_entries([
+        {
+            "start": 0.0, "end": 0.3,
+            "actual_place_start": 0.0, "actual_place_end": 0.3,
+            "narration": "第一句子比较长一点点。第二句子也比较长。第三。",
+        }
+    ])
+    joined = "".join(e["text"] for e in entries)
+    assert "第三" in joined                                   # the tiny trailing chunk survives
+    assert entries[-1]["end"] == pytest.approx(0.3)          # still closes at the audio end
+    assert joined == "第一句子比较长一点点。第二句子也比较长。第三。"

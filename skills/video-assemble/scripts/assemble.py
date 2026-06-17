@@ -269,16 +269,16 @@ def assembly_settings_fingerprint():
         "narration_timing": {
             "delay_seconds": CONFIG.get("narration_delay_seconds", 1.5),
             "tail_pad_seconds": CONFIG.get("narration_tail_pad_seconds", 0.1),
-            "fade_ms": CONFIG.get("fade_ms", 300),
+            "fade_ms": CONFIG.get("fade_ms", 120),
             "narration_speed": CONFIG.get("narration_speed", 1.0),
         },
         "audio_mix": {
             "ducking_mode": CONFIG.get("ducking_mode", "fixed"),
-            "duck_fade_seconds": CONFIG.get("duck_fade_seconds", 0.25),
-            "duck_bridge_seconds": CONFIG.get("duck_bridge_seconds", 12.0),
+            "duck_fade_seconds": CONFIG.get("duck_fade_seconds", 0.3),
+            "duck_bridge_seconds": CONFIG.get("duck_bridge_seconds", 1.5),
             "ducking_narr_weight": CONFIG.get("ducking_narr_weight", 1.5),
-            "ducking_orig_volume": CONFIG.get("ducking_orig_volume", 0.5),
-            "idle_orig_volume": CONFIG.get("idle_orig_volume", 0.85),
+            "ducking_orig_volume": CONFIG.get("ducking_orig_volume", 0.3),
+            "idle_orig_volume": CONFIG.get("idle_orig_volume", 1.0),
             "speech_ducking_volume": CONFIG.get("speech_ducking_volume", 0.2),
             "zone_ducking_volume": CONFIG.get("zone_ducking_volume", 0.12),
             "ducking_threshold": CONFIG.get("ducking_threshold", 0.15),
@@ -301,7 +301,10 @@ def assembly_settings_fingerprint():
 
 def _wrap_subtitle_text(text, max_chars=20, line_break="\n"):
     """把过长字幕折成均衡的两行：在最接近中点的标点处断开，标点跟在上一行末尾，
-    绝不让结尾的句号/逗号单独掉到第二行（之前的强制断行会孤立标点、两行严重失衡）。"""
+    绝不让结尾的句号/逗号单独掉到第二行（之前的强制断行会孤立标点、两行严重失衡）。
+
+    遗留工具：现在字幕由 _subtitle_entries / _split_subtitle_chunks 拆成短的单行块，烧录链路
+    不再调用本函数；保留仅作单元测试与兜底。"""
     text = text.strip()
     if len(text) <= max_chars:
         return text
@@ -395,7 +398,12 @@ def _subtitle_entries(narration):
         cursor = start
         for i, chunk in enumerate(chunks):
             chunk_end = end if i == len(chunks) - 1 else cursor + span * (len(chunk) / total_chars)
-            if chunk_end - cursor >= 0.05:
+            if i > 0 and chunk_end - cursor < 0.05:
+                # slice too short to show on its own — fold the text into the previous line of THIS
+                # block (i>0) and extend its end, so no chunk is ever silently dropped.
+                entries[-1]["text"] += chunk
+                entries[-1]["end"] = chunk_end
+            else:
                 entries.append({"start": cursor, "end": chunk_end, "text": chunk})
             cursor = chunk_end
     return entries
@@ -404,13 +412,13 @@ def _subtitle_entries(narration):
 def _generate_srt(narration, work_dir):
     """将解说脚本转为 SRT 字幕文件，使用实际音频放置时间"""
     srt_lines = []
-    max_chars = int(CONFIG.get("subtitle_max_chars", 20))
+    # entries are already split into short one-line chunks by _subtitle_entries, so no wrapping here.
     for idx, entry in enumerate(_subtitle_entries(narration), start=1):
         start_ts = _seconds_to_srt_time(entry["start"])
         end_ts = _seconds_to_srt_time(entry["end"])
         srt_lines.append(str(idx))
         srt_lines.append(f"{start_ts} --> {end_ts}")
-        srt_lines.append(_wrap_subtitle_text(entry["text"], max_chars=max_chars))
+        srt_lines.append(entry["text"])
         srt_lines.append("")
     srt_path = work_dir / "subtitles.srt"
     srt_path.write_text("\n".join(srt_lines), encoding="utf-8")
@@ -459,9 +467,9 @@ def _generate_ass(narration, work_dir):
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
-    max_chars = int(style["max_chars"])
+    # entries are already split into short one-line chunks by _subtitle_entries, so no wrapping here.
     for entry in _subtitle_entries(narration):
-        text = _wrap_subtitle_text(_escape_ass_text(entry["text"]), max_chars=max_chars, line_break="\\N")
+        text = _escape_ass_text(entry["text"])
         ass_lines.append(
             "Dialogue: 0,"
             f"{_seconds_to_ass_time(entry['start'])},{_seconds_to_ass_time(entry['end'])},"
