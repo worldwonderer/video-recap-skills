@@ -36,6 +36,11 @@ All timestamps are **original-video time**.
 | `pause_after_ms` | pause after segment, default 250 (keeps a tight rhythm) |
 | `overlaps_speech` | overlaps original dialogue; default `true` for continuous-bed style, `false` only in true silence |
 
+Optionally also author `original_subtitles.json` — `[{start,end,text}]` (OUTPUT time) — the calibrated
+original dialogue burned during the original-audio gaps (ASR errors/names fixed, only what is actually
+spoken there). Rendered in `「」` to set it apart from narration. If omitted, assemble falls back to a
+conservative auto-ASR mapping. See the brief's `原声留白字幕` section.
+
 ### 写作规则（连续原声铺底的高密度 recap）
 
 1. **连续解说**：沿整条时间轴用短促 beat 连续解说，原声作为压低的背景一直存在。

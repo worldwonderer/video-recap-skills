@@ -409,15 +409,15 @@ def _subtitle_entries(narration):
     return entries
 
 
-_MIN_GAP_TO_SUBTITLE = 0.8     # shortest original-audio gap (s) worth subtitling
-_MIN_READABLE_SECONDS = 0.3    # shortest on-screen time (s) for an original-dialogue line
-_MIN_ASR_CLIP_OVERLAP = 0.05   # shortest ASR↔clip overlap (s) to keep when remapping to output
+_MIN_GAP_TO_SUBTITLE = 0.8       # shortest original-audio gap (s) worth subtitling
+_MIN_READABLE_SECONDS = 0.3      # shortest on-screen time (s) for an original-dialogue line
+_MIN_ASR_CLIP_OVERLAP = 0.05     # shortest ASR↔clip overlap (s) to keep when remapping to output
+_MAX_ORIGINAL_READ_CPS = 9.0     # densest an AUTO (uncalibrated) original line may be shown — skip cram
 
 
-def _karaoke_chunks(text, start, end, max_chars):
-    """Split `text` into short one-line chunks and distribute [start,end] across them in
-    proportion to character count (same karaoke timing _subtitle_entries uses for narration)."""
-    chunks = _split_subtitle_chunks(text, max_chars)
+def _distribute_chunks(chunks, start, end):
+    """Distribute [start,end] across one-line `chunks` in proportion to character count
+    (karaoke timing). Folds a too-short trailing slice into the previous line."""
     if not chunks or end - start < 0.1:
         return []
     if len(chunks) == 1:
@@ -434,6 +434,22 @@ def _karaoke_chunks(text, start, end, max_chars):
             out.append({"start": cursor, "end": chunk_end, "text": chunk})
         cursor = chunk_end
     return out
+
+
+def _karaoke_chunks(text, start, end, max_chars):
+    """Split narration `text` into short one-line chunks distributed across [start,end]."""
+    return _distribute_chunks(_split_subtitle_chunks(text, max_chars), start, end)
+
+
+def _bracketed_original_chunks(text, start, end, max_chars):
+    """Like _karaoke_chunks, but for ORIGINAL dialogue: wrap the whole line in 「」 so it reads
+    as quoted original speech, visually distinct from the recap's own narration."""
+    chunks = _split_subtitle_chunks(str(text).strip().strip("「」"), max_chars)
+    if chunks:
+        chunks = list(chunks)
+        chunks[0] = "「" + chunks[0]
+        chunks[-1] = chunks[-1] + "」"
+    return _distribute_chunks(chunks, start, end)
 
 
 def _load_work_json(work_dir, name):
@@ -461,6 +477,28 @@ def _load_original_asr(work_dir):
         if text and end > start:
             segs.append({"start": start, "end": end, "text": text})
     return segs
+
+
+def _load_agent_original_subtitles(work_dir):
+    """Agent-calibrated original-dialogue subtitles (original_subtitles.json): OUTPUT-time
+    [{start,end,text}] the writer authors alongside narration.json — the corrected, gap-aligned
+    transcript of what is ACTUALLY said in each original-audio gap (ASR errors/names fixed).
+    None when absent/invalid (then assemble falls back to a conservative auto-ASR mapping)."""
+    data = _load_work_json(work_dir, "original_subtitles.json")
+    if not isinstance(data, list):
+        return None
+    out = []
+    for s in data:
+        if not isinstance(s, dict):
+            continue
+        try:
+            start, end = float(s["start"]), float(s["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        text = str(s.get("text", "")).strip()
+        if text and end > start:
+            out.append({"start": start, "end": end, "text": text})
+    return out or None
 
 
 def _output_clip_spans(work_dir):
@@ -547,21 +585,38 @@ def _original_gap_subtitle_entries(tts_segments, work_dir, video_duration):
             and CONFIG.get("mask_source_subtitles", False)
             and CONFIG.get("subtitle_original_in_gaps", True)):
         return []
-    asr = _load_original_asr(work_dir)
-    if not asr:
-        return []
     gaps = _narration_gap_windows(tts_segments, video_duration)
     if not gaps:
         return []
-    mapped = _map_asr_to_output(asr, _output_clip_spans(work_dir))
+
+    # Prefer the agent-calibrated transcript; else fall back to a conservative ASR mapping.
+    agent = _load_agent_original_subtitles(work_dir)
+    if agent is not None:
+        candidates, calibrated = agent, True
+    else:
+        asr = _load_original_asr(work_dir)
+        if not asr:
+            return []
+        candidates, calibrated = _map_asr_to_output(asr, _output_clip_spans(work_dir)), False
+
     max_chars = int(CONFIG.get("subtitle_max_chars", 20))
     entries = []
-    for seg in mapped:
-        for g_s, g_e in gaps:
-            cs, ce = max(seg["start"], g_s), min(seg["end"], g_e)
-            if ce - cs < _MIN_READABLE_SECONDS:  # too short to read
-                continue
-            entries.extend(_karaoke_chunks(seg["text"], cs, ce, max_chars))
+    for seg in candidates:
+        # Assign each line to the ONE gap its midpoint falls in, then clip to that gap — so a long
+        # source line never gets shown in several gaps or crammed where it isn't actually spoken.
+        mid = (seg["start"] + seg["end"]) / 2.0
+        gap = next(((gs, ge) for gs, ge in gaps if gs <= mid < ge), None)
+        if gap is None:
+            continue
+        cs, ce = max(seg["start"], gap[0]), min(seg["end"], gap[1])
+        if ce - cs < _MIN_READABLE_SECONDS:
+            continue
+        text = str(seg["text"]).strip()
+        # Over-render guard (fallback only): a raw ASR block too dense to read in the time it lands
+        # would flash unreadable text for audio that was cut/ducked — skip it (the agent fixes this).
+        if not calibrated and len(text) > (ce - cs) * _MAX_ORIGINAL_READ_CPS:
+            continue
+        entries.extend(_bracketed_original_chunks(text, cs, ce, max_chars))
     return entries
 
 

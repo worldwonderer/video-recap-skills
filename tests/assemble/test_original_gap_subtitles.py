@@ -133,17 +133,56 @@ def test_generate_ass_includes_original_only_with_duration(monkeypatch, tmp_path
     assert "原声台词" not in ass2 and "解说" in ass2
 
 
-def test_original_entry_straddling_narration_window_is_split(monkeypatch, tmp_path):
+def test_original_line_assigned_to_single_gap_by_midpoint(monkeypatch, tmp_path):
+    # a line whose MIDPOINT sits in a narration window is dropped by the fallback (conservative) —
+    # it is not shown in several gaps or crammed where it isn't actually spoken
     _burn_on(monkeypatch)
-    # one long original line (3-10) straddles a narration window at output [5,8]
     (tmp_path / "asr_result.json").write_text(
-        json.dumps([{"start": 3.0, "end": 10.0, "text": "一句很长的原声台词横跨了解说块"}]), encoding="utf-8")
+        json.dumps([{"start": 3.0, "end": 10.0, "text": "一句横跨解说块的原声"}]), encoding="utf-8")
+    segs = [{"actual_place_start": 5.0, "actual_place_end": 8.0, "narration": "解说"}]  # midpoint 6.5 ∈ narration
+    assert assemble._original_gap_subtitle_entries(segs, tmp_path, 12.0) == []
+
+
+def test_original_lines_wrapped_in_brackets(monkeypatch, tmp_path):
+    _burn_on(monkeypatch)
+    (tmp_path / "asr_result.json").write_text(
+        json.dumps([{"start": 1.0, "end": 4.0, "text": "我赶回来了"}]), encoding="utf-8")
     segs = [{"actual_place_start": 5.0, "actual_place_end": 8.0, "narration": "解说"}]
-    entries = assemble._original_gap_subtitle_entries(segs, tmp_path, 12.0)
+    entries = assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0)
     assert entries
-    # nothing bleeds into the narration window [5,8]
-    for e in entries:
-        assert e["end"] <= 5.0 + 1e-6 or e["start"] >= 8.0 - 1e-6
-    # both gap fragments (before 5 and after 8) are represented
-    assert any(e["end"] <= 5.0 + 1e-6 for e in entries)
-    assert any(e["start"] >= 8.0 - 1e-6 for e in entries)
+    joined = "".join(e["text"] for e in entries)
+    assert joined.startswith("「") and joined.endswith("」")
+
+
+def test_agent_subtitles_preferred_over_asr(monkeypatch, tmp_path):
+    _burn_on(monkeypatch)
+    # ASR has a (wrong) line; the agent-calibrated file should win
+    (tmp_path / "asr_result.json").write_text(
+        json.dumps([{"start": 1.0, "end": 4.0, "text": "她叫叶青眉"}]), encoding="utf-8")
+    (tmp_path / "original_subtitles.json").write_text(
+        json.dumps([{"start": 1.5, "end": 3.5, "text": "她叫叶轻眉"}]), encoding="utf-8")
+    segs = [{"actual_place_start": 5.0, "actual_place_end": 8.0, "narration": "解说"}]
+    entries = assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0)
+    joined = "".join(e["text"] for e in entries)
+    assert "叶轻眉" in joined and "叶青眉" not in joined  # calibrated text, ASR error not used
+
+
+def test_over_dense_asr_line_skipped_in_fallback(monkeypatch, tmp_path):
+    # a long ASR block landing in a tiny gap would flash unreadable text → skip it (no agent file)
+    _burn_on(monkeypatch)
+    dense = "我既然回来了京都就是最安全的小姐遇害你和你的黑骑为什么不在京都我听命行事"  # ~34 chars
+    (tmp_path / "asr_result.json").write_text(
+        json.dumps([{"start": 2.0, "end": 4.0, "text": dense}]), encoding="utf-8")  # 34 chars in a 2s slot
+    segs = [{"actual_place_start": 6.0, "actual_place_end": 9.0, "narration": "解说"}]
+    # 34 chars / 2s = 17 ch/s > 9 ch/s guard → dropped
+    assert assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0) == []
+
+
+def test_calibrated_line_not_subject_to_density_guard(monkeypatch, tmp_path):
+    # the agent file is trusted: even a dense-looking line is shown (the agent sized it)
+    _burn_on(monkeypatch)
+    dense = "我既然回来了京都就是最安全的小姐遇害你和你的黑骑为什么不在京都"
+    (tmp_path / "original_subtitles.json").write_text(
+        json.dumps([{"start": 1.0, "end": 3.0, "text": dense}]), encoding="utf-8")
+    segs = [{"actual_place_start": 6.0, "actual_place_end": 9.0, "narration": "解说"}]
+    assert assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0)  # kept

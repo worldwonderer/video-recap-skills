@@ -3,45 +3,25 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.2] - 2026-06-18
 
-Make the block-delivery recap connect — subtitle the original-audio blocks, stop cutting lines
-mid-sentence, and hand off between narration and original — plus fail faster and surface the review.
+让分块解说的成片更连贯、更好看：给原声留白补上**校对过**的字幕、解说与原声自然衔接、剪辑不再切断台词；并把会到最后才炸的失败提前暴露。
 
-### Added
+### 新增
 
-- **Original-audio blocks are now subtitled.** During the deliberate original-audio gaps the
-  original dialogue (from `asr_result.json`) is burned in our one-line style, so the subtitle band
-  is never blank while the original speaks. Cut mode remaps the ASR from source to the output
-  timeline via the clip plan. Active whenever subtitles are masked + burned
-  (`SUBTITLE_ORIGINAL_IN_GAPS`, default on).
-- **Clips no longer cut a spoken line mid-sentence (cut mode).** `video-cut` snaps each clip's end
-  forward to the next natural pause (within `CLIP_SNAP_MAX_EXTEND`, default 2s; `SNAP_CLIP_LINE_END`
-  to toggle) so an original line completes; the clip-selection brief also tells the writer to end
-  clips on a complete line.
-- **Subtitle-burn preflight (fail fast).** Burning subtitles needs an ffmpeg built with the
-  libass `subtitles` filter. The orchestrator now checks this at the very start of a run — before
-  any understanding / VLM / ASR / TTS spend — and exits with a clear message (install a
-  libass-enabled ffmpeg, or pass `--no-burn-subtitles`) instead of dying at the final render after
-  the whole pipeline has run. `video-assemble` keeps the same guard for standalone runs.
-- **Narration review surfaced at delivery.** When an advisory `narration_review.md` exists, the
-  orchestrator prints its verdict + the path on completion, so the content risk report (weak hook /
-  no through-line / pacing) is visible at the end of a run instead of buried in the script stage.
-  Still advisory — `validate.py` remains the only hard gate.
+- **原声留白也烧字幕了。** 解说块之间留给原声的留白，过去字幕是空的（解说字幕只写解说，原片自带字幕又被遮挡）。现在这些留白会烧上**原声台词字幕**，并用 `「」` 与解说区分开。优先采用 Agent 校对过的 `original_subtitles.json`（OUTPUT 时间轴 `[{start,end,text}]`：订正 ASR 错字与人名、只保留留白里真正出声的台词）；没有该文件时退回保守的 ASR 兜底——按句归到它所在的那一段留白、跳过太密读不完的行（`SUBTITLE_ORIGINAL_IN_GAPS`，默认开；cut 模式按剪辑计划把 ASR 从源时间映射到成片时间）。
+- **剪辑不再切断一句台词（cut 模式）。** `video-cut` 会把每个片段的结尾向后吸附到最近的自然停顿（依据 `silence_periods.json`，上限 `CLIP_SNAP_MAX_EXTEND`，默认 2 秒；`SNAP_CLIP_LINE_END` 可开关），让原声把话说完；选片 brief 也提示 Agent 在完整句尾收口。
+- **字幕烧录预检（快速失败）。** 烧字幕需要带 libass（`subtitles` 滤镜）的 ffmpeg。编排器在整条流程开跑前就检查，缺失即报错并给出处置（装一个带 libass 的 ffmpeg，或加 `--no-burn-subtitles`），不再跑完理解 / VLM / ASR / TTS、到最后渲染才失败；`video-assemble` 单独运行时同样有此预检。
+- **成片时直接给出解说评审入口。** 存在 `narration_review.md` 时，编排器收尾会打印它的结论与路径，把内容风险（钩子弱 / 没主线 / 节奏）摆到眼前——仍是建议性，硬门禁只有 `validate.py`。
 
-### Changed
+### 变更
 
-- **Narration blocks now hand off to the original audio.** The brief, the writing rules, and the
-  advisory reviewer teach the block right before an original-audio gap to lead INTO it and the block
-  right after to pick UP from what the original just showed — so the narration and the original it
-  brackets read as one continuous beat instead of 各说各的 (new advisory `disjoint_handoff` review
-  category).
+- **解说块与原声自然衔接。** brief、写作规则和评审一起教会 Agent：原声留白前的那一块要把原声**引出来**，留白后的那一块要**接住**原声刚呈现的内容，让解说和它包裹的原声读成一个连贯的 beat，而不是各说各的（评审新增 `disjoint_handoff` 类别）。
 
-### Fixed
+### 修复
 
-- **Docs: subtitle burn-in is on by default.** The READMEs and SKILL.md described burn-in as
-  opt-in via `--burn-subtitles`, but it has been on by default (opt out with `--no-burn-subtitles`)
-  — corrected the wording across both READMEs and the assemble / orchestrator SKILL.md.
+- **原声字幕过度渲染 / 与解说混在一起。** 早先的实现会把一整段（多句）ASR 文本塞进一小段留白、还在多段留白里重复出现，渲染出根本没说出口的台词。现在按句归属到单段留白、跳过过密的行、并用 `「」` 与解说分隔；最佳效果由 Agent 校对的 `original_subtitles.json` 提供。
+- **文档：字幕烧录默认开启。** 两份 README 与 SKILL.md 原先把烧字幕写成需要 `--burn-subtitles` 才开，实际是默认开（用 `--no-burn-subtitles` 关闭）；已更正措辞。
 
 ## [0.2.1] - 2026-06-17
 
