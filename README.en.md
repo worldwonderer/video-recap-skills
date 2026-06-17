@@ -37,7 +37,7 @@ flowchart LR
 
 - **One key, runs anywhere.** ASR, VLM, and TTS all go through [Xiaomi MiMo](https://platform.xiaomimimo.com); the only local dependency is `ffmpeg` — no GPU, no model files, no extra service, on macOS / Linux / Windows.
 - **Research before analysis.** Put the plot and characters into `background_research.json` first, and the VLM names people on screen instead of labelling everyone "黑衣男子".
-- **Original audio survives, continuous bed.** Narration is mixed over the original ducked into one continuous low bed; the short gaps between sentences no longer let the original pop back up (tunable via `duck_bridge_seconds`) — only the lead-in, lead-out, and pauses longer than that threshold return to full volume.
+- **Narration in blocks, original in blocks (~7:3).** Narration is written as continuous blocks, each synthesized as one fluent utterance; between blocks the original audio plays back at FULL volume instead of being ducked the whole way through (pacing tunable via `duck_bridge_seconds`). Subtitles are split into short one-line chunks and the masking band is only one line tall, so it never compresses the picture.
 - **Cut and review.** `--edit-mode cut` is cut-first/narrate-second: it renders the cut from `clip_plan.json`, then you narrate against that real output timeline, so narration and picture stay in sync by construction. An LLM review pass flags hallucinations, weak hooks, and a missing throughline before TTS.
 - **Keep editing in 剪映.** Optionally export a multi-track 剪映 draft; the core render only needs `ffmpeg` and never depends on 剪映.
 

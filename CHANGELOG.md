@@ -3,6 +3,37 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-06-17
+
+A delivery-quality release: narration now plays in blocks with the original audio breathing
+between them at full volume, and the burned-in subtitle band no longer compresses the picture.
+
+### Changed
+
+- **Narration is delivered in BLOCKS, ~7:3.** Each beat is a few sentences written as one
+  continuous thought and synthesized as a single fluent TTS utterance — fixing the choppy,
+  sentence-by-sentence delivery. Between blocks the recap leaves deliberate original-audio
+  blocks (~30% of the timeline) where the original scene plays at FULL volume.
+- **Original-audio blocks play at full volume.** `idle_orig_volume` now defaults to `1.0` and
+  `duck_bridge_seconds` to `1.5` (was `12`), so the original is ducked only under a narration
+  block and swells back to full in the gaps, instead of sitting under one permanent low bed.
+  This reverses the 0.2.0 "continuous bed" default. Tune with `IDLE_ORIG_VOLUME` /
+  `DUCK_BRIDGE_SECONDS`.
+- **Burned-in subtitles are split into short one-line chunks** timed karaoke-style across each
+  block, and the source-subtitle masking band is sized for ONE line (~14% of height) instead of
+  two (~23%) — the black band no longer compresses the picture.
+- **The brief and lint steer block authoring.** The agent is told to write blocks and leave
+  ~30% original-audio gaps; the per-sentence density lint is replaced by a block-coverage lint
+  (`no_original_blocks` / `under_narrated` / `no_original_breaks` / `fragmented_beats`), and the
+  block count is derived from coverage instead of beats-per-minute.
+
+### Fixed
+
+- **Blocks are no longer truncated by the speed-up.** `voiceover` sized a segment's text against
+  the raw TTS duration, ignoring the `narration_speed` (1.3×) atempo that assemble applies before
+  placement — so a correctly-budgeted block was clipped into a fragment. The truncation budget now
+  accounts for `narration_speed`.
+
 ## [0.2.0] - 2026-06-16
 
 A quality-focused release that re-architects cut mode and the narration mix so the
