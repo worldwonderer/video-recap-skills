@@ -5,10 +5,20 @@ All notable changes to this project are documented here. This project adheres to
 
 ## [Unreleased]
 
-Fail faster and surface the content review, without adding new artifacts or stages.
+Make the block-delivery recap connect — subtitle the original-audio blocks, stop cutting lines
+mid-sentence, and hand off between narration and original — plus fail faster and surface the review.
 
 ### Added
 
+- **Original-audio blocks are now subtitled.** During the deliberate original-audio gaps the
+  original dialogue (from `asr_result.json`) is burned in our one-line style, so the subtitle band
+  is never blank while the original speaks. Cut mode remaps the ASR from source to the output
+  timeline via the clip plan. Active whenever subtitles are masked + burned
+  (`SUBTITLE_ORIGINAL_IN_GAPS`, default on).
+- **Clips no longer cut a spoken line mid-sentence (cut mode).** `video-cut` snaps each clip's end
+  forward to the next natural pause (within `CLIP_SNAP_MAX_EXTEND`, default 2s; `SNAP_CLIP_LINE_END`
+  to toggle) so an original line completes; the clip-selection brief also tells the writer to end
+  clips on a complete line.
 - **Subtitle-burn preflight (fail fast).** Burning subtitles needs an ffmpeg built with the
   libass `subtitles` filter. The orchestrator now checks this at the very start of a run — before
   any understanding / VLM / ASR / TTS spend — and exits with a clear message (install a
@@ -18,6 +28,14 @@ Fail faster and surface the content review, without adding new artifacts or stag
   orchestrator prints its verdict + the path on completion, so the content risk report (weak hook /
   no through-line / pacing) is visible at the end of a run instead of buried in the script stage.
   Still advisory — `validate.py` remains the only hard gate.
+
+### Changed
+
+- **Narration blocks now hand off to the original audio.** The brief, the writing rules, and the
+  advisory reviewer teach the block right before an original-audio gap to lead INTO it and the block
+  right after to pick UP from what the original just showed — so the narration and the original it
+  brackets read as one continuous beat instead of 各说各的 (new advisory `disjoint_handoff` review
+  category).
 
 ### Fixed
 

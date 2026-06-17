@@ -1,9 +1,38 @@
 """Self-contained utilities for the video-cut skill (no cross-skill imports)."""
+import os
 import subprocess
 
 
 def log(msg):
     print(f"[video-cut] {msg}", flush=True)
+
+
+def env_bool(name, default):
+    """Read an env var as a boolean (1/true/yes → True; 0/false/no → False)."""
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes")
+
+
+def env_float(name, default, min_val=None):
+    """Read an env var as a float, with an optional minimum clamp."""
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    try:
+        result = float(val.strip())
+    except (ValueError, AttributeError):
+        return default
+    if min_val is not None:
+        result = max(min_val, result)
+    return result
+
+
+CONFIG = {
+    "snap_clip_line_end": env_bool("SNAP_CLIP_LINE_END", True),
+    "clip_snap_max_extend": env_float("CLIP_SNAP_MAX_EXTEND", 2.0, min_val=0.0),
+}
 
 
 def run_cmd(cmd, **kwargs):

@@ -3,7 +3,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-cut' / 'scripts'))
 import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
-from cut import build_edited_source_video, lint_mapped_narration, map_narration_to_clips, normalize_clip_plan, parse_duration_seconds, source_time_to_output_time
+from cut import build_edited_source_video, lint_mapped_narration, map_narration_to_clips, normalize_clip_plan, parse_duration_seconds, snap_clip_ends_to_lines, source_time_to_output_time
 
 
 def test_lint_mapped_narration_flags_dropped_and_sparse():
@@ -374,3 +374,102 @@ def test_cut_main_rebuilds_when_cached_edited_source_bytes_change(monkeypatch, t
 
     assert calls == ["video.mp4"]
     assert edited.read_bytes() == b"rebuilt-edited"
+
+
+# ---------------------------------------------------------------------------
+# snap_clip_ends_to_lines tests
+# ---------------------------------------------------------------------------
+
+def _make_plan(clips_spec, allow_overlap=False, video_duration=100.0):
+    """Build a validated plan from a list of (source_start, source_end) tuples."""
+    raw = [{"start": s, "end": e} for s, e in clips_spec]
+    return normalize_clip_plan(raw, video_duration=video_duration, allow_overlap=allow_overlap)
+
+
+def test_snap_extends_mid_speech_clip_to_next_quiet_window():
+    """A clip ending mid-speech is extended to the next quiet-window start."""
+    silence = [{"start": 12.0, "end": 13.0, "duration": 1.0}]
+    plan = _make_plan([(0.0, 10.0)])
+    snapped = snap_clip_ends_to_lines(plan, silence, video_duration=100.0, max_extend=5.0)
+    assert snapped["clips"][0]["source_end"] == 12.0
+    assert snapped["clips"][0]["duration"] == 12.0
+    assert snapped["total_duration"] == 12.0
+
+
+def test_snap_no_snap_when_end_already_in_quiet_window():
+    """No extension when source_end already sits inside a quiet window."""
+    silence = [{"start": 9.5, "end": 11.0, "duration": 1.5}]
+    plan = _make_plan([(0.0, 10.0)])  # 10.0 is inside [9.5, 11.0]
+    snapped = snap_clip_ends_to_lines(plan, silence, video_duration=100.0, max_extend=5.0)
+    assert snapped["clips"][0]["source_end"] == 10.0  # unchanged
+
+
+def test_snap_caps_at_max_extend_when_next_quiet_too_far():
+    """When the next quiet window is beyond max_extend, no extension is applied."""
+    silence = [{"start": 20.0, "end": 21.0, "duration": 1.0}]
+    plan = _make_plan([(0.0, 10.0)])
+    # next quiet at 20.0 is 10s away; max_extend=2.0 → candidate=12.0 but pause is at 20>12 → no snap
+    snapped = snap_clip_ends_to_lines(plan, silence, video_duration=100.0, max_extend=2.0)
+    assert snapped["clips"][0]["source_end"] == 10.0  # unchanged
+
+
+def test_snap_caps_at_video_duration():
+    """Extension never exceeds video_duration."""
+    silence = [{"start": 99.0, "end": 100.0, "duration": 1.0}]
+    plan = _make_plan([(0.0, 98.0)], video_duration=100.0)
+    snapped = snap_clip_ends_to_lines(plan, silence, video_duration=100.0, max_extend=5.0)
+    assert snapped["clips"][0]["source_end"] <= 100.0
+    assert snapped["clips"][0]["source_end"] == 99.0
+
+
+def test_snap_no_overlap_when_allow_overlap_false():
+    """Extension is capped to avoid crossing into a later clip's source range."""
+    silence = [{"start": 25.0, "end": 26.0, "duration": 1.0}]
+    # clip 0: 0-10, clip 1: 20-30 → extending clip 0 toward pause at 25 would enter clip 1
+    plan = _make_plan([(0.0, 10.0), (20.0, 30.0)], allow_overlap=False)
+    snapped = snap_clip_ends_to_lines(plan, silence, video_duration=100.0, max_extend=20.0)
+    # candidate_end = min(25.0, 10+20, 100) = 20.0; but clip 1 starts at 20.0 → capped to 20.0
+    # 20.0 > 10.0 so extension is applied up to the boundary
+    assert snapped["clips"][0]["source_end"] == 20.0
+    # clip 1 is untouched
+    assert snapped["clips"][1]["source_start"] == 20.0
+    assert snapped["clips"][1]["source_end"] == 30.0
+
+
+def test_snap_empty_silence_returns_plan_unchanged():
+    """Empty silence_periods → plan returned byte-identical (no modifications)."""
+    plan = _make_plan([(0.0, 10.0), (20.0, 30.0)])
+    snapped_empty = snap_clip_ends_to_lines(plan, [], video_duration=100.0, max_extend=2.0)
+    snapped_none = snap_clip_ends_to_lines(plan, None, video_duration=100.0, max_extend=2.0)
+    assert snapped_empty is plan
+    assert snapped_none is plan
+
+
+def test_snap_recomputes_output_timeline_for_all_clips():
+    """After snapping clip 0, the following clip's output_start shifts correctly."""
+    # clip 0: 0-10, clip 1: 20-30; quiet at 12 within max_extend=5
+    silence = [{"start": 12.0, "end": 13.0, "duration": 1.0}]
+    plan = _make_plan([(0.0, 10.0), (20.0, 30.0)])
+    snapped = snap_clip_ends_to_lines(plan, silence, video_duration=100.0, max_extend=5.0)
+
+    c0, c1 = snapped["clips"]
+    # clip 0 extended to 12.0
+    assert c0["source_end"] == 12.0
+    assert c0["duration"] == 12.0
+    assert c0["output_start"] == 0.0
+    assert c0["output_end"] == 12.0
+    # clip 1 unchanged source, but output_start shifts from 10 → 12
+    assert c1["source_start"] == 20.0
+    assert c1["source_end"] == 30.0
+    assert c1["duration"] == 10.0
+    assert c1["output_start"] == 12.0
+    assert c1["output_end"] == 22.0
+    assert snapped["total_duration"] == 22.0
+
+
+def test_snap_skips_malformed_silence_rows():
+    """A stale/hand-edited silence row (missing start/end, or not a dict) is skipped, not fatal."""
+    silence = [{"foo": 1}, "bad", {"start": 12.0, "end": 13.0, "duration": 1.0}]
+    plan = _make_plan([(0.0, 10.0)])
+    snapped = snap_clip_ends_to_lines(plan, silence, video_duration=100.0, max_extend=5.0)
+    assert snapped["clips"][0]["source_end"] == 12.0  # the well-formed row still snaps

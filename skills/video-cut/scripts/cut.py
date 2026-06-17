@@ -5,7 +5,7 @@ import json
 import re
 from pathlib import Path
 
-from lib import get_video_duration, log, run_cmd
+from lib import CONFIG, get_video_duration, log, run_cmd
 
 
 def parse_duration_seconds(value):
@@ -233,6 +233,80 @@ def normalize_clip_plan(raw_plan, video_duration, target_duration=None, clip_pad
         )
         log(f"警告: {plan['warning']}")
     return plan
+
+
+def snap_clip_ends_to_lines(plan, silence_periods, video_duration, max_extend):
+    """Extend each clip's source_end forward to the next natural pause, preventing mid-sentence cuts.
+
+    - If silence_periods is empty/None, returns plan unchanged.
+    - If a clip's source_end already falls inside a quiet window, no snap is applied.
+    - Otherwise, extends to the next quiet window start, capped by max_extend and video_duration.
+    - When plan["allow_overlap"] is False, will not extend into another clip's source range.
+    - After snapping, recomputes output_start/output_end/duration for all clips cursor-based.
+    - Returns the updated plan dict (all other keys preserved).
+    """
+    # silence_periods is loaded from disk; tolerate a stale/hand-edited row by keeping only
+    # well-formed quiet windows so a single bad entry can't KeyError-abort the whole cut.
+    silence_periods = [
+        w for w in (silence_periods or [])
+        if isinstance(w, dict) and isinstance(w.get("start"), (int, float))
+        and isinstance(w.get("end"), (int, float))
+    ]
+    if not silence_periods:
+        return plan
+
+    clips = [dict(c) for c in plan["clips"]]
+    video_duration = float(video_duration)
+    max_extend = float(max_extend)
+    allow_overlap = bool(plan.get("allow_overlap", False))
+
+    for i, clip in enumerate(clips):
+        source_end = clip["source_end"]
+
+        # Already inside a quiet window → already at a natural pause.
+        if any(w["start"] <= source_end <= w["end"] for w in silence_periods):
+            continue
+
+        # Find the next quiet window start at or after source_end.
+        candidates = [w["start"] for w in silence_periods if w["start"] >= source_end]
+        if not candidates:
+            continue
+        next_quiet_start = min(candidates)
+
+        # Only snap if the next pause is within reach (≤ max_extend away).
+        if next_quiet_start > source_end + max_extend:
+            continue
+        candidate_end = min(next_quiet_start, video_duration)
+        if candidate_end <= source_end:
+            continue
+
+        # When overlaps are forbidden, cap against every other clip's source range.
+        if not allow_overlap:
+            other_starts = [
+                c["source_start"] for j, c in enumerate(clips)
+                if j != i and c["source_start"] > source_end
+            ]
+            if other_starts:
+                nearest_other_start = min(other_starts)
+                candidate_end = min(candidate_end, nearest_other_start)
+            if candidate_end <= source_end:
+                continue
+
+        clip["source_end"] = round(candidate_end, 3)
+
+    # Recompute output timeline cursor-based (same cursor logic as normalize_clip_plan).
+    cursor = 0.0
+    for clip in clips:
+        duration = round(clip["source_end"] - clip["source_start"], 3)
+        clip["duration"] = duration
+        clip["output_start"] = round(cursor, 3)
+        clip["output_end"] = round(cursor + duration, 3)
+        cursor += duration
+
+    result = dict(plan)
+    result["clips"] = clips
+    result["total_duration"] = round(sum(c["duration"] for c in clips), 3)
+    return result
 
 
 def source_time_to_output_time(source_time, clips):
@@ -469,13 +543,32 @@ def main():
     raw_plan = load_clip_plan(clip_plan_path)
 
     target_seconds = parse_duration_seconds(args.target_duration) if args.target_duration else None
+    video_duration = get_video_duration(args.video)
     validated_plan = normalize_clip_plan(
         raw_plan,
-        get_video_duration(args.video),
+        video_duration,
         target_duration=target_seconds,
         clip_padding=args.clip_padding,
         allow_overlap=args.allow_overlap,
     )
+
+    if CONFIG.get("snap_clip_line_end", True):
+        silence_path = work_dir / "silence_periods.json"
+        silence_periods = []
+        if silence_path.exists():
+            try:
+                silence_periods = json.loads(silence_path.read_text(encoding="utf-8"))
+                if not isinstance(silence_periods, list):
+                    silence_periods = []
+            except (OSError, ValueError):
+                silence_periods = []
+        validated_plan = snap_clip_ends_to_lines(
+            validated_plan,
+            silence_periods,
+            video_duration,
+            CONFIG.get("clip_snap_max_extend", 2.0),
+        )
+
     if isinstance(validated_plan, dict):
         validated_plan["raw_plan_fingerprint"] = value_fingerprint(raw_plan)
     (work_dir / "clip_plan_validated.json").write_text(
