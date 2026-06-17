@@ -18,8 +18,6 @@ https://github.com/user-attachments/assets/92698ec6-0d23-4f9f-8825-c3684ef57aff
 
 ## 这是什么
 
-一个 Claude Code 插件：五个小而独立的 skill 加一个编排器，各管一段，只靠 `work_dir` 里的 JSON/MP4 传结果。**确定的活儿（剪辑、配音、混音）交给脚本，解说词交给 Agent 写。**
-
 ```mermaid
 flowchart LR
     research["背景调研"] --> understand
@@ -88,8 +86,6 @@ python3 skills/video-recap/scripts/recap.py --doctor
 
 ## 架构
 
-`video-recap` 是你直接用的编排器，按子进程依次调起各阶段 skill，轮到写解说词时停下等 Agent。四个纯工具阶段设了 `user-invocable: false` 藏起来，对外只暴露 `video-recap` 和 `video-script`。
-
 | Skill | 职责 | 输入 → 输出（`work_dir` 契约） |
 |---|---|---|
 | **video-understanding** | 场景检测 · 抽帧 · ASR（`mimo-v2.5-asr`）· VLM（`mimo-v2.5`）· 时间轴融合 · 生成 brief（`--consolidate` 索引默认开） | `视频` → `scenes / asr_result / vlm_analysis / silence_periods / timeline_fusion / agent_narration_brief.md` |
@@ -98,10 +94,6 @@ python3 skills/video-recap/scripts/recap.py --doctor
 | **video-voiceover** | 合成解说音频（MiMo TTS，`mimo-v2.5-tts`） | `narration.json` → `tts_segments/ + tts_meta.json` |
 | **video-assemble** | 混音 · 压低原声 · 渲染字幕 · 多轨时间线（可选导出剪映） | `视频 + tts_meta` → `recap_<名>.mp4 + subtitles.srt/.ass + timeline.json` |
 | **video-recap** | 编排器 + `--doctor` | `视频` → `recap_<名>.mp4` |
-
-每个 skill 自带一份 `lib.py`，相互之间没有共享代码文件，JSON 产物就是唯一的接口。完整参数见各自的 `SKILL.md`。
-
-测试请运行 `python3 scripts/test.py`。不要在仓库根目录直接运行裸 `pytest`：各 skill 故意保留同名顶层模块（如 `lib.py`），需要由测试脚本按 skill 分组隔离进程。
 
 ## 输出
 
@@ -121,7 +113,7 @@ python3 skills/video-recap/scripts/recap.py --doctor
 ## 致谢
 
 - [linux.do](https://linux.do)
-- 剪映草稿导出参考了 [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft)、[capcut-mate](https://github.com/Hommy-master/capcut-mate)（均 Apache-2.0）的草稿结构，未内置其代码。
+- 剪映草稿导出参考了 [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft)、[capcut-mate](https://github.com/Hommy-master/capcut-mate)（均 Apache-2.0）的草稿结构。
 
 ## 许可
 

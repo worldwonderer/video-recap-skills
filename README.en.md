@@ -18,8 +18,6 @@ Beyond the rendered MP4, you can export a **剪映/JianYing draft** to keep edit
 
 ## What is it?
 
-A Claude Code plugin: five small, independent skills plus a thin orchestrator. Each owns one stage and they pass results only as JSON/MP4 files in a shared `work_dir`. **The scripts do the deterministic media work (cutting, voicing, mixing); the agent writes the narration.**
-
 ```mermaid
 flowchart LR
     research["Story research"] --> understand
@@ -88,8 +86,6 @@ python3 skills/video-recap/scripts/recap.py --doctor
 
 ## Architecture
 
-`video-recap` is the one you drive: it calls each stage skill as a subprocess and stops to let the agent write the narration. The four pure-tool stages are hidden (`user-invocable: false`), so only `video-recap` and `video-script` are exposed.
-
 | Skill | Does | In → Out (the `work_dir` contract) |
 |---|---|---|
 | **video-understanding** | scene detect · frame extract · ASR (`mimo-v2.5-asr`) · VLM (`mimo-v2.5`) · fuse timeline · build brief (`--consolidate` index on by default) | `video` → `scenes / asr_result / vlm_analysis / silence_periods / timeline_fusion / agent_narration_brief.md` |
@@ -98,10 +94,6 @@ python3 skills/video-recap/scripts/recap.py --doctor
 | **video-voiceover** | synthesize narration audio (MiMo TTS, `mimo-v2.5-tts`) | `narration.json` → `tts_segments/ + tts_meta.json` |
 | **video-assemble** | mux · duck original audio · render subtitles · multi-track timeline (optional 剪映 export) | `video + tts_meta` → `recap_<name>.mp4 + subtitles.srt/.ass + timeline.json` |
 | **video-recap** | orchestrator + `--doctor` | `video` → `recap_<name>.mp4` |
-
-Each skill ships its own `lib.py`; there is no shared code file, and the JSON artifacts are the only interface. See each skill's `SKILL.md` for its full options.
-
-Run tests with `python3 scripts/test.py`. Do not run bare `pytest` at the repository root: skills intentionally keep same-named top-level modules (for example `lib.py`), so the test runner isolates skill groups in separate processes.
 
 ## Output
 
@@ -121,7 +113,7 @@ Run tests with `python3 scripts/test.py`. Do not run bare `pytest` at the reposi
 ## Acknowledgements
 
 - [linux.do](https://linux.do)
-- The 剪映 draft export follows the schema of [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft) and [capcut-mate](https://github.com/Hommy-master/capcut-mate) (both Apache-2.0); no code vendored.
+- The 剪映 draft export follows the schema of [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft) and [capcut-mate](https://github.com/Hommy-master/capcut-mate) (both Apache-2.0).
 
 ## License
 
