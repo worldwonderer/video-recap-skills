@@ -177,18 +177,23 @@ def test_resolve_final_output_overwrites_stable_alias(tmp_path):
     assert resolved == tmp_path / "recap_clip.mp4"
 
 
-def test_source_subtitle_mask_filter_toggles_with_config(monkeypatch):
-    monkeypatch.setitem(CONFIG, "burn_subtitles", False)  # isolate the raw ratio from the 2-line band
+def test_source_subtitle_mask_filter_toggles_with_effective_burn_policy(monkeypatch):
+    monkeypatch.setitem(CONFIG, "burn_subtitles", False)
     monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)
     assert _source_subtitle_mask_filter() is None
 
+    # no-burn means sidecar-subtitle mode: ambient/default source masking must not
+    # create a black band without burned recap subtitles.
     monkeypatch.setitem(CONFIG, "mask_source_subtitles", True)
     monkeypatch.setitem(CONFIG, "source_subtitle_mask_ratio", 0.15)
-    f = _source_subtitle_mask_filter()
-    assert f is not None and f.startswith("drawbox=") and "0.150" in f and "t=fill" in f
-
-    monkeypatch.setitem(CONFIG, "source_subtitle_mask_ratio", 0.0)  # ratio 0 -> no mask
     assert _source_subtitle_mask_filter() is None
+
+    monkeypatch.setitem(CONFIG, "burn_subtitles", True)
+    f = _source_subtitle_mask_filter()
+    assert f is not None and f.startswith("drawbox=") and "t=fill" in f
+
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_ratio", 0.0)  # ratio 0 still allowed if style band requires it
+    assert _source_subtitle_mask_filter() is not None
 
 
 def test_mask_band_stays_one_line_small_when_burning(monkeypatch):
@@ -206,10 +211,9 @@ def test_mask_band_stays_one_line_small_when_burning(monkeypatch):
     one_line = (30 + 42 * 1.25 + 10) / 720
     assert ratio_on == pytest.approx(max(0.14, one_line), abs=0.005), ratio_on
     assert ratio_on < 0.16, ratio_on            # stays small — never the old ~0.23 two-line band
-    # not burning -> stays at the raw 0.14
+    # not burning -> no mask-only black band
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
-    ratio_off = float(re.search(r"ih-ih\*([0-9.]+)", _source_subtitle_mask_filter()).group(1))
-    assert abs(ratio_off - 0.14) < 0.001, ratio_off
+    assert _source_subtitle_mask_filter() is None
 
 
 def test_apply_narration_speed_atempos_each_segment(monkeypatch, tmp_path):
@@ -466,9 +470,9 @@ def test_assemble_video_without_burn_keeps_video_copy(monkeypatch, tmp_path):
     assert ffmpeg_cmd[ffmpeg_cmd.index("-c:v") + 1] == "copy"
 
 
-def test_assemble_video_masks_source_subs_by_default(monkeypatch, tmp_path):
-    # mask_source_subtitles defaults to True now: even with burn off, the bottom
-    # band is drawn, which forces a video re-encode (no -c:v copy).
+def test_assemble_video_no_burn_ignores_source_mask_default(monkeypatch, tmp_path):
+    # no-burn sidecar mode must not draw a mask-only black band, even if the
+    # ambient/default mask_source_subtitles setting is true.
     video = tmp_path / "input.mp4"
     video.write_bytes(b"video")
     output = tmp_path / "output.mp4"
@@ -489,15 +493,16 @@ def test_assemble_video_masks_source_subs_by_default(monkeypatch, tmp_path):
     assemble_video(video, [{
         "start": 0.0,
         "end": 3.0,
-        "narration": "默认遮挡原字幕。",
+        "narration": "外挂字幕不遮黑条。",
         "audio_path": str(tmp_path / "narr.wav"),
         "audio_duration": 1.0,
     }], tmp_path, output)
 
     ffmpeg_cmd = commands[-1]
-    assert "-vf" in ffmpeg_cmd
-    assert any("drawbox=" in str(arg) for arg in ffmpeg_cmd)
-    assert ffmpeg_cmd[ffmpeg_cmd.index("-c:v") + 1] == "libx264"
+    assert (tmp_path / "subtitles.srt").exists()
+    assert "-vf" not in ffmpeg_cmd
+    assert not any("drawbox=" in str(arg) for arg in ffmpeg_cmd)
+    assert ffmpeg_cmd[ffmpeg_cmd.index("-c:v") + 1] == "copy"
 
 
 def test_build_audio_filter_complex_gap_fill_envelope(monkeypatch):
@@ -706,10 +711,13 @@ def test_assembly_settings_fingerprint_tracks_render_affecting_settings(monkeypa
     base = assembly_settings_fingerprint()
 
     monkeypatch.setitem(CONFIG, "mask_source_subtitles", True)
-    assert assembly_settings_fingerprint() != base
-    monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)
+    assert assembly_settings_fingerprint() == base
     monkeypatch.setitem(CONFIG, "source_subtitle_mask_ratio", 0.20)
+    assert assembly_settings_fingerprint() == base
+    monkeypatch.setitem(CONFIG, "burn_subtitles", True)
     assert assembly_settings_fingerprint() != base
+    monkeypatch.setitem(CONFIG, "burn_subtitles", False)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)
     monkeypatch.setitem(CONFIG, "source_subtitle_mask_ratio", 0.14)
     monkeypatch.setitem(CONFIG, "narration_speed", 1.2)
     assert assembly_settings_fingerprint() != base

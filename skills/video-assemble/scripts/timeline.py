@@ -126,7 +126,7 @@ def variable_ducking_keyframes(windows, idle, fade, span_start, span_end, bridge
 
 
 def build_timeline(canvas, duration_s, video_clips, narration_segments,
-                   bgm=None, ducking=None):
+                   bgm=None, ducking=None, subtitle_segments=None):
     """Assemble a Timeline dict from resolved placement data.
 
     canvas: {"width", "height", "fps"}
@@ -136,6 +136,9 @@ def build_timeline(canvas, duration_s, video_clips, narration_segments,
                  full mode: a single clip spanning the whole video).
     narration_segments: placed beats [{"source_path", "timeline_start",
                  "timeline_end", "text", "overlaps_speech", "gain"?}].
+    subtitle_segments: optional display-ready text cues [{"text", "timeline_start",
+                 "timeline_end"}]. When present, this is authoritative for the
+                 subtitle/text track; narration segment text remains raw editor metadata.
     bgm: optional {"source_path", "volume", "ducking_volume"}.
     ducking: {"idle", "speech", "quiet", "fade", "bridge"?} for the original-audio
              automation; None disables original ducking (flat original). `bridge` holds
@@ -214,12 +217,23 @@ def build_timeline(canvas, duration_s, video_clips, narration_segments,
         })
 
     # --- subtitle (text) track
-    text_segs = [{
-        "text": s.get("text", ""),
-        "timeline_start": round(float(s["timeline_start"]), 4),
-        "timeline_end": round(float(s["timeline_end"]), 4),
-    } for s in narration_segments
-        if s.get("text") and s.get("timeline_end", 0) > s.get("timeline_start", 0)]
+    text_source = subtitle_segments if subtitle_segments is not None else narration_segments
+    text_segs = []
+    for s in text_source or []:
+        if not isinstance(s, dict) or not s.get("text"):
+            continue
+        try:
+            ts = float(s["timeline_start"])
+            te = float(s["timeline_end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if te <= ts:
+            continue
+        text_segs.append({
+            "text": s.get("text", ""),
+            "timeline_start": round(ts, 4),
+            "timeline_end": round(te, 4),
+        })
     if text_segs:
         tracks.append({"kind": "text", "name": "subtitle", "segments": text_segs})
 

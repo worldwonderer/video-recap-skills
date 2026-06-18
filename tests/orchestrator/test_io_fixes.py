@@ -668,3 +668,117 @@ def test_recap_full_mode_writes_no_phase_ledger(monkeypatch, tmp_path):
     recap.main()
 
     assert not (work / "recap_phase.json").exists()
+
+
+def test_strict_narration_review_blocks_voiceover_on_review_failure(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "narration.json").write_text(json.dumps([{"start": 0, "end": 1, "narration": "full。"}]), encoding="utf-8")
+    recap._write_run_manifest(work, video.resolve(), _manifest_args())
+
+    def fake_run(skill, script, *cli_args):
+        if script == "review.py":
+            raise SystemExit("review unavailable")
+        if script == "voiceover.py":
+            raise AssertionError("voiceover must not run in strict review mode")
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr(sys, "argv", [
+        "recap.py", str(video), "--work-dir", str(work), "--require-narration-review",
+    ])
+
+    with pytest.raises(SystemExit, match="严格解说评审失败"):
+        recap.main()
+
+
+def test_strict_narration_review_blocks_voiceover_on_error_finding(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "narration.json").write_text(json.dumps([{"start": 0, "end": 1, "narration": "full。"}]), encoding="utf-8")
+    recap._write_run_manifest(work, video.resolve(), _manifest_args())
+
+    def fake_run(skill, script, *cli_args):
+        if script == "review.py":
+            (work / "narration_review.json").write_text(json.dumps({
+                "verdict": "REVISE",
+                "findings": [{"severity": "error", "issue": "幻觉"}],
+            }), encoding="utf-8")
+            return
+        if script == "voiceover.py":
+            raise AssertionError("voiceover must not run with strict review errors")
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr(sys, "argv", [
+        "recap.py", str(video), "--work-dir", str(work), "--require-narration-review",
+    ])
+
+    with pytest.raises(SystemExit, match="error 1"):
+        recap.main()
+
+
+def test_strict_narration_review_requires_fresh_review_artifact(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "narration.json").write_text(json.dumps([{"start": 0, "end": 1, "narration": "full。"}]), encoding="utf-8")
+    (work / "narration_review.json").write_text(json.dumps({
+        "verdict": "PASS",
+        "findings": [],
+    }), encoding="utf-8")
+    (work / "narration_review.md").write_text("# stale pass", encoding="utf-8")
+    recap._write_run_manifest(work, video.resolve(), _manifest_args())
+
+    def fake_run(skill, script, *cli_args):
+        if script == "review.py":
+            return
+        if script == "voiceover.py":
+            raise AssertionError("voiceover must not run without a fresh review artifact")
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr(sys, "argv", [
+        "recap.py", str(video), "--work-dir", str(work), "--require-narration-review",
+    ])
+
+    with pytest.raises(SystemExit, match="missing or invalid narration_review.json"):
+        recap.main()
+    assert not (work / "narration_review.md").exists()
+
+
+def test_advisory_narration_review_still_continues_on_failure(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "narration.json").write_text(json.dumps([{"start": 0, "end": 1, "narration": "full。"}]), encoding="utf-8")
+    recap._write_run_manifest(work, video.resolve(), _manifest_args())
+    calls = []
+
+    def fake_run(skill, script, *cli_args):
+        calls.append(script)
+        if script == "review.py":
+            raise SystemExit("review unavailable")
+        if script == "assemble.py":
+            (work / "assembly_manifest.json").write_text(
+                json.dumps({"final_output": str(tmp_path / "r.mp4")}), encoding="utf-8")
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--work-dir", str(work)])
+
+    recap.main()
+
+    assert "voiceover.py" in calls
+    assert "assemble.py" in calls
+
+
+def test_continuation_command_preserves_require_narration_review():
+    args = _manifest_args()
+    args.require_narration_review = True
+
+    command = recap._continuation_command("/tmp/in.mp4", "/tmp/work", args)
+
+    assert "--require-narration-review" in command

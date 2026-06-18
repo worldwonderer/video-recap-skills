@@ -51,3 +51,76 @@ def test_agent_brief_writes_asr_chunks_and_timeline_fusion(monkeypatch, tmp_path
     assert (tmp_path / "timeline_fusion.json").exists()
     fusion = json.loads((tmp_path / "timeline_fusion.json").read_text(encoding="utf-8"))
     assert fusion[0]["dialogue_segments"][0]["text"] == "第一句对白。第二句反击。"
+
+
+def test_understanding_brief_cut_pass2_writes_output_time_evidence(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "edit_mode", "cut")
+    monkeypatch.setitem(CONFIG, "target_duration", "10s")
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    (tmp_path / "edited_source.mp4").write_bytes(b"edited")
+    (tmp_path / "clip_plan_validated.json").write_text(json.dumps({
+        "clips": [{
+            "source_start": 100.0,
+            "source_end": 110.0,
+            "output_start": 0.0,
+            "output_end": 10.0,
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    brief = build_agent_brief(
+        [{"scene_id": 7, "start": 100.0, "end": 110.0, "description": "保留片段"}],
+        [{"start": 101.0, "end": 105.0, "text": "输出一到五秒对白。"}],
+        [{"start": 106.0, "end": 108.0, "duration": 2.0, "has_speech": False}],
+        120.0,
+        tmp_path,
+    )
+
+    chunks = json.loads((tmp_path / "asr_writing_chunks.json").read_text(encoding="utf-8"))
+    fusion = json.loads((tmp_path / "timeline_fusion.json").read_text(encoding="utf-8"))
+    text = brief.read_text(encoding="utf-8")
+    assert chunks[0]["start"] == pytest.approx(1.0)
+    assert chunks[0]["end"] == pytest.approx(5.0)
+    assert fusion[0]["time_range"] == [0.0, 10.0]
+    assert fusion[0]["narration_slots"][0]["start"] == pytest.approx(6.0)
+    assert "ASR chunk 1: 1.0-5.0s" in text
+    assert "ASR chunk 1: 101.0-105.0s" not in text
+
+
+def test_understanding_brief_cut_pass2_requires_fresh_output_spans(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "edit_mode", "cut")
+    monkeypatch.setitem(CONFIG, "target_duration", "10s")
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    (tmp_path / "edited_source.mp4").write_bytes(b"edited")
+
+    with pytest.raises(SystemExit, match="cut pass2 brief requires fresh clip_plan_validated.json"):
+        build_agent_brief(
+            [{"scene_id": 7, "start": 100.0, "end": 110.0, "description": "保留片段"}],
+            [{"start": 101.0, "end": 105.0, "text": "源时间对白。"}],
+            [],
+            120.0,
+            tmp_path,
+        )
+
+
+def test_understanding_brief_cut_pass2_rejects_non_finite_output_spans(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "edit_mode", "cut")
+    monkeypatch.setitem(CONFIG, "target_duration", "10s")
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    (tmp_path / "edited_source.mp4").write_bytes(b"edited")
+    (tmp_path / "clip_plan_validated.json").write_text(json.dumps({
+        "clips": [{
+            "source_start": 100.0,
+            "source_end": float("nan"),
+            "output_start": 0.0,
+            "output_end": 10.0,
+        }],
+    }), encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="non-finite clip span"):
+        build_agent_brief(
+            [{"scene_id": 7, "start": 100.0, "end": 110.0, "description": "保留片段"}],
+            [{"start": 101.0, "end": 105.0, "text": "源时间对白。"}],
+            [],
+            120.0,
+            tmp_path,
+        )

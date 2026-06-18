@@ -4,6 +4,49 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-a
 import json  # noqa: E402
 from timeline import build_timeline, ducking_keyframes, load_timeline, save_timeline, variable_ducking_keyframes  # noqa: E402
 
+def _track(timeline, kind, name=None):
+    for track in timeline["tracks"]:
+        if track.get("kind") == kind and (name is None or track.get("name") == name):
+            return track
+    raise AssertionError(f"missing track {kind}/{name}")
+
+
+def test_build_timeline_uses_explicit_subtitle_segments_for_text_track():
+    tl = build_timeline(
+        {"width": 100, "height": 100, "fps": 30},
+        5.0,
+        [{"source_path": "/s.mp4", "source_start": 0.0, "source_end": 5.0,
+          "timeline_start": 0.0, "timeline_end": 5.0}],
+        [{"source_path": "/n.wav", "timeline_start": 0.0, "timeline_end": 2.0,
+          "text": "他说完了。", "overlaps_speech": True}],
+        subtitle_segments=[{"text": "他说完了", "timeline_start": 0.1, "timeline_end": 1.9}],
+    )
+
+    audio = _track(tl, "audio", "narration")["segments"]
+    text = _track(tl, "text", "subtitle")["segments"]
+    assert audio[0]["text"] == "他说完了。"
+    assert text == [{"text": "他说完了", "timeline_start": 0.1, "timeline_end": 1.9}]
+
+
+def test_build_timeline_subtitle_segments_skip_invalid_entries():
+    tl = build_timeline(
+        {"width": 100, "height": 100, "fps": 30},
+        5.0,
+        [{"source_path": "/s.mp4", "source_start": 0.0, "source_end": 5.0,
+          "timeline_start": 0.0, "timeline_end": 5.0}],
+        [],
+        subtitle_segments=[
+            {"text": "有效", "timeline_start": 1.0, "timeline_end": 2.0},
+            {"text": "", "timeline_start": 2.0, "timeline_end": 3.0},
+            {"text": "倒置", "timeline_start": 3.0, "timeline_end": 2.0},
+        ],
+    )
+
+    assert _track(tl, "text", "subtitle")["segments"] == [
+        {"text": "有效", "timeline_start": 1.0, "timeline_end": 2.0}
+    ]
+
+
 
 def test_ducking_keyframes_holds_idle_and_dips_under_window():
     kfs = ducking_keyframes([(2.0, 4.0)], idle=0.85, duck=0.2, fade=0.25,

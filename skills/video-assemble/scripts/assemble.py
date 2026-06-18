@@ -177,6 +177,23 @@ def _build_video_clips(input_video, work_dir, duration_s):
              "timeline_end": float(duration_s)}]
 
 
+def _timeline_subtitle_segments(tts_segments, work_dir, duration_s):
+    """Display-ready subtitle cues for timeline/export text tracks.
+
+    The narration audio track keeps raw semantic text for editor reference; this
+    payload mirrors SRT/ASS display policy, including terminal-punctuation cleanup
+    and original-dialogue gap subtitles when configured.
+    """
+    return [
+        {
+            "text": entry["text"],
+            "timeline_start": float(entry["start"]),
+            "timeline_end": float(entry["end"]),
+        }
+        for entry in _combined_subtitle_entries(tts_segments, work_dir, duration_s)
+    ]
+
+
 def _emit_timeline(input_video, tts_segments, work_dir, duration_s, has_bgm):
     """Build and persist the backend-neutral multi-track timeline.json."""
     canvas = _probe_canvas(input_video)
@@ -211,8 +228,10 @@ def _emit_timeline(input_video, tts_segments, work_dir, duration_s, has_bgm):
                    "quiet": CONFIG.get("zone_ducking_volume", 0.12),
                    "fade": fade,
                    "bridge": CONFIG.get("duck_bridge_seconds", 1.5)}
+    subtitle_segments = _timeline_subtitle_segments(tts_segments, work_dir, duration_s)
     timeline = build_timeline(canvas, duration_s, video_clips,
-                              narration_segments, bgm=bgm, ducking=ducking)
+                              narration_segments, bgm=bgm, ducking=ducking,
+                              subtitle_segments=subtitle_segments)
     out = Path(work_dir) / "timeline.json"
     save_timeline(timeline, out)
     log(f"时间线模型: {out} ({len(timeline['tracks'])} 轨)")
@@ -261,13 +280,17 @@ def _subtitle_style_config():
 
 def assembly_settings_fingerprint():
     """Settings that affect the rendered video, used by pipeline resume cache."""
+    burn_subtitles = bool(CONFIG.get("burn_subtitles", False))
+    mask_source_subtitles = burn_subtitles and bool(CONFIG.get("mask_source_subtitles", False))
     fingerprint = {
         "version": SUBTITLE_RENDER_VERSION,
-        "burn_subtitles": bool(CONFIG.get("burn_subtitles", False)),
+        "burn_subtitles": burn_subtitles,
         "force_video_reencode": bool(CONFIG.get("force_video_reencode", False)),
         "video_filters": {
-            "mask_source_subtitles": bool(CONFIG.get("mask_source_subtitles", False)),
-            "source_subtitle_mask_ratio": CONFIG.get("source_subtitle_mask_ratio", 0.14),
+            "mask_source_subtitles": mask_source_subtitles,
+            "source_subtitle_mask_ratio": (
+                CONFIG.get("source_subtitle_mask_ratio", 0.14) if mask_source_subtitles else None
+            ),
         },
         "narration_timing": {
             "delay_seconds": CONFIG.get("narration_delay_seconds", 1.5),
@@ -296,7 +319,7 @@ def assembly_settings_fingerprint():
             "bgm_ducking_volume": CONFIG.get("bgm_ducking_volume", 0.10),
         },
     }
-    if fingerprint["burn_subtitles"]:
+    if burn_subtitles:
         fingerprint["subtitle_renderer"] = "ass"
         fingerprint["subtitle_style"] = _subtitle_style_config()
     return fingerprint
@@ -832,7 +855,7 @@ def _source_subtitle_mask_filter():
     shows the original subs AND our narration subs stacked. Covers the bottom band with
     an opaque box; our subtitles render on top of it.
     """
-    if not CONFIG.get("mask_source_subtitles", False):
+    if not (CONFIG.get("burn_subtitles", False) and CONFIG.get("mask_source_subtitles", False)):
         return None
     ratio = max(0.0, min(0.5, float(CONFIG.get("source_subtitle_mask_ratio", 0.14) or 0.0)))
     # When we burn our OWN subtitle the band must sit behind it, but our subtitles are split into

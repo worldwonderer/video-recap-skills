@@ -74,23 +74,75 @@ def _review_narration_enabled(args):
     return _env_bool("REVIEW_NARRATION", True)
 
 
-def _run_advisory_review(work_dir, args, *, timeline="source"):
-    """Run quality review before TTS, but never block production on reviewer availability.
+def _require_narration_review(args):
+    if getattr(args, "require_narration_review", False):
+        return True
+    return _env_bool("REQUIRE_NARRATION_REVIEW", False)
 
-    Returns True only when review.py completed, so the completion message can avoid
-    pointing at stale review artifacts after an opt-out or fail-open run.
+
+def _review_result_status(work_dir):
+    data = _load_json(Path(work_dir) / "narration_review.json")
+    if not isinstance(data, dict):
+        return {"ok": False, "reason": "missing or invalid narration_review.json"}
+    findings = [f for f in (data.get("findings") or []) if isinstance(f, dict)]
+    n_err = sum(1 for f in findings if f.get("severity") == "error")
+    if data.get("parse_error"):
+        return {"ok": False, "reason": "parse_error", "review": data, "errors": n_err}
+    if n_err:
+        return {"ok": False, "reason": f"error {n_err}", "review": data, "errors": n_err}
+    if str(data.get("verdict", "")).upper() == "REVISE" and n_err:
+        return {"ok": False, "reason": f"error {n_err}", "review": data, "errors": n_err}
+    return {"ok": True, "reason": "ok", "review": data, "errors": n_err}
+
+
+def _clear_narration_review_artifacts(work_dir):
+    """Remove prior review artifacts before a fresh pre-TTS review run.
+
+    The review is allowed to fail open in advisory mode, but completion output and
+    strict gating must never accidentally trust a stale narration_review.* from an
+    earlier run.
     """
-    if not _review_narration_enabled(args):
+    for name in ("narration_review.json", "narration_review.md"):
+        try:
+            (Path(work_dir) / name).unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _run_narration_review(work_dir, args, *, timeline="source"):
+    """Run quality review before TTS.
+
+    Default mode remains advisory/fail-open. Strict mode
+    (`--require-narration-review` or REQUIRE_NARRATION_REVIEW) hard-fails before
+    TTS when review is unavailable, unparsable, or reports error findings.
+    Returns True only when review.py completed, so completion messages do not
+    point at stale review artifacts after opt-out/fail-open runs.
+    """
+    strict = _require_narration_review(args)
+    if not _review_narration_enabled(args) and not strict:
         return False
     try:
+        _clear_narration_review_artifacts(work_dir)
         rargs = ["--work-dir", work_dir]
         if timeline != "source":
             rargs += ["--timeline", timeline]
         _run("video-script", "review.py", *rargs)
     except SystemExit as exc:
+        if strict:
+            raise SystemExit(f"严格解说评审失败，已阻止 TTS: {exc}")
         print(f"[video-recap] ⚠️ 建议性评审失败，继续执行 TTS: {exc}", flush=True)
         return False
+
+    status = _review_result_status(work_dir)
+    if strict and not status["ok"]:
+        raise SystemExit(f"严格解说评审未通过，已阻止 TTS: {status['reason']}")
+    if strict:
+        print("[video-recap] ✅ 严格解说评审通过，继续 TTS", flush=True)
     return True
+
+
+def _run_advisory_review(work_dir, args, *, timeline="source"):
+    return _run_narration_review(work_dir, args, timeline=timeline)
 
 
 def _file_fingerprint(path, chunk_size=1024 * 1024):
@@ -309,6 +361,8 @@ def _continuation_command(video, work_dir, args):
         parts.append("--jianying-no-bundle-media")
     if getattr(args, "review_narration", None) is not None:
         parts.append("--review-narration" if args.review_narration else "--no-review-narration")
+    if getattr(args, "require_narration_review", False):
+        parts.append("--require-narration-review")
     return " ".join(shlex.quote(part) for part in parts)
 
 
@@ -335,6 +389,8 @@ def main():
                     help="burn narration subtitles into the video (default on; --no-burn-subtitles to disable)")
     ap.add_argument("--review-narration", action=argparse.BooleanOptionalAction, default=None,
                     help="run advisory narration quality review before TTS (default on; fail-open)")
+    ap.add_argument("--require-narration-review", action="store_true",
+                    help="make narration review a strict pre-TTS gate (also REQUIRE_NARRATION_REVIEW=1)")
     ap.add_argument("--output-dir", default=None)
     ap.add_argument("--export-jianying", action="store_true",
                     help="also export an OPTIONAL 剪映/JianYing draft (decoupled; never required)")
@@ -449,7 +505,7 @@ def main():
              "--output-duration", f"{output_duration:.3f}")
         narration_for_tts = narration_json
         assemble_video_path = edited_source
-    review_ran = _run_advisory_review(work_dir, args, timeline="cut_output" if cut else "source")
+    review_ran = _run_narration_review(work_dir, args, timeline="cut_output" if cut else "source")
     vargs = ["--work-dir", str(work_dir), "--narration", str(narration_for_tts)]
     if args.mimo_tts_voice:
         vargs += ["--mimo-voice", args.mimo_tts_voice]

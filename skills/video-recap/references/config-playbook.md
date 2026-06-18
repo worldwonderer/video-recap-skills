@@ -18,7 +18,7 @@ Defaults below are bundle-level defaults unless a note scopes them to a specific
 | MiMo voice | `MIMO_TTS_VOICE` / `--mimo-tts-voice` | `冰糖` | |
 | Narration density | `TARGET_SEGMENTS_PER_MINUTE` | `9.6` | min `MIN_SEGMENTS_PER_MINUTE=6.24` |
 | Narration speed | `NARRATION_SPEED` | `1.3` | global atempo on the voiceover; default leans snappy for short-form, set `1.0` for long-form/documentary |
-| Mask source subs | `MASK_SOURCE_SUBTITLES` / `SOURCE_SUBTITLE_MASK_RATIO` | on / `0.14` | covers burned-in source subtitles (bottom band) so only the recap's subtitles show; set `MASK_SOURCE_SUBTITLES=false` for sources without hardcoded subs |
+| Mask source subs | `MASK_SOURCE_SUBTITLES` / `SOURCE_SUBTITLE_MASK_RATIO` | on / `0.14` | effective only when burned recap subtitles are enabled; covers hardcoded source subtitles (bottom band) so only the recap's subtitles show. With `--no-burn-subtitles`, the mask is ignored and the MP4 stays unmasked while `.srt` is written |
 | Original ducking | `IDLE_ORIG_VOLUME` / `SPEECH_DUCKING_VOLUME` | `1.0` / `0.2` | the original returns to full-volume `IDLE` in deliberate gaps/original blocks, and ducks to `SPEECH` under narration. Inter-beat gaps shorter than `DUCK_BRIDGE_SECONDS` stay ducked so a single narration block does not swell between sentences. `DUCKING_ORIG_VOLUME` (`0.3`) is only the fallback when beats carry no placement info |
 | Duck fade | `DUCK_FADE_SECONDS` | `0.3` | ramp time for each duck transition, so full-volume original blocks and ducked narration blocks switch without clicks |
 | Duck bridge | `DUCK_BRIDGE_SECONDS` | `1.5` | inter-beat gaps shorter than this stay ducked inside one narration block; gaps >= this are treated as intentional original-audio blocks and return to `IDLE_ORIG_VOLUME` |
@@ -31,7 +31,7 @@ Defaults below are bundle-level defaults unless a note scopes them to a specific
 | VLM workers | `VLM_WORKERS` | `8` | lower to 1 if a proxy/WAF rate-limits |
 | Subtitle size | `SUBTITLE_FONT_SIZE` / `SUBTITLE_MARGIN_V` | `42` / `48` | look & placement |
 | 整理 / index | `--no-consolidate` / `--consolidate-asr` | on | build the understanding index (and optionally clean ASR); use `--no-consolidate` to skip |
-| Advisory narration review | `REVIEW_NARRATION` / `--review-narration` / `--no-review-narration` | on | runs `video-script/review.py` after validation and before TTS; advisory only and fail-open, while `validate.py` remains the hard gate. In cut mode the reviewer uses `clip_plan_validated.json` to remap VLM/ASR grounding onto the output timeline |
+| Advisory / strict narration review | `REVIEW_NARRATION` / `--review-narration` / `--no-review-narration`; strict: `REQUIRE_NARRATION_REVIEW` / `--require-narration-review` | advisory on, strict off | runs `video-script/review.py` after validation and before TTS. Default advisory mode is fail-open; strict mode blocks TTS on review failure, parse error, or error-severity findings. In cut mode the reviewer uses `clip_plan_validated.json` to remap VLM/ASR grounding onto the output timeline |
 | 剪映 export (optional) | `--export-jianying` / `EXPORT_JIANYING` | off | after rendering, also write a 剪映/JianYing draft from `timeline.json`. Decoupled — the core render never needs it |
 | 剪映 draft dir | `JIANYING_DRAFT_DIR` | work_dir | parent folder for the exported draft (point it at 剪映's drafts root to open in-app) |
 | 剪映 bundle media | `JIANYING_BUNDLE_MEDIA` / `--jianying-no-bundle-media` | **on** | copies media into the draft folder so it is self-contained. **Required on macOS** — 剪映 is sandboxed and cannot read external paths, so an unbundled draft opens with all media offline. Use `--jianying-no-bundle-media` only if 剪映 can reach the original paths |
@@ -39,6 +39,6 @@ Defaults below are bundle-level defaults unless a note scopes them to a specific
 
 `video-assemble` always writes `timeline.json` — a backend-neutral multi-track model
 (video / original-audio / narration / BGM / subtitle, with ducking automation). The
-canonical renderer is ffmpeg; the 剪映 exporter is an optional consumer of the same file.
+canonical renderer is ffmpeg; the 剪映 exporter is an optional consumer of the same file. Subtitle text in `timeline.json` is display-ready and follows the same terminal-punctuation policy as SRT/ASS.
 
 See each stage skill's SKILL.md for the full per-stage option list.

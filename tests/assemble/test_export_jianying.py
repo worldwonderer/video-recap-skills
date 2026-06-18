@@ -6,6 +6,45 @@ from export_jianying import build_draft, export_timeline_to_jianying, _us  # noq
 from timeline import build_timeline  # noqa: E402
 
 
+def _draft_texts(content):
+    return [json.loads(item["content"])["text"] for item in content["materials"]["texts"]]
+
+
+def test_exporter_uses_timeline_display_subtitles_not_raw_narration_text():
+    tl = build_timeline(
+        {"width": 100, "height": 100, "fps": 30},
+        5.0,
+        [{"source_path": "/s.mp4", "source_start": 0.0, "source_end": 5.0,
+          "timeline_start": 0.0, "timeline_end": 5.0}],
+        [{"source_path": "/n.wav", "timeline_start": 0.0, "timeline_end": 2.0,
+          "text": "第一句。", "overlaps_speech": True}],
+        subtitle_segments=[{"text": "第一句", "timeline_start": 0.0, "timeline_end": 2.0}],
+    )
+
+    content, _meta, _notes = build_draft(tl, new_id=_counter_ids(), probe=_fake_probe)
+
+    assert _draft_texts(content) == ["第一句"]
+
+
+def test_exporter_keeps_original_gap_display_subtitles_from_timeline():
+    tl = build_timeline(
+        {"width": 100, "height": 100, "fps": 30},
+        6.0,
+        [{"source_path": "/s.mp4", "source_start": 0.0, "source_end": 6.0,
+          "timeline_start": 0.0, "timeline_end": 6.0}],
+        [{"source_path": "/n.wav", "timeline_start": 3.0, "timeline_end": 5.0,
+          "text": "旁白原文。", "overlaps_speech": True}],
+        subtitle_segments=[
+            {"text": "「他说：「你好」」", "timeline_start": 0.5, "timeline_end": 2.0},
+            {"text": "旁白原文", "timeline_start": 3.0, "timeline_end": 5.0},
+        ],
+    )
+
+    content, _meta, _notes = build_draft(tl, new_id=_counter_ids(), probe=_fake_probe)
+
+    assert _draft_texts(content) == ["「他说：「你好」」", "旁白原文"]
+
+
 def _counter_ids():
     n = [0]
 

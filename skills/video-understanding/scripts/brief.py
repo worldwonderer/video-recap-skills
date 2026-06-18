@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 
@@ -1379,6 +1380,161 @@ def _format_research_directive(work_dir, substrate):
     ]
 
 
+def _load_cut_output_spans_for_brief(work_dir, *, required=False):
+    """Load fresh source→output spans for cut pass 2 brief evidence.
+
+    Pass 2 narration is authored against edited_source.mp4's OUTPUT timeline, so
+    ASR chunks and timeline_fusion must use the same OUTPUT clock. Before pass 2
+    (no edited_source.mp4 yet), callers may fall back to source-time evidence; once
+    pass 2 exists, missing/stale validated spans are a hard contract failure.
+    """
+    def fail(reason):
+        if required:
+            raise SystemExit(
+                "cut pass2 brief requires fresh clip_plan_validated.json with explicit "
+                f"finite source/output spans ({reason})"
+            )
+        return None
+
+    work_dir = Path(work_dir)
+    if not (work_dir / "edited_source.mp4").exists():
+        return None
+    validated_path = work_dir / "clip_plan_validated.json"
+    if not validated_path.exists():
+        return fail("missing clip_plan_validated.json")
+    try:
+        plan = json.loads(validated_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return fail("invalid clip_plan_validated.json")
+    if not isinstance(plan, dict):
+        return fail("clip_plan_validated.json is not an object")
+    raw_path = work_dir / "clip_plan.json"
+    if raw_path.exists():
+        try:
+            raw_plan = json.loads(raw_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return fail("invalid clip_plan.json")
+        if plan.get("raw_plan_fingerprint") != stable_hash(raw_plan):
+            return fail("stale clip_plan_validated.json")
+    clips = plan.get("clips")
+    if not isinstance(clips, list):
+        return fail("clips is not a list")
+    spans = []
+    for clip in clips:
+        if not isinstance(clip, dict):
+            continue
+        if not all(key in clip for key in ("source_start", "source_end", "output_start", "output_end")):
+            return fail("clip missing source/output span fields")
+        try:
+            ss = float(clip["source_start"])
+            se = float(clip["source_end"])
+            os_ = float(clip["output_start"])
+            oe = float(clip["output_end"])
+        except (TypeError, ValueError):
+            return fail("non-numeric clip span")
+        if not all(math.isfinite(x) for x in (ss, se, os_, oe)):
+            return fail("non-finite clip span")
+        if se <= ss or oe <= os_:
+            return fail("non-positive clip span")
+        spans.append({"source_start": ss, "source_end": se, "output_start": os_, "output_end": oe})
+    return spans or fail("no valid clips")
+
+
+def _source_output_overlaps_for_brief(start, end, spans):
+    overlaps = []
+    for span in spans or []:
+        source_start = max(float(start), span["source_start"])
+        source_end = min(float(end), span["source_end"])
+        if source_end <= source_start:
+            continue
+        output_start = span["output_start"] + (source_start - span["source_start"])
+        output_end = span["output_start"] + (source_end - span["source_start"])
+        overlaps.append({
+            "source_start": source_start,
+            "source_end": source_end,
+            "output_start": output_start,
+            "output_end": output_end,
+        })
+    return overlaps
+
+
+def _remap_frame_facts_for_brief(frame_facts, overlap):
+    if not isinstance(frame_facts, dict):
+        return frame_facts
+    out = {}
+    for raw_ts, vals in frame_facts.items():
+        try:
+            ts = float(raw_ts)
+        except (TypeError, ValueError):
+            continue
+        if not (overlap["source_start"] <= ts <= overlap["source_end"]):
+            continue
+        out_ts = overlap["output_start"] + (ts - overlap["source_start"])
+        out[f"{out_ts:.3f}"] = vals
+    return out
+
+
+def _remap_scenes_to_output_for_brief(scenes, spans):
+    if not spans:
+        return scenes or []
+    out = []
+    for scene in scenes or []:
+        if not isinstance(scene, dict):
+            continue
+        try:
+            start = float(scene.get("start", 0))
+            end = float(scene.get("end", start))
+        except (TypeError, ValueError):
+            continue
+        overlaps = _source_output_overlaps_for_brief(start, end, spans)
+        for part_idx, overlap in enumerate(overlaps):
+            item = dict(scene)
+            item["start"] = round(overlap["output_start"], 3)
+            item["end"] = round(overlap["output_end"], 3)
+            item["frame_facts"] = _remap_frame_facts_for_brief(scene.get("frame_facts"), overlap)
+            if len(overlaps) > 1:
+                item["scene_id"] = f"{scene.get('scene_id', '?')}.{part_idx}"
+            out.append(item)
+    out.sort(key=lambda x: (float(x.get("start", 0)), float(x.get("end", 0))))
+    return out
+
+
+def _remap_segments_to_output_for_brief(segments, spans):
+    if not spans:
+        return segments or []
+    out = []
+    for seg in segments or []:
+        if not isinstance(seg, dict):
+            continue
+        try:
+            start = float(seg.get("start", 0))
+            end = float(seg.get("end", start))
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        for overlap in _source_output_overlaps_for_brief(start, end, spans):
+            item = dict(seg)
+            item["start"] = round(overlap["output_start"], 3)
+            item["end"] = round(overlap["output_end"], 3)
+            if "duration" in item:
+                item["duration"] = round(item["end"] - item["start"], 3)
+            out.append(item)
+    out.sort(key=lambda x: (float(x.get("start", 0)), float(x.get("end", 0))))
+    return out
+
+
+def _remap_brief_evidence_to_output_timeline(work_dir, scenes_analysis, asr_result, silence_periods, *, required=False):
+    spans = _load_cut_output_spans_for_brief(work_dir, required=required)
+    if not spans:
+        return scenes_analysis, asr_result, silence_periods
+    return (
+        _remap_scenes_to_output_for_brief(scenes_analysis, spans),
+        _remap_segments_to_output_for_brief(asr_result, spans),
+        _remap_segments_to_output_for_brief(silence_periods, spans),
+    )
+
+
 def _format_output_clip_list(work_dir):
     """List the kept clips on the OUTPUT timeline (cut-first/narrate-second pass 2), so the
     agent narrates against the real rendered cut instead of the source timeline."""
@@ -1489,8 +1645,15 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
     lines.extend(_format_consolidation(_load_consolidation(work_dir, scenes_analysis)))
 
     asr_for_chunks = _load_clean_asr(work_dir, asr_result) or asr_result
-    asr_chunks = _chunk_asr_for_writing(asr_for_chunks, scenes_analysis)
-    timeline_fusion = _build_timeline_fusion(scenes_analysis, asr_result, silence_periods)
+    chunk_scenes, chunk_asr = scenes_analysis, asr_for_chunks
+    fusion_scenes, fusion_asr, fusion_silence = scenes_analysis, asr_result, silence_periods
+    if edit_mode == "cut" and (Path(work_dir) / "edited_source.mp4").exists():
+        chunk_scenes, chunk_asr, _ = _remap_brief_evidence_to_output_timeline(
+            work_dir, scenes_analysis, asr_for_chunks, [], required=True)
+        fusion_scenes, fusion_asr, fusion_silence = _remap_brief_evidence_to_output_timeline(
+            work_dir, scenes_analysis, asr_result, silence_periods, required=True)
+    asr_chunks = _chunk_asr_for_writing(chunk_asr, chunk_scenes)
+    timeline_fusion = _build_timeline_fusion(fusion_scenes, fusion_asr, fusion_silence)
     _write_json_artifact(work_dir, "asr_writing_chunks.json", asr_chunks)
     _write_json_artifact(work_dir, "timeline_fusion.json", timeline_fusion)
     lines.extend(_format_asr_chunks_for_brief(asr_chunks))

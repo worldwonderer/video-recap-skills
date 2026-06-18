@@ -53,7 +53,7 @@ sudo apt install ffmpeg                     # Debian/Ubuntu
 choco install ffmpeg                        # Windows (or scoop / winget install ffmpeg)
 ```
 
-Subtitles are burned into the picture by default, which needs an ffmpeg built with **libass (the `subtitles` filter)** — the packages above include it in almost all cases. If yours lacks libass, the run fails fast at the start with a clear message (or pass `--no-burn-subtitles` to keep subtitles as a sidecar `.srt`). Run `python3 scripts/recap.py --doctor` to self-check.
+Subtitles are burned into the picture by default, which needs an ffmpeg built with **libass (the `subtitles` filter)** — the packages above include it in almost all cases. If yours lacks libass, the run fails fast at the start with a clear message (or pass `--no-burn-subtitles` to keep the MP4 unmasked and subtitles as a sidecar `.srt`). Run `python3 scripts/recap.py --doctor` to self-check.
 
 **③ Set your MiMo API key** (one key powers ASR / VLM / TTS — keep it in an env var, never in the repo):
 
