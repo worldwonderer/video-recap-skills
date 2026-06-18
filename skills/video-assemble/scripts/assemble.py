@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import wave
 from pathlib import Path
 
@@ -8,8 +9,10 @@ from lib import CONFIG
 from lib import log, run_cmd, get_video_duration
 from timeline import build_timeline, save_timeline
 
-SUBTITLE_RENDER_VERSION = 2
+SUBTITLE_RENDER_VERSION = 3
 ASSEMBLY_MANIFEST = "assembly_manifest.json"
+_SUBTITLE_TERMINAL_PUNCTUATION = "。！？!?…."
+_SUBTITLE_CLOSING_QUOTES = "」』”’）)]】》〉\"'"
 
 
 def _stable_json_dumps(value):
@@ -192,7 +195,7 @@ def _emit_timeline(input_video, tts_segments, work_dir, duration_s, has_bgm):
             "overlaps_speech": seg.get("overlaps_speech", True),
             "gain": 1.0,
         })
-    fade = CONFIG.get("duck_fade_seconds", 0.25)
+    fade = CONFIG.get("duck_fade_seconds", 0.3)
     bgm = None
     if has_bgm:
         bgm = {"source_path": CONFIG.get("bgm_path", ""),
@@ -203,11 +206,11 @@ def _emit_timeline(input_video, tts_segments, work_dir, duration_s, has_bgm):
     # mode the draft gets editable volume keyframes (ffmpeg stays the canonical mix)
     ducking = None
     if CONFIG.get("ducking_mode", "fixed") != "none":
-        ducking = {"idle": CONFIG.get("idle_orig_volume", 0.85),
+        ducking = {"idle": CONFIG.get("idle_orig_volume", 1.0),
                    "speech": CONFIG.get("speech_ducking_volume", 0.2),
                    "quiet": CONFIG.get("zone_ducking_volume", 0.12),
                    "fade": fade,
-                   "bridge": CONFIG.get("duck_bridge_seconds", 12.0)}
+                   "bridge": CONFIG.get("duck_bridge_seconds", 1.5)}
     timeline = build_timeline(canvas, duration_s, video_clips,
                               narration_segments, bgm=bgm, ducking=ducking)
     out = Path(work_dir) / "timeline.json"
@@ -325,6 +328,50 @@ def _wrap_subtitle_text(text, max_chars=20, line_break="\n"):
     return line_break.join([line1, line2])
 
 
+def _subtitle_display_text(text):
+    """Return display-only subtitle text with trailing sentence punctuation removed.
+
+    Narration/TTS source text stays untouched; this is applied only to SRT/ASS cue text.
+    Closing quotes/brackets are preserved, so 「原声台词。」 renders as 「原声台词」.
+    """
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    suffix = ""
+    while text and text[-1] in _SUBTITLE_CLOSING_QUOTES:
+        suffix = text[-1] + suffix
+        text = text[:-1].rstrip()
+    text = text.rstrip(_SUBTITLE_TERMINAL_PUNCTUATION).rstrip()
+    return (text + suffix).strip()
+
+
+def _subtitle_chunk_weight(text):
+    """Weight raw subtitle chunks for timing, independent of display punctuation cleanup."""
+    core = re.sub(r"\s+", "", str(text or ""))
+    return max(1, len(core))
+
+
+def _subtitle_entry_chunks(raw_chunks):
+    """Pair raw chunks used for timing with their final display text.
+
+    Timing remains based on the raw split topology. Terminal punctuation is stripped only
+    on the emitted text, while quote-only suffix chunks are folded into the previous cue
+    so a closing bracket never renders alone.
+    """
+    chunks = [str(c).strip() for c in (raw_chunks or []) if str(c).strip()]
+    out = []
+    for i, chunk in enumerate(chunks):
+        display = _subtitle_display_text(chunk)
+        if not display:
+            continue
+        if all(ch in _SUBTITLE_CLOSING_QUOTES for ch in display):
+            if out:
+                out[-1]["text"] += display
+            continue
+        out.append({"raw": chunk, "text": display})
+    return out
+
+
 def _split_subtitle_chunks(text, max_chars):
     """Split one narration block (often several sentences) into short display chunks.
 
@@ -332,7 +379,8 @@ def _split_subtitle_chunks(text, max_chars):
     whole paragraph as a single subtitle would force a tall multi-line band and lag the picture.
     So we cut the block at punctuation into clauses, then greedily pack adjacent clauses into
     chunks of at most `max_chars` — each chunk renders as ONE readable line synced to its slice of
-    the block's audio. Punctuation stays attached to its clause; we never orphan a lone mark."""
+    the block's audio. Punctuation stays attached here for lossless splitting; the display layer
+    strips terminal sentence marks per subtitle-cue style."""
     text = str(text).strip()
     if not text:
         return []
@@ -355,7 +403,8 @@ def _split_subtitle_chunks(text, max_chars):
                 sized.append(clause[i:i + max_chars])
     chunks, cur = [], ""
     for clause in sized:
-        if cur and len(cur) + len(clause) > max_chars:
+        sentence_closed = cur.rstrip().endswith(tuple(_SUBTITLE_TERMINAL_PUNCTUATION))
+        if cur and (sentence_closed or len(cur) + len(clause) > max_chars):
             chunks.append(cur)
             cur = clause
         else:
@@ -387,24 +436,25 @@ def _subtitle_entries(narration):
             continue
         if end - start < 0.1:
             continue
-        chunks = _split_subtitle_chunks(text, max_chars)
+        chunks = _subtitle_entry_chunks(_split_subtitle_chunks(text, max_chars))
         if not chunks:
             continue
         if len(chunks) == 1:
-            entries.append({"start": start, "end": end, "text": chunks[0]})
+            entries.append({"start": start, "end": end, "text": chunks[0]["text"]})
             continue
-        total_chars = sum(len(c) for c in chunks) or 1
+        total_chars = sum(_subtitle_chunk_weight(c["raw"]) for c in chunks) or 1
         span = end - start
         cursor = start
         for i, chunk in enumerate(chunks):
-            chunk_end = end if i == len(chunks) - 1 else cursor + span * (len(chunk) / total_chars)
+            weight = _subtitle_chunk_weight(chunk["raw"])
+            chunk_end = end if i == len(chunks) - 1 else cursor + span * (weight / total_chars)
             if i > 0 and chunk_end - cursor < 0.05:
                 # slice too short to show on its own — fold the text into the previous line of THIS
                 # block (i>0) and extend its end, so no chunk is ever silently dropped.
-                entries[-1]["text"] += chunk
+                entries[-1]["text"] += chunk["text"]
                 entries[-1]["end"] = chunk_end
             else:
-                entries.append({"start": cursor, "end": chunk_end, "text": chunk})
+                entries.append({"start": cursor, "end": chunk_end, "text": chunk["text"]})
             cursor = chunk_end
     return entries
 
@@ -416,22 +466,27 @@ _MAX_ORIGINAL_READ_CPS = 9.0     # densest an AUTO (uncalibrated) original line 
 
 
 def _distribute_chunks(chunks, start, end):
-    """Distribute [start,end] across one-line `chunks` in proportion to character count
-    (karaoke timing). Folds a too-short trailing slice into the previous line."""
+    """Distribute [start,end] across raw chunks while emitting display-clean text.
+
+    Terminal subtitle punctuation is visual-only: it is stripped from final cue text,
+    but the raw split chunks remain the timing topology.
+    """
+    chunks = _subtitle_entry_chunks(chunks)
     if not chunks or end - start < 0.1:
         return []
     if len(chunks) == 1:
-        return [{"start": start, "end": end, "text": chunks[0]}]
-    total_chars = sum(len(c) for c in chunks) or 1
+        return [{"start": start, "end": end, "text": chunks[0]["text"]}]
+    total_chars = sum(_subtitle_chunk_weight(c["raw"]) for c in chunks) or 1
     span = end - start
     out, cursor = [], start
     for i, chunk in enumerate(chunks):
-        chunk_end = end if i == len(chunks) - 1 else cursor + span * (len(chunk) / total_chars)
+        weight = _subtitle_chunk_weight(chunk["raw"])
+        chunk_end = end if i == len(chunks) - 1 else cursor + span * (weight / total_chars)
         if out and chunk_end - cursor < 0.05:
-            out[-1]["text"] += chunk
+            out[-1]["text"] += chunk["text"]
             out[-1]["end"] = chunk_end
         else:
-            out.append({"start": cursor, "end": chunk_end, "text": chunk})
+            out.append({"start": cursor, "end": chunk_end, "text": chunk["text"]})
         cursor = chunk_end
     return out
 
@@ -444,7 +499,10 @@ def _karaoke_chunks(text, start, end, max_chars):
 def _bracketed_original_chunks(text, start, end, max_chars):
     """Like _karaoke_chunks, but for ORIGINAL dialogue: wrap the whole line in 「」 so it reads
     as quoted original speech, visually distinct from the recap's own narration."""
-    chunks = _split_subtitle_chunks(str(text).strip().strip("「」"), max_chars)
+    raw = str(text).strip()
+    if raw.startswith("「") and raw.endswith("」"):
+        raw = raw[1:-1].strip()
+    chunks = _split_subtitle_chunks(raw, max_chars)
     if chunks:
         chunks = list(chunks)
         chunks[0] = "「" + chunks[0]
@@ -905,7 +963,7 @@ def _build_audio_filter_complex(
     """
     ducking_mode = CONFIG.get("ducking_mode", "fixed")
     narr_vol = CONFIG.get("ducking_narr_weight", 1.5)
-    fade = CONFIG.get("duck_fade_seconds", 0.25)
+    fade = CONFIG.get("duck_fade_seconds", 0.3)
     original_in = f"[{original_audio_label}]"
     bgm_in = f"[{bgm_audio_label or '2:a'}]"
 
@@ -914,7 +972,7 @@ def _build_audio_filter_complex(
     if has_bgm:
         base = CONFIG.get("bgm_volume", 0.18)
         bgm_expr = _bgm_envelope(tts_segments, base, CONFIG.get("bgm_ducking_volume", 0.10), fade,
-                                 bridge=CONFIG.get("duck_bridge_seconds", 12.0))
+                                 bridge=CONFIG.get("duck_bridge_seconds", 1.5))
         if bgm_expr:
             bgm_chain = f"{bgm_in}volume='{bgm_expr}':eval=frame,aresample=48000[bgm];"
         else:
@@ -939,10 +997,10 @@ def _build_audio_filter_complex(
         return f"{original_in}aresample=48000[orig];" + _amix_tail(narr_vol, bgm_chain)
 
     # fixed (default): gap-fill ducking envelope on the original track.
-    idle = CONFIG.get("idle_orig_volume", 0.85)
+    idle = CONFIG.get("idle_orig_volume", 1.0)
     speech_vol = CONFIG.get("speech_ducking_volume", 0.2)
     quiet_vol = CONFIG.get("zone_ducking_volume", 0.12)
-    bridge = CONFIG.get("duck_bridge_seconds", 12.0)
+    bridge = CONFIG.get("duck_bridge_seconds", 1.5)
     expr = _duck_envelope(tts_segments, idle, speech_vol, quiet_vol, fade, bridge=bridge)
     if expr:
         n_overlap = sum(1 for s in tts_segments if isinstance(s, dict) and s.get("overlaps_speech", True))

@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 from lib import CONFIG
 
@@ -125,15 +126,17 @@ def build_report() -> dict[str, object]:
 
     failures: list[str] = []
     warnings: list[str] = []
-    tools = checks["system_tools"]  # type: ignore[index]
+    tools = cast(dict[str, Any], checks["system_tools"])
+    api_config = cast(dict[str, Any], checks["api_config"])
+    asr_check = cast(dict[str, Any], checks["asr"])
     for name in ("ffmpeg", "ffprobe"):
-        if not tools.get(name):  # type: ignore[union-attr]
+        if not tools.get(name):
             failures.append(f"Missing system tool: {name}")
-    if tools.get("ffmpeg") and not tools.get("ffmpeg_subtitles_filter"):  # type: ignore[union-attr]
+    if tools.get("ffmpeg") and not tools.get("ffmpeg_subtitles_filter"):
         warnings.append("ffmpeg lacks subtitles/libass filter; --burn-subtitles will fail")
-    if not checks["api_config"].get("api_key_set"):  # type: ignore[union-attr]
+    if not api_config.get("api_key_set"):
         failures.append("MIMO_API_KEY is not set; ASR / VLM / TTS all require a MiMo key")
-    if not checks["asr"].get("available"):  # type: ignore[union-attr]
+    if not asr_check.get("available"):
         warnings.append("ASR not configured (MIMO_API_KEY); pipeline can run with --skip-asr")
     return {
         "ok": not failures,
@@ -151,11 +154,11 @@ def _status_icon(ok: bool, *, warning: bool = False) -> str:
 
 
 def _print_human(report: dict[str, object]) -> None:
-    checks = report["checks"]  # type: ignore[index]
+    checks = cast(dict[str, Any], report["checks"])
     print("video-recap doctor")
     print(f"Repo root: {report['repo_root']}")
 
-    system = checks["system_tools"]  # type: ignore[index]
+    system = cast(dict[str, Any], checks["system_tools"])
     print("\n[system]")
     print(f"{_status_icon(bool(system.get('ffmpeg')))} ffmpeg: {system.get('ffmpeg_path') or 'not found'}")
     print(f"{_status_icon(bool(system.get('ffprobe')))} ffprobe: {system.get('ffprobe_path') or 'not found'}")
@@ -165,7 +168,7 @@ def _print_human(report: dict[str, object]) -> None:
         f"{'available' if system.get('ffmpeg_subtitles_filter') else 'missing'}"
     )
 
-    api = checks["api_config"]  # type: ignore[index]
+    api = cast(dict[str, Any], checks["api_config"])
     print("\n[api]")
     print(f"✓ API provider: {api.get('api_provider')}")
     print(f"✓ API URL: {api.get('api_url')} (source: {api.get('api_url_source')})")
@@ -176,7 +179,7 @@ def _print_human(report: dict[str, object]) -> None:
     print(f"✓ VLM model: {api.get('vlm_model')} (source: {api.get('vlm_model_source')})")
     print(f"✓ VLM_WORKERS: {api.get('vlm_workers')}")
 
-    asr = checks["asr"]  # type: ignore[index]
+    asr = cast(dict[str, Any], checks["asr"])
     print("\n[asr]")
     print(
         f"{_status_icon(bool(asr.get('available')), warning=True)} "
@@ -189,7 +192,7 @@ def _print_human(report: dict[str, object]) -> None:
     if not asr.get("available"):
         print(f"  note: {asr.get('note')}")
 
-    tts = checks["tts"]  # type: ignore[index]
+    tts = cast(dict[str, Any], checks["tts"])
     print("\n[tts]")
     print(
         f"{_status_icon(bool(tts.get('available')))} MiMo TTS: "
@@ -199,13 +202,15 @@ def _print_human(report: dict[str, object]) -> None:
     print(f"✓ TTS voice: {tts.get('mimo_tts_voice')} (source: {tts.get('mimo_tts_voice_source')})")
     print(f"✓ TTS API URL: {tts.get('mimo_tts_api_url')} (source: {tts.get('mimo_tts_api_url_source')})")
 
-    if report.get("warnings"):
+    warnings = cast(list[str], report.get("warnings") or [])
+    failures = cast(list[str], report.get("failures") or [])
+    if warnings:
         print("\nWarnings:")
-        for warning in report["warnings"]:  # type: ignore[index]
+        for warning in warnings:
             print(f"- {warning}")
-    if report.get("failures"):
+    if failures:
         print("\nStatus: FAILED")
-        for failure in report["failures"]:  # type: ignore[index]
+        for failure in failures:
             print(f"- {failure}")
     else:
         print("\nStatus: OK")

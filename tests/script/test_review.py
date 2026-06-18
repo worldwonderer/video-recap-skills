@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-script' / 'scripts'))
 import json
+import pytest
 
 import review
 
@@ -56,3 +57,67 @@ def test_review_reads_dict_frame_facts():
             "frame_facts": {"2.0": ["男子握紧拳头"], "4.0": ["女子后退一步"]}}]
     content = review.build_review_messages(narration, vlm, [])[0]["content"]
     assert "男子握紧拳头" in content and "女子后退一步" in content
+
+
+def test_cut_output_review_remaps_grounding_to_output_timeline():
+    spans = [{"source_start": 10.0, "source_end": 20.0, "output_start": 0.0, "output_end": 10.0}]
+    vlm, asr = review.remap_grounding_to_output_timeline(
+        [{"scene_id": 1, "start": 12.0, "end": 16.0, "description": "保留片段", "frame_facts": {"14.0": ["关键动作"], "21.0": ["剪掉动作"]}}],
+        [
+            {"start": 13.0, "end": 15.0, "text": "这句在成片三到五秒"},
+            {"start": 25.0, "end": 26.0, "text": "被剪掉"},
+        ],
+        spans,
+    )
+
+    assert vlm[0]["start"] == 2.0
+    assert vlm[0]["end"] == 6.0
+    assert vlm[0]["frame_facts"] == {"4.000": ["关键动作"]}
+    assert asr == [{"start": 3.0, "end": 5.0, "text": "这句在成片三到五秒"}]
+
+
+def test_review_narration_cut_output_requires_fresh_validated_clip_spans(monkeypatch, tmp_path):
+    (tmp_path / "narration.json").write_text(json.dumps([{"start": 1, "end": 2, "narration": "测试。"}]), encoding="utf-8")
+    monkeypatch.setattr("review.api_call", lambda payload: {"choices": [{"message": {"content": "{}"}}]})
+
+    with pytest.raises(SystemExit, match="clip_plan_validated"):
+        review.review_narration(tmp_path, timeline="cut_output")
+
+    raw = [{"start": 10, "end": 20}]
+    (tmp_path / "clip_plan.json").write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(SystemExit, match="clip_plan_validated"):
+        review.review_narration(tmp_path, timeline="cut_output")
+
+    stale = {
+        "raw_plan_fingerprint": "stale",
+        "clips": [{"source_start": 10, "source_end": 20, "output_start": 0, "output_end": 10}],
+    }
+    (tmp_path / "clip_plan_validated.json").write_text(json.dumps(stale), encoding="utf-8")
+    with pytest.raises(SystemExit, match="clip_plan_validated"):
+        review.review_narration(tmp_path, timeline="cut_output")
+
+
+def test_review_narration_cut_output_uses_remapped_grounding(monkeypatch, tmp_path):
+    (tmp_path / "narration.json").write_text(json.dumps([{"start": 3, "end": 5, "narration": "测试。"}]), encoding="utf-8")
+    (tmp_path / "vlm_analysis.json").write_text(json.dumps([
+        {"scene_id": 1, "start": 12, "end": 16, "description": "保留片段", "frame_facts": {}}
+    ]), encoding="utf-8")
+    (tmp_path / "asr_result.json").write_text(json.dumps([{ "start": 13, "end": 15, "text": "输出三到五秒对白"}]), encoding="utf-8")
+    raw_plan = [{"start": 10, "end": 20}]
+    (tmp_path / "clip_plan.json").write_text(json.dumps(raw_plan), encoding="utf-8")
+    (tmp_path / "clip_plan_validated.json").write_text(json.dumps({
+        "raw_plan_fingerprint": review._value_fingerprint(raw_plan),
+        "clips": [{"source_start": 10, "source_end": 20, "output_start": 0, "output_end": 10}],
+    }), encoding="utf-8")
+    payloads = []
+
+    def fake_api(payload):
+        payloads.append(payload)
+        return {"choices": [{"message": {"content": '{"verdict":"OK","summary":"ok","findings":[]}'}}]}
+
+    monkeypatch.setattr("review.api_call", fake_api)
+    review.review_narration(tmp_path, timeline="cut_output")
+
+    content = payloads[0]["messages"][0]["content"]
+    assert "[3-5s] 输出三到五秒对白" in content
+    assert "[场景1 2-6s] 保留片段" in content

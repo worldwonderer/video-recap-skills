@@ -154,6 +154,32 @@ def test_original_lines_wrapped_in_brackets(monkeypatch, tmp_path):
     assert joined.startswith("「") and joined.endswith("」")
 
 
+def test_original_gap_entries_strip_terminal_punctuation_inside_brackets(monkeypatch, tmp_path):
+    _burn_on(monkeypatch)
+    (tmp_path / "asr_result.json").write_text(
+        json.dumps([{"start": 1.0, "end": 4.0, "text": "原声台词。"}]), encoding="utf-8")
+    segs = [{"actual_place_start": 5.0, "actual_place_end": 8.0, "narration": "解说"}]
+
+    entries = assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0)
+
+    joined = "".join(e["text"] for e in entries)
+    assert joined == "「原声台词」"
+    assert "原声台词。" not in joined
+
+
+def test_original_gap_entries_keep_closing_quote_with_stripped_terminal_punctuation(monkeypatch, tmp_path):
+    _burn_on(monkeypatch)
+    (tmp_path / "asr_result.json").write_text(
+        json.dumps([{"start": 1.0, "end": 4.0, "text": "他说：「你好。」"}]), encoding="utf-8")
+    segs = [{"actual_place_start": 5.0, "actual_place_end": 8.0, "narration": "解说"}]
+
+    entries = assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0)
+
+    texts = [e["text"] for e in entries]
+    assert "」" not in texts
+    assert "".join(texts) == "「他说：「你好」」"
+
+
 def test_agent_subtitles_preferred_over_asr(monkeypatch, tmp_path):
     _burn_on(monkeypatch)
     # ASR has a (wrong) line; the agent-calibrated file should win

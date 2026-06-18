@@ -4,6 +4,7 @@ The bundle runs **zero-config** with sensible defaults. To change behavior, set 
 environment variables below (or pass the noted CLI flags) — they **override** the defaults.
 Nothing here is required; this is documentation only. No tool reads a config file, and the
 bundle ships no root `CLAUDE.md` (so it never collides with your project/global instructions).
+Defaults below are bundle-level defaults unless a note scopes them to a specific stage.
 
 | Concern | Env var / flag | Default | Notes |
 |---|---|---|---|
@@ -16,11 +17,11 @@ bundle ships no root `CLAUDE.md` (so it never collides with your project/global 
 | TTS model | `MIMO_TTS_MODEL` | `mimo-v2.5-tts` | the only TTS engine |
 | MiMo voice | `MIMO_TTS_VOICE` / `--mimo-tts-voice` | `冰糖` | |
 | Narration density | `TARGET_SEGMENTS_PER_MINUTE` | `9.6` | min `MIN_SEGMENTS_PER_MINUTE=6.24` |
-| Narration speed | `NARRATION_SPEED` | `1.2` | global atempo on the voiceover; default leans snappy for short-form, set `1.0` for long-form/documentary |
+| Narration speed | `NARRATION_SPEED` | `1.3` | global atempo on the voiceover; default leans snappy for short-form, set `1.0` for long-form/documentary |
 | Mask source subs | `MASK_SOURCE_SUBTITLES` / `SOURCE_SUBTITLE_MASK_RATIO` | on / `0.14` | covers burned-in source subtitles (bottom band) so only the recap's subtitles show; set `MASK_SOURCE_SUBTITLES=false` for sources without hardcoded subs |
-| Original ducking | `IDLE_ORIG_VOLUME` / `SPEECH_DUCKING_VOLUME` | `0.85` / `0.2` | the original is held as a **continuous low bed** under narration: inter-beat gaps shorter than `duck_bridge_seconds` stay ducked (no swelling back up between sentences). Only the lead-in, lead-out, and genuine gaps >= `duck_bridge_seconds` return to the `IDLE` level. Ducks to `SPEECH` under each narration beat. `DUCKING_ORIG_VOLUME` (`0.3`) is only the fallback when beats carry no placement info |
-| Duck fade | `DUCK_FADE_SECONDS` | `0.25` | ramp time for each duck transition, so the original fades down/up without clicks |
-| Duck bridge | `DUCK_BRIDGE_SECONDS` | `12` | inter-beat gaps shorter than this stay ducked (continuous bed); gaps >= this return to the idle original. Default 12 s is just above `max_narration_gap_seconds` (11 s) — lower it to let section gaps resurface sooner |
+| Original ducking | `IDLE_ORIG_VOLUME` / `SPEECH_DUCKING_VOLUME` | `1.0` / `0.2` | the original returns to full-volume `IDLE` in deliberate gaps/original blocks, and ducks to `SPEECH` under narration. Inter-beat gaps shorter than `DUCK_BRIDGE_SECONDS` stay ducked so a single narration block does not swell between sentences. `DUCKING_ORIG_VOLUME` (`0.3`) is only the fallback when beats carry no placement info |
+| Duck fade | `DUCK_FADE_SECONDS` | `0.3` | ramp time for each duck transition, so full-volume original blocks and ducked narration blocks switch without clicks |
+| Duck bridge | `DUCK_BRIDGE_SECONDS` | `1.5` | inter-beat gaps shorter than this stay ducked inside one narration block; gaps >= this are treated as intentional original-audio blocks and return to `IDLE_ORIG_VOLUME` |
 | Background music | `BGM_PATH` / `BGM_VOLUME` / `BGM_DUCKING_VOLUME` | off / `0.18` / `0.10` | optional looped music bed mixed as its own track; point `BGM_PATH` at any audio file. It ducks to `BGM_DUCKING_VOLUME` under narration |
 | Final loudness | `FINAL_LOUDNORM` / `TARGET_LUFS` | `true` / `-14` | end-of-pipeline normalize |
 | Style | `--style` | `纪录片` | |
@@ -30,6 +31,7 @@ bundle ships no root `CLAUDE.md` (so it never collides with your project/global 
 | VLM workers | `VLM_WORKERS` | `8` | lower to 1 if a proxy/WAF rate-limits |
 | Subtitle size | `SUBTITLE_FONT_SIZE` / `SUBTITLE_MARGIN_V` | `42` / `48` | look & placement |
 | 整理 / index | `--no-consolidate` / `--consolidate-asr` | on | build the understanding index (and optionally clean ASR); use `--no-consolidate` to skip |
+| Advisory narration review | `REVIEW_NARRATION` / `--review-narration` / `--no-review-narration` | on | runs `video-script/review.py` after validation and before TTS; advisory only and fail-open, while `validate.py` remains the hard gate. In cut mode the reviewer uses `clip_plan_validated.json` to remap VLM/ASR grounding onto the output timeline |
 | 剪映 export (optional) | `--export-jianying` / `EXPORT_JIANYING` | off | after rendering, also write a 剪映/JianYing draft from `timeline.json`. Decoupled — the core render never needs it |
 | 剪映 draft dir | `JIANYING_DRAFT_DIR` | work_dir | parent folder for the exported draft (point it at 剪映's drafts root to open in-app) |
 | 剪映 bundle media | `JIANYING_BUNDLE_MEDIA` / `--jianying-no-bundle-media` | **on** | copies media into the draft folder so it is self-contained. **Required on macOS** — 剪映 is sandboxed and cannot read external paths, so an unbundled draft opens with all media offline. Use `--jianying-no-bundle-media` only if 剪映 can reach the original paths |

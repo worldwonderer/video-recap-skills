@@ -19,6 +19,7 @@ def _manifest_args(**overrides):
         "mimo_video_overview": False,
         "consolidate": False,
         "consolidate_asr": False,
+        "review_narration": None,
     }
     defaults.update(overrides)
     return Namespace(**defaults)
@@ -113,6 +114,8 @@ def test_recap_full_mode_passes_explicit_narration_json(monkeypatch, tmp_path):
     voiceover_call = next(call for call in calls if call[:2] == ("video-voiceover", "voiceover.py"))
     args = voiceover_call[2]
     assert args[args.index("--narration") + 1] == str(work / "narration.json")
+    order = [script for _, script, _ in calls]
+    assert order.index("validate.py") < order.index("review.py") < order.index("voiceover.py")
 
 
 def test_recap_cut_mode_voiceover_uses_output_time_narration(monkeypatch, tmp_path):
@@ -147,6 +150,7 @@ def test_recap_cut_mode_voiceover_uses_output_time_narration(monkeypatch, tmp_pa
             )
 
     monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr("recap._read_video_duration_or_raise", lambda path: 10.0)
     monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--work-dir", str(work), "--edit-mode", "cut"])
 
     recap.main()
@@ -157,6 +161,13 @@ def test_recap_cut_mode_voiceover_uses_output_time_narration(monkeypatch, tmp_pa
     assert "--no-narration-map" in cut_render
     asm = next(c for c in calls if c[:2] == ("video-assemble", "assemble.py"))[2]
     assert asm[0] == str(work / "edited_source.mp4")
+    validate_args = next(c for c in calls if c[:2] == ("video-script", "validate.py"))[2]
+    assert "--output-duration" in validate_args
+    assert validate_args[validate_args.index("--output-duration") + 1] == "10.000"
+    review_args = next(c for c in calls if c[:2] == ("video-script", "review.py"))[2]
+    assert review_args[review_args.index("--timeline") + 1] == "cut_output"
+    order = [script for _, script, _ in calls]
+    assert order.index("validate.py") < order.index("review.py") < order.index("voiceover.py")
 
 
 
@@ -224,6 +235,7 @@ def test_recap_honors_edit_mode_and_target_duration_env(monkeypatch, tmp_path):
     monkeypatch.setenv("EDIT_MODE", "cut")
     monkeypatch.setenv("TARGET_DURATION", "10m")
     monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr("recap._read_video_duration_or_raise", lambda path: 600.0)
     monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--work-dir", str(work)])
 
     recap.main()
@@ -236,6 +248,7 @@ def test_recap_honors_edit_mode_and_target_duration_env(monkeypatch, tmp_path):
     validate_call = next(call for call in calls if call[:2] == ("video-script", "validate.py"))
     validate_args = validate_call[2]
     assert validate_args[validate_args.index("--mode") + 1] == "cut_output"
+    assert validate_args[validate_args.index("--output-duration") + 1] == "600.000"
 
 
 def test_recap_completion_prints_manifest_final_output(monkeypatch, tmp_path, capsys):
@@ -280,6 +293,7 @@ def test_recap_continuation_preserves_phase_b_flags(tmp_path):
     args.jianying_bundle_media = True
     args.jianying_no_bundle_media = False
     args.allow_partial_tts = True
+    args.review_narration = False
 
     cmd = recap._continuation_command(video, work, args)
 
@@ -290,6 +304,7 @@ def test_recap_continuation_preserves_phase_b_flags(tmp_path):
     assert "--export-jianying" in cmd
     assert "--jianying-bundle-media" in cmd
     assert "--jianying-no-bundle-media" not in cmd
+    assert "--no-review-narration" in cmd
 
 
 def test_recap_forwards_allow_partial_tts_to_voiceover(monkeypatch, tmp_path):
@@ -356,6 +371,132 @@ def test_recap_phase_b_allows_environment_changes_when_artifacts_are_unchanged(m
     recap.main()
 
     assert any(call[:2] == ("video-assemble", "assemble.py") for call in calls)
+
+
+def test_recap_advisory_review_failure_is_fail_open(monkeypatch, tmp_path, capsys):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "narration.json").write_text(
+        json.dumps([{"start": 0, "end": 1, "narration": "full。"}]),
+        encoding="utf-8",
+    )
+    recap._write_run_manifest(work, video.resolve(), _manifest_args())
+    calls = []
+
+    def fake_run(skill, script, *cli_args):
+        calls.append((skill, script, [str(arg) for arg in cli_args]))
+        if script == "review.py":
+            raise SystemExit("review API unavailable")
+        if script == "assemble.py":
+            (work / "output.mp4").write_bytes(b"mp4")
+            (work / "assembly_manifest.json").write_text(
+                json.dumps({"final_output": str(tmp_path / "recap_video.mp4")}),
+                encoding="utf-8",
+            )
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--work-dir", str(work)])
+
+    recap.main()
+
+    order = [script for _, script, _ in calls]
+    assert "review.py" in order and "voiceover.py" in order
+    assert order.index("review.py") < order.index("voiceover.py")
+    assert "建议性评审失败" in capsys.readouterr().out
+
+
+def test_recap_does_not_print_stale_review_pointer_after_fail_open(monkeypatch, tmp_path, capsys):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "narration.json").write_text(
+        json.dumps([{"start": 0, "end": 1, "narration": "full。"}]),
+        encoding="utf-8",
+    )
+    (work / "narration_review.md").write_text("# stale review", encoding="utf-8")
+    recap._write_run_manifest(work, video.resolve(), _manifest_args())
+
+    def fake_run(skill, script, *cli_args):
+        if script == "review.py":
+            raise SystemExit("review API unavailable")
+        if script == "assemble.py":
+            (work / "output.mp4").write_bytes(b"mp4")
+            (work / "assembly_manifest.json").write_text(
+                json.dumps({"final_output": str(tmp_path / "recap_video.mp4")}),
+                encoding="utf-8",
+            )
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--work-dir", str(work)])
+
+    recap.main()
+
+    out = capsys.readouterr().out
+    assert "建议性评审失败" in out
+    assert "解说评审" not in out
+    assert "stale" not in out
+
+
+def test_recap_advisory_review_can_be_disabled(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "narration.json").write_text(
+        json.dumps([{"start": 0, "end": 1, "narration": "full。"}]),
+        encoding="utf-8",
+    )
+    recap._write_run_manifest(work, video.resolve(), _manifest_args())
+    calls = []
+
+    def fake_run(skill, script, *cli_args):
+        calls.append((skill, script, [str(arg) for arg in cli_args]))
+        if script == "assemble.py":
+            (work / "output.mp4").write_bytes(b"mp4")
+            (work / "assembly_manifest.json").write_text(
+                json.dumps({"final_output": str(tmp_path / "recap_video.mp4")}),
+                encoding="utf-8",
+            )
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr(sys, "argv", [
+        "recap.py", str(video), "--work-dir", str(work), "--no-review-narration",
+    ])
+
+    recap.main()
+
+    assert not any(call[:2] == ("video-script", "review.py") for call in calls)
+    assert any(call[:2] == ("video-voiceover", "voiceover.py") for call in calls)
+
+
+def test_recap_cut_duration_read_failure_stops_before_tts(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "narration.json").write_text(
+        json.dumps([{"start": 1, "end": 3, "narration": "解说。"}]), encoding="utf-8")
+    (work / "clip_plan.json").write_text(json.dumps([{"start": 10, "end": 12}]), encoding="utf-8")
+    recap._write_run_manifest(work, video.resolve(), _manifest_args(edit_mode="cut"))
+    recap._write_phase_ledger(work, clip_plan_fingerprint=recap._file_md5(work / "clip_plan.json"),
+                              edited_source_rendered=True)
+
+    def fake_run(skill, script, *cli_args):
+        if script == "cut.py":
+            (work / "edited_source.mp4").write_bytes(b"edited")
+        if script in ("validate.py", "review.py", "voiceover.py", "assemble.py"):
+            raise AssertionError(f"{script} must not run when duration cannot be read")
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr("recap._read_video_duration_or_raise",
+                        lambda path: (_ for _ in ()).throw(SystemExit("无法读取成片时长")))
+    monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--work-dir", str(work), "--edit-mode", "cut"])
+
+    with pytest.raises(SystemExit, match="无法读取成片时长"):
+        recap.main()
 
 
 def test_recap_resumes_old_manifest_missing_consolidate_key(monkeypatch, tmp_path):

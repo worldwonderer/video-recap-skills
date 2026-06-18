@@ -273,6 +273,25 @@ def test_generate_srt_uses_actual_placement(tmp_path):
     assert "过短跳过" not in srt
 
 
+def test_generate_srt_strips_terminal_display_punctuation_without_mutating_source(tmp_path):
+    narration = [
+        {"start": 0.0, "end": 2.0, "actual_place_start": 0.5, "actual_place_end": 1.7, "narration": "他终于明白真相。"},
+        {"start": 2.0, "end": 4.0, "actual_place_start": 2.2, "actual_place_end": 3.5, "narration": "What now?"},
+        {"start": 4.0, "end": 6.0, "actual_place_start": 4.2, "actual_place_end": 5.5, "narration": "It ends."},
+    ]
+
+    _generate_srt(narration, tmp_path)
+
+    srt = (tmp_path / "subtitles.srt").read_text(encoding="utf-8")
+    assert "他终于明白真相\n" in srt
+    assert "他终于明白真相。" not in srt
+    assert "What now\n" in srt
+    assert "What now?" not in srt
+    assert "It ends\n" in srt
+    assert "It ends." not in srt
+    assert narration[0]["narration"].endswith("。")  # display-only; TTS source is untouched
+
+
 def test_generate_ass_escapes_text_and_writes_style(tmp_path):
     _generate_ass([
         {
@@ -290,6 +309,22 @@ def test_generate_ass_escapes_text_and_writes_style(tmp_path):
     assert "Dialogue: 0,0:00:01.25,0:00:03.50" in ass
     assert r"第一行\{重点\}\\路径\N第二行" in ass
     assert _escape_ass_text("{x}\\y") == r"\{x\}\\y"
+
+
+def test_generate_ass_strips_terminal_display_punctuation_before_escaping(tmp_path):
+    _generate_ass([
+        {
+            "start": 1.0,
+            "end": 4.0,
+            "actual_place_start": 1.25,
+            "actual_place_end": 3.5,
+            "narration": "他终于明白真相。",
+        }
+    ], tmp_path)
+
+    ass = (tmp_path / "subtitles.ass").read_text(encoding="utf-8")
+    assert "他终于明白真相" in ass
+    assert "他终于明白真相。" not in ass
 
 
 def test_build_timed_narration_clamps_delay_to_slot(monkeypatch, tmp_path):
@@ -749,6 +784,38 @@ def test_split_subtitle_chunks_breaks_block_into_short_one_line_pieces():
     assert _split_subtitle_chunks("   ", max_chars=20) == []
 
 
+def test_subtitle_entries_keep_timing_topology_when_stripping_display_punctuation():
+    entries = _subtitle_entries([
+        {
+            "start": 0.0,
+            "end": 10.0,
+            "actual_place_start": 0.0,
+            "actual_place_end": 10.0,
+            "narration": "短。长长长长。",
+        }
+    ])
+
+    assert [e["text"] for e in entries] == ["短", "长长长长"]
+    # Raw chunks are "短。" and "长长长长。" (2:5), so display cleanup must not
+    # retime the cue as stripped display text (1:4).
+    assert entries[0]["end"] == pytest.approx(10.0 * 2 / 7)
+
+
+def test_subtitle_entries_keep_closing_quote_with_stripped_terminal_punctuation():
+    entries = _subtitle_entries([
+        {
+            "start": 0.0,
+            "end": 2.0,
+            "actual_place_start": 0.0,
+            "actual_place_end": 2.0,
+            "narration": "他说：「你好。」",
+        }
+    ])
+
+    assert [e["text"] for e in entries] == ["他说：「你好」"]
+    assert all(e["text"] != "」" for e in entries)
+
+
 def test_subtitle_entries_distribute_block_window_across_chunks():
     # one placed block of 12s -> several timed one-line entries spanning [start, end] with no gaps
     entries = _subtitle_entries([
@@ -765,6 +832,7 @@ def test_subtitle_entries_distribute_block_window_across_chunks():
         assert b["start"] == pytest.approx(a["end"])         # contiguous, karaoke-style
         assert a["end"] > a["start"]
     assert all(len(e["text"]) <= 20 for e in entries)        # each line is short
+    assert all(not e["text"].endswith(("。", "！", "？", "!", "?", "…")) for e in entries)
 
 
 def test_subtitle_entries_never_drops_a_sub_threshold_chunk():
@@ -780,4 +848,4 @@ def test_subtitle_entries_never_drops_a_sub_threshold_chunk():
     joined = "".join(e["text"] for e in entries)
     assert "第三" in joined                                   # the tiny trailing chunk survives
     assert entries[-1]["end"] == pytest.approx(0.3)          # still closes at the audio end
-    assert joined == "第一句子比较长一点点。第二句子也比较长。第三。"
+    assert joined == "第一句子比较长一点点第二句子也比较长第三"

@@ -210,8 +210,8 @@ CONFIG = {
     "ducking_orig_volume": env_float("DUCKING_ORIG_VOLUME", 0.3, minimum=0.0),  # 解说时原声基准音量
     "zone_ducking_volume": 0.12,    # 解说时原声压低到的音量
     "zone_fade_seconds": 0.5,      # 解说/原声切换的淡入淡出时长(秒)
-    "idle_orig_volume": env_float("IDLE_ORIG_VOLUME", 0.85, minimum=0.0),  # 解说间隙(无旁白)时的原声音量，铺底避免顿挫
-    "duck_fade_seconds": env_float("DUCK_FADE_SECONDS", 0.25, minimum=0.0),  # 原声 ducking 过渡淡入淡出(秒)
+    "idle_orig_volume": env_float("IDLE_ORIG_VOLUME", 1.0, minimum=0.0),  # 解说间隙(无旁白)时的原声音量，铺底避免顿挫
+    "duck_fade_seconds": env_float("DUCK_FADE_SECONDS", 0.3, minimum=0.0),  # 原声 ducking 过渡淡入淡出(秒)
     "bgm_path": os.environ.get("BGM_PATH", "").strip(),  # 背景音乐文件(可选)，留空则不加 BGM
     "source_video": os.environ.get("SOURCE_VIDEO", "").strip(),  # 剪辑模式下的原始视频(可选)，用于时间线/剪映导出引用原片片段
     "export_jianying": env_bool("EXPORT_JIANYING", False),  # 渲染后可选导出剪映草稿(默认关；与核心解耦)

@@ -457,7 +457,7 @@ def lint_narration(narration, scenes_analysis=None, *, clip_plan=None, mode="ful
                     start=start, end=end, budget_chars=budget, actual_chars=char_count,
                     estimated_tts_seconds=round(estimated_tts_seconds, 2), slot_seconds=round(slot_seconds, 2),
                 ))
-            if text[-1] not in "。！？!?…":
+            if text[-1] not in "。！？!?….":
                 warnings.append(_lint_issue(
                     "warning", idx, "incomplete_sentence",
                     "Narration should end with a complete sentence punctuation",

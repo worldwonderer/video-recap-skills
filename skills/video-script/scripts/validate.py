@@ -8,6 +8,7 @@ in full mode, rewrites narration.json with quiet-window alignment applied.
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 
 from lib import CONFIG, log
@@ -49,10 +50,57 @@ def _load_cut_clip_plan(work_dir):
     return raw
 
 
+
+
+def _validate_output_timeline_bounds(narration, output_duration, tolerance=0.05):
+    """Hard-gate cut_output narration against the rendered output timeline.
+
+    cut_output narration is authored in edited_source.mp4 time. If any segment falls outside
+    that media duration, fail before TTS/render instead of spending time on unusable audio.
+    """
+    try:
+        duration = float(output_duration)
+    except (TypeError, ValueError):
+        raise SystemExit(f"output_duration must be numeric, got {output_duration!r}")
+    if not math.isfinite(duration) or duration <= 0:
+        raise SystemExit(f"output_duration must be finite and positive, got output_duration={duration:.3f}")
+    if not isinstance(narration, list):
+        return
+
+    problems = []
+    for idx, seg in enumerate(narration):
+        if not isinstance(seg, dict):
+            continue
+        try:
+            start = float(seg.get("start"))
+            end = float(seg.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(start) or not math.isfinite(end):
+            problems.append(f"segment {idx} has non-finite time [{start!r},{end!r}]")
+            continue
+        if end <= -tolerance or start >= duration + tolerance:
+            problems.append(
+                f"segment {idx} [{start:.3f},{end:.3f}] fully outside output_duration={duration:.3f}"
+            )
+            continue
+        if start < -tolerance:
+            problems.append(
+                f"segment {idx} start={start:.3f} before output timeline (output_duration={duration:.3f})"
+            )
+        if end > duration + tolerance:
+            problems.append(
+                f"segment {idx} end={end:.3f} exceeds output_duration={duration:.3f}"
+            )
+    if problems:
+        raise SystemExit("cut_output narration exceeds rendered output timeline: " + "; ".join(problems))
+
 def main():
     ap = argparse.ArgumentParser(description="Validate + align agent-written narration.json.")
     ap.add_argument("--work-dir", required=True)
     ap.add_argument("--mode", default="full", choices=["full", "cut", "cut_output"])
+    ap.add_argument("--output-duration", type=float, default=None,
+                    help="cut_output: rendered edited_source.mp4 duration in seconds")
     args = ap.parse_args()
 
     work_dir = Path(args.work_dir)
@@ -68,6 +116,9 @@ def main():
         # no clip_plan to fall into and no source-time scene/quiet data to align to. Lint timing /
         # budget / overlap / density on the output timeline only; never realign or rewrite it.
         validate_narration_or_raise(narration, None, clip_plan=None, mode="full", work_dir=work_dir)
+        if args.output_duration is None:
+            raise SystemExit("--output-duration is required when --mode cut_output")
+        _validate_output_timeline_bounds(narration, args.output_duration)
     elif args.mode == "cut":
         clip_plan = _load_cut_clip_plan(work_dir)
         validate_narration_or_raise(narration, vlm_analysis, clip_plan=clip_plan, mode="cut", work_dir=work_dir)

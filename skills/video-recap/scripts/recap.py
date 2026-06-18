@@ -14,6 +14,7 @@ work_dir artifacts.
 import argparse
 import hashlib
 import json
+import math
 import os
 import shlex
 import subprocess
@@ -38,6 +39,58 @@ def _run(skill, script, *cli_args):
     res = subprocess.run(cmd)
     if res.returncode != 0:
         raise SystemExit(f"{skill}/{script} 失败 (exit {res.returncode})")
+
+
+def _env_bool(name, default=False):
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _read_video_duration_or_raise(path):
+    """Return media duration via ffprobe, or hard-fail before downstream TTS/render."""
+    path = Path(path)
+    cmd = [
+        "ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+        "-of", "csv=p=0", str(path),
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        detail = (res.stderr or res.stdout or "ffprobe failed").strip()
+        raise SystemExit(f"无法读取成片时长: {path} ({detail})")
+    try:
+        duration = float(res.stdout.strip())
+    except (TypeError, ValueError):
+        raise SystemExit(f"无法读取成片时长: {path} (ffprobe 输出无效: {res.stdout!r})")
+    if not math.isfinite(duration) or duration <= 0:
+        raise SystemExit(f"无法读取成片时长: {path} (duration={duration:.3f})")
+    return duration
+
+
+def _review_narration_enabled(args):
+    if getattr(args, "review_narration", None) is not None:
+        return bool(args.review_narration)
+    return _env_bool("REVIEW_NARRATION", True)
+
+
+def _run_advisory_review(work_dir, args, *, timeline="source"):
+    """Run quality review before TTS, but never block production on reviewer availability.
+
+    Returns True only when review.py completed, so the completion message can avoid
+    pointing at stale review artifacts after an opt-out or fail-open run.
+    """
+    if not _review_narration_enabled(args):
+        return False
+    try:
+        rargs = ["--work-dir", work_dir]
+        if timeline != "source":
+            rargs += ["--timeline", timeline]
+        _run("video-script", "review.py", *rargs)
+    except SystemExit as exc:
+        print(f"[video-recap] ⚠️ 建议性评审失败，继续执行 TTS: {exc}", flush=True)
+        return False
+    return True
 
 
 def _file_fingerprint(path, chunk_size=1024 * 1024):
@@ -127,10 +180,14 @@ def _preflight_burn_subtitles(args):
             "  自检：python3 skills/video-recap/scripts/doctor.py")
 
 
-def _print_narration_review_pointer(work_dir):
-    """Surface the advisory narration review to the user at delivery — it is otherwise
-    buried in the video-script stage and never echoed by the orchestrator. Pointer only:
-    never blocks (validate.py is the hard gate). Silent when no review was run."""
+def _print_narration_review_pointer(work_dir, *, review_ran=True):
+    """Surface the advisory narration review produced by this run, if any.
+
+    Review is optional/fail-open. Avoid surfacing a stale narration_review.md from an
+    older run when review was disabled or failed before producing fresh artifacts.
+    """
+    if not review_ran:
+        return
     review_md = Path(work_dir) / "narration_review.md"
     if not review_md.exists():
         return
@@ -250,6 +307,8 @@ def _continuation_command(video, work_dir, args):
         parts.append("--jianying-bundle-media")
     if getattr(args, "jianying_no_bundle_media", False):
         parts.append("--jianying-no-bundle-media")
+    if getattr(args, "review_narration", None) is not None:
+        parts.append("--review-narration" if args.review_narration else "--no-review-narration")
     return " ".join(shlex.quote(part) for part in parts)
 
 
@@ -274,6 +333,8 @@ def main():
                     help="allow video-voiceover to continue when some narration segments fail TTS")
     ap.add_argument("--burn-subtitles", action=argparse.BooleanOptionalAction, default=None,
                     help="burn narration subtitles into the video (default on; --no-burn-subtitles to disable)")
+    ap.add_argument("--review-narration", action=argparse.BooleanOptionalAction, default=None,
+                    help="run advisory narration quality review before TTS (default on; fail-open)")
     ap.add_argument("--output-dir", default=None)
     ap.add_argument("--export-jianying", action="store_true",
                     help="also export an OPTIONAL 剪映/JianYing draft (decoupled; never required)")
@@ -383,9 +444,12 @@ def main():
                 "请删除 narration.json，重跑后按新成片重新写解说。")
         _write_phase_ledger(work_dir, clip_plan_fingerprint=cp_fp,
                             narration_fingerprint=_file_md5(narration_json), narration_written=True)
-        _run("video-script", "validate.py", "--work-dir", work_dir, "--mode", "cut_output")
+        output_duration = _read_video_duration_or_raise(edited_source)
+        _run("video-script", "validate.py", "--work-dir", work_dir, "--mode", "cut_output",
+             "--output-duration", f"{output_duration:.3f}")
         narration_for_tts = narration_json
         assemble_video_path = edited_source
+    review_ran = _run_advisory_review(work_dir, args, timeline="cut_output" if cut else "source")
     vargs = ["--work-dir", str(work_dir), "--narration", str(narration_for_tts)]
     if args.mimo_tts_voice:
         vargs += ["--mimo-voice", args.mimo_tts_voice]
@@ -414,7 +478,7 @@ def main():
     final_dir = Path(args.output_dir) if args.output_dir else work_dir.parent
     final_output = _read_assembly_output(work_dir) or (final_dir / ("recap_" + video.stem + ".mp4"))
     print(f"[video-recap] ✅ 完成: {final_output}")
-    _print_narration_review_pointer(work_dir)
+    _print_narration_review_pointer(work_dir, review_ran=review_ran)
 
 
 if __name__ == "__main__":

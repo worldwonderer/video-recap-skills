@@ -11,7 +11,9 @@ Output: narration_review.json (structured) + narration_review.md (readable). Adv
 verdict REVISE means "fix and re-review"; it never blocks (validate.py is the hard gate).
 """
 import argparse
+import hashlib
 import json
+import math
 import re
 from pathlib import Path
 
@@ -35,6 +37,11 @@ RUBRIC = """你是中文视频解说稿的严格评审。依据以下规则审�
 {"verdict":"REVISE|OK","summary":"一两句总体判断","findings":[{"segment":<草稿段号(从0起)或null表示整体>,"severity":"error|warning|suggestion","category":"<上面类别之一>","issue":"问题","fix":"具体改法"}]}"""
 
 
+
+def _value_fingerprint(value):
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()
+
 def _load(work_dir, name):
     path = Path(work_dir) / name
     if not path.exists():
@@ -43,6 +50,138 @@ def _load(work_dir, name):
         return json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError):
         return None
+
+
+
+
+def _load_cut_clip_spans(work_dir):
+    """Load explicit source→output spans from the validated cut plan only.
+
+    `cut_output` review compares output-time narration to output-time evidence. A raw
+    clip_plan can be pre-padding/pre-snap and may omit output spans, so using it would
+    look grounded while disagreeing with edited_source.mp4. Missing/stale validated data
+    should fail this advisory stage and let the orchestrator fail-open visibly.
+    """
+    work_dir = Path(work_dir)
+    plan = _load(work_dir, "clip_plan_validated.json")
+    if not isinstance(plan, dict):
+        return None
+    raw_plan = _load(work_dir, "clip_plan.json")
+    if raw_plan is not None and plan.get("raw_plan_fingerprint") != _value_fingerprint(raw_plan):
+        return None
+    clips = plan.get("clips")
+    if not isinstance(clips, list):
+        return None
+    spans = []
+    for clip in clips:
+        if not isinstance(clip, dict):
+            continue
+        if not all(key in clip for key in ("source_start", "source_end", "output_start", "output_end")):
+            return None
+        try:
+            source_start = float(clip["source_start"])
+            source_end = float(clip["source_end"])
+            output_start = float(clip["output_start"])
+            output_end = float(clip["output_end"])
+        except (TypeError, ValueError):
+            return None
+        values = (source_start, source_end, output_start, output_end)
+        if not all(math.isfinite(value) for value in values):
+            return None
+        if source_end <= source_start or output_end <= output_start:
+            return None
+        spans.append({
+            "source_start": source_start,
+            "source_end": source_end,
+            "output_start": output_start,
+            "output_end": output_end,
+        })
+    return spans or None
+
+
+def _source_output_overlaps(start, end, spans):
+    overlaps = []
+    for span in spans or []:
+        source_start = max(start, span["source_start"])
+        source_end = min(end, span["source_end"])
+        if source_end <= source_start:
+            continue
+        output_start = span["output_start"] + (source_start - span["source_start"])
+        output_end = span["output_start"] + (source_end - span["source_start"])
+        overlaps.append({
+            "source_start": source_start,
+            "source_end": source_end,
+            "output_start": output_start,
+            "output_end": output_end,
+        })
+    return overlaps
+
+
+def _map_source_range_to_output(start, end, spans):
+    return [(o["output_start"], o["output_end"]) for o in _source_output_overlaps(start, end, spans)]
+
+
+def _remap_frame_facts(frame_facts, overlap):
+    if not isinstance(frame_facts, dict):
+        return frame_facts
+    out = {}
+    for raw_ts, vals in frame_facts.items():
+        try:
+            ts = float(raw_ts)
+        except (TypeError, ValueError):
+            continue
+        if not (overlap["source_start"] <= ts <= overlap["source_end"]):
+            continue
+        out_ts = overlap["output_start"] + (ts - overlap["source_start"])
+        out[f"{out_ts:.3f}"] = vals
+    return out
+
+
+def remap_grounding_to_output_timeline(vlm_analysis, asr_result, clip_spans):
+    """Return VLM/ASR grounding clipped/remapped from source time to cut output time."""
+    if not clip_spans:
+        return vlm_analysis or [], asr_result or []
+
+    remapped_scenes = []
+    for scene in vlm_analysis or []:
+        if not isinstance(scene, dict):
+            continue
+        try:
+            start = float(scene.get("start", 0))
+            end = float(scene.get("end", start))
+        except (TypeError, ValueError):
+            continue
+        overlaps = _source_output_overlaps(start, end, clip_spans)
+        for part_idx, overlap in enumerate(overlaps):
+            item = dict(scene)
+            item["start"] = round(overlap["output_start"], 3)
+            item["end"] = round(overlap["output_end"], 3)
+            item["frame_facts"] = _remap_frame_facts(scene.get("frame_facts"), overlap)
+            if len(overlaps) > 1:
+                item["scene_id"] = f"{scene.get('scene_id', '?')}.{part_idx}"
+            remapped_scenes.append(item)
+
+    remapped_asr = []
+    for seg in asr_result or []:
+        if not isinstance(seg, dict):
+            continue
+        try:
+            start = float(seg.get("start", 0))
+            end = float(seg.get("end", start))
+        except (TypeError, ValueError):
+            continue
+        text = str(seg.get("text", "")).strip()
+        if not text:
+            continue
+        for overlap in _source_output_overlaps(start, end, clip_spans):
+            item = dict(seg)
+            item["start"] = round(overlap["output_start"], 3)
+            item["end"] = round(overlap["output_end"], 3)
+            remapped_asr.append(item)
+
+    remapped_scenes.sort(key=lambda x: (float(x.get("start", 0)), float(x.get("end", 0))))
+    remapped_asr.sort(key=lambda x: (float(x.get("start", 0)), float(x.get("end", 0))))
+    return remapped_scenes, remapped_asr
 
 
 def _scene_grounding(vlm_analysis, limit=60):
@@ -173,13 +312,20 @@ def format_review_md(review):
     return "\n".join(out) + "\n"
 
 
-def review_narration(work_dir):
+def review_narration(work_dir, *, timeline="source"):
     work_dir = Path(work_dir)
     narration = _load(work_dir, "narration.json")
     if narration is None:
         raise SystemExit(f"缺少 {work_dir / 'narration.json'}；先写解说草稿再评审")
     vlm_analysis = _load(work_dir, "vlm_analysis.json") or []
     asr_result = _load(work_dir, "asr_result.json") or []
+    if timeline == "cut_output":
+        spans = _load_cut_clip_spans(work_dir)
+        if not spans:
+            raise SystemExit("cut_output review requires fresh clip_plan_validated.json with explicit source/output spans")
+        vlm_analysis, asr_result = remap_grounding_to_output_timeline(vlm_analysis, asr_result, spans)
+    elif timeline != "source":
+        raise SystemExit(f"unknown review timeline: {timeline}")
 
     messages = build_review_messages(narration, vlm_analysis, asr_result)
     resp = api_call({
@@ -206,8 +352,10 @@ def review_narration(work_dir):
 def main():
     ap = argparse.ArgumentParser(description="Review an agent-written narration.json for quality (LLM-as-judge).")
     ap.add_argument("--work-dir", required=True)
+    ap.add_argument("--timeline", choices=["source", "cut_output"], default="source",
+                    help="grounding timeline for narration.json; cut_output remaps source VLM/ASR via clip_plan_validated.json")
     args = ap.parse_args()
-    review = review_narration(args.work_dir)
+    review = review_narration(args.work_dir, timeline=args.timeline)
     print(json.dumps({
         "status": "reviewed",
         "verdict": review["verdict"],

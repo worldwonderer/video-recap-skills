@@ -110,6 +110,14 @@ def test_lint_block_coverage_metrics_and_warnings(monkeypatch):
     assert cut_report["metrics"] == {}
 
 
+
+def test_lint_narration_accepts_ascii_period_as_complete_sentence():
+    report = lint_narration([
+        {"start": 0.0, "end": 3.0, "narration": "It ends."},
+    ], mode="full")
+
+    assert "incomplete_sentence" not in {issue["code"] for issue in report["warnings"]}
+
 def test_lint_flags_fragmented_beats(tmp_path, monkeypatch):
     # The forbidden pattern: many lone short sentences instead of blocks -> each synthesizes as a
     # separate choppy TTS utterance, so fragmented_beats must fire.
@@ -490,3 +498,69 @@ def test_cut_validate_uses_validated_plan_when_raw_fingerprint_matches(tmp_path)
     plan = validate._load_cut_clip_plan(tmp_path)
 
     assert plan["clips"][0]["source_start"] == 40.0
+
+
+def test_cut_output_duration_bounds_rejects_segments_outside_output_timeline():
+    import sys
+    import importlib.util
+
+    validate_path = Path(__file__).resolve().parents[2] / "skills" / "video-script" / "scripts" / "validate.py"
+    spec = importlib.util.spec_from_file_location("video_script_validate_bounds_under_test", validate_path)
+    validate = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = validate
+    spec.loader.exec_module(validate)
+
+    validate._validate_output_timeline_bounds([
+        {"start": 0.0, "end": 9.95, "narration": "有效。"},
+    ], output_duration=10.0)
+
+    bad = [
+        {"start": -0.1, "end": 1.0, "narration": "负时间。"},
+        {"start": 9.0, "end": 10.2, "narration": "超出时长。"},
+        {"start": 10.1, "end": 11.0, "narration": "完全在外。"},
+    ]
+    with pytest.raises(SystemExit) as exc:
+        validate._validate_output_timeline_bounds(bad, output_duration=10.0)
+
+    msg = str(exc.value)
+    assert "output_duration=10.000" in msg
+    assert "segment 0" in msg and "segment 1" in msg and "segment 2" in msg
+
+
+def test_cut_output_mode_requires_output_duration(tmp_path):
+    import sys
+    import importlib.util
+
+    validate_path = Path(__file__).resolve().parents[2] / "skills" / "video-script" / "scripts" / "validate.py"
+    spec = importlib.util.spec_from_file_location("video_script_validate_required_duration_under_test", validate_path)
+    validate = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = validate
+    spec.loader.exec_module(validate)
+
+    (tmp_path / "narration.json").write_text(
+        json.dumps([{"start": 0.0, "end": 1.0, "narration": "有效。"}]),
+        encoding="utf-8",
+    )
+    old_argv = sys.argv
+    try:
+        sys.argv = ["validate.py", "--work-dir", str(tmp_path), "--mode", "cut_output"]
+        with pytest.raises(SystemExit, match="--output-duration is required"):
+            validate.main()
+    finally:
+        sys.argv = old_argv
+
+
+def test_cut_output_duration_bounds_rejects_non_finite_duration():
+    import sys
+    import importlib.util
+
+    validate_path = Path(__file__).resolve().parents[2] / "skills" / "video-script" / "scripts" / "validate.py"
+    spec = importlib.util.spec_from_file_location("video_script_validate_finite_duration_under_test", validate_path)
+    validate = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = validate
+    spec.loader.exec_module(validate)
+
+    with pytest.raises(SystemExit, match="finite and positive"):
+        validate._validate_output_timeline_bounds([{"start": 0.0, "end": 1.0}], output_duration=float("nan"))
+    with pytest.raises(SystemExit, match="non-finite time"):
+        validate._validate_output_timeline_bounds([{"start": float("nan"), "end": 1.0}], output_duration=10.0)
