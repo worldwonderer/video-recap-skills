@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-GROUPS = ["understanding", "cut", "voiceover", "assemble", "script", "orchestrator"]
+GROUPS = ["understanding", "cut", "voiceover", "assemble", "script", "orchestrator", "inspect"]
 
 
 def main(argv):
