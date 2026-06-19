@@ -115,6 +115,37 @@ def test_vlm_resume_cache_persists_on_failure_and_resumes(monkeypatch, tmp_path)
     assert not (tmp_path / "vlm_scene_cache.json").exists()  # resume cache cleaned on full success
 
 
+def test_vlm_resume_cache_invalidates_on_request_setting_flip(monkeypatch, tmp_path):
+    """A leftover partial cache must NOT be reused after an output-affecting request setting
+    (mimo_disable_thinking) changes — otherwise the succeeded scenes would carry the OLD setting
+    while only the failed scene gets the NEW one, yielding a silent mixed/stale analysis."""
+    scenes, frames = _three_scene_setup(monkeypatch, tmp_path, workers=1)
+    monkeypatch.setitem(CONFIG, "mimo_disable_thinking", True)
+    state = {"fail_mid": True, "calls": 0}
+
+    def fake_api_call(payload):
+        state["calls"] += 1
+        text = payload["messages"][0]["content"][-1]["text"]
+        if state["fail_mid"] and "2.0s" in text:   # scene index 1 fails → leaves a 2-scene cache
+            raise RuntimeError("HTTP 429 — Too many requests")
+        return {"choices": [{"message": {"content": "【描述】测试画面"}}]}
+
+    monkeypatch.setattr("vlm.api_call", fake_api_call)
+
+    with pytest.raises(RuntimeError, match="断点续传"):
+        analyze_scenes(scenes, frames, tmp_path)
+    assert len(json.loads((tmp_path / "vlm_scene_cache.json").read_text())) == 2
+
+    # Flip the request setting and re-run with a non-failing API. The per-scene key now differs,
+    # so NONE of the 2 cached scenes are reused — all 3 are re-analyzed under the new setting.
+    state["fail_mid"] = False
+    monkeypatch.setitem(CONFIG, "mimo_disable_thinking", False)
+    calls_before = state["calls"]
+    analyses = analyze_scenes(scenes, frames, tmp_path)
+    assert len(analyses) == 3 and all(a and a["description"] == "测试画面" for a in analyses)
+    assert state["calls"] - calls_before == 3   # all re-analyzed; no stale reuse of old-setting scenes
+
+
 def test_vlm_auto_throttle_retry_recovers_transient_429(monkeypatch, tmp_path):
     """A scene that 429s on the first pass but succeeds when retried at lower concurrency is
     recovered within ONE run — no abort. (Default 8 workers no longer dooms a long video.)"""

@@ -215,11 +215,18 @@ def analyze_scenes(scenes, frames, work_dir, *, resume=True):
     prompt_fp = stable_hash(vlm_prompt)
 
     def _scene_cache_key(i, scene):
+        # Must invalidate on the SAME output-affecting settings the outer stage gate tracks
+        # (understand.py:_vlm_cache_payload). prompt_fp already covers vlm_prompt + context_info
+        # (which folds in background_research). The three below change the request/endpoint but
+        # are NOT in vlm_prompt, so they must be keyed explicitly — otherwise a partial-failure
+        # cache reused after flipping e.g. mimo_disable_thinking yields a stale/mixed analysis.
         return "|".join(str(x) for x in (
             i, round(float(scene["start"]), 3), round(float(scene["end"]), 3),
             CONFIG.get("vlm_model"), prompt_fp, CONFIG.get("vlm_max_tokens"),
             CONFIG.get("vlm_seconds_per_frame"), CONFIG.get("vlm_max_frames"),
             round(float(fps), 3),
+            CONFIG.get("api_url"), CONFIG.get("mimo_disable_thinking", True),
+            CONFIG.get("mimo_media_resolution"),
         ))
 
     analyses = [None] * len(scenes)
