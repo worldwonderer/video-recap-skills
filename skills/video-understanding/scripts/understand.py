@@ -343,8 +343,13 @@ def _generate_source_storyboard(work_dir, video_path, scenes, scenes_json, *, fo
         "sample_policy": _storyboard_sample_policy(),
     }
     if not force and _stage_cache_valid(json_path, meta):
-        log("storyboard 跳过 source（缓存匹配）")
-        return _load_json(json_path)
+        try:
+            cached = _load_json(json_path)
+        except (OSError, ValueError):
+            log("storyboard source 缓存命中但文件损坏，重建")  # advisory: never raise out
+        else:
+            log("storyboard 跳过 source（缓存匹配）")
+            return cached
     result = build_source_storyboard(work_dir, video_path, scenes, CONFIG.get("fps"))
     if result is not None and json_path.exists():
         _write_stage_meta(json_path, meta)
@@ -368,8 +373,13 @@ def _generate_edited_storyboard(work_dir, source_video_path, *, force=False):
     json_path = Path(work_dir) / "storyboard" / "edited_storyboard.json"
     meta = _edited_storyboard_meta(clip_plan_validated_json, _frames_manifest_path(work_dir))
     if not force and _stage_cache_valid(json_path, meta):
-        log("storyboard 跳过 edited（缓存匹配）")
-        return _load_json(json_path)
+        try:
+            cached = _load_json(json_path)
+        except (OSError, ValueError):
+            log("storyboard edited 缓存命中但文件损坏，重建")  # advisory: never raise out
+        else:
+            log("storyboard 跳过 edited（缓存匹配）")
+            return cached
     try:
         clip_plan_validated = _load_json(clip_plan_validated_json)
     except (OSError, ValueError):
@@ -397,7 +407,7 @@ def _prepend_storyboard_brief_header(brief_path, source_storyboard, edited_story
         if source_storyboard:
             pages = source_storyboard.get("page_images") or []
             lines.append(f"- 源时间线 storyboard: {', '.join(pages)}（tiles 时间戳=原片时间）")
-            if not source_storyboard.get("labels_burned", True):
+            if not source_storyboard.get("labels_burned", False):
                 any_labels_missing = True
         if cut_mode and edited_storyboard:
             pages = edited_storyboard.get("page_images") or []
@@ -405,7 +415,7 @@ def _prepend_storyboard_brief_header(brief_path, source_storyboard, edited_story
                 f"- 成片(output)时间线 storyboard: {', '.join(pages)}"
                 "（每块双标 out 时间 / src 原片时间；注意区分两条时间线）"
             )
-            if not edited_storyboard.get("labels_burned", True):
+            if not edited_storyboard.get("labels_burned", False):
                 any_labels_missing = True
         if any_labels_missing:
             lines.append("- 时间戳未烧入 → 用 `inspect clip-map` 查时间（JSON sidecar 仍为权威时间源）")

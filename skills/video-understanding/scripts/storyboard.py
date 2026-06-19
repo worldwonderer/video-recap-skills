@@ -338,6 +338,7 @@ def build_source_storyboard(work_dir, video_path, scenes, fps):
             "timeline": "source",
             "video_path": str(video_path),
             "video_fingerprint": _file_fp(video_path),
+            "fps": float(fps) if fps else None,
             "labels_burned": labels_burned,
             "page_images": [str(p) for p in pages],
             "sample_policy": {

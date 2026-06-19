@@ -249,6 +249,59 @@ def test_cache_reuse_then_rebuild_on_fps_change(monkeypatch, tmp_path):
     assert builds["n"] == 2, "fps change must invalidate the storyboard cache"
 
 
+def test_fps_only_change_invalidates_cache(monkeypatch, tmp_path):
+    """Isolate the `fps`-in-key claim: hold the frames-manifest CONSTANT and flip ONLY
+    CONFIG['fps']. If fps were dropped from the cache meta this would vacuously reuse;
+    with fps in the key it must rebuild (belt to the frames-manifest suspenders)."""
+    _stage_frames(tmp_path, [0, 2, 4, 6], fps=2.0)
+    monkeypatch.setitem(CONFIG, "storyboard", True)
+    monkeypatch.setitem(CONFIG, "fps", 2.0)
+    _mock_run_cmd_makes_output(monkeypatch, target="storyboard")
+    _with_font(monkeypatch)
+    scenes = [{"start": 0.0, "end": 4.0}]
+    scenes_json = tmp_path / "scenes.json"
+    scenes_json.write_text(json.dumps(scenes), encoding="utf-8")
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake-video-bytes")
+
+    builds = {"n": 0}
+    real_build = storyboard.build_source_storyboard
+    monkeypatch.setattr("understand.build_source_storyboard",
+                        lambda *a, **k: (builds.__setitem__("n", builds["n"] + 1), real_build(*a, **k))[1])
+
+    understand._generate_source_storyboard(tmp_path, video, scenes, scenes_json)
+    assert builds["n"] == 1
+    # flip ONLY CONFIG fps; DO NOT re-stage frames (manifest fingerprint held constant)
+    monkeypatch.setitem(CONFIG, "fps", 3.0)
+    understand._generate_source_storyboard(tmp_path, video, scenes, scenes_json)
+    assert builds["n"] == 2, "fps in the cache key must invalidate even when frames are unchanged"
+
+
+def test_cache_hit_corrupt_sidecar_rebuilds_without_traceback(monkeypatch, tmp_path):
+    """MAJOR regression guard: a fingerprint-matching but CORRUPT cached sidecar must NOT raise
+    out of the cache-hit read (advisory invariant) — it degrades to a rebuild."""
+    _stage_frames(tmp_path, [0, 2, 4, 6], fps=2.0)
+    monkeypatch.setitem(CONFIG, "storyboard", True)
+    monkeypatch.setitem(CONFIG, "fps", 2.0)
+    _mock_run_cmd_makes_output(monkeypatch, target="storyboard")
+    _with_font(monkeypatch)
+    scenes = [{"start": 0.0, "end": 4.0}]
+    scenes_json = tmp_path / "scenes.json"
+    scenes_json.write_text(json.dumps(scenes), encoding="utf-8")
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake-video-bytes")
+
+    first = understand._generate_source_storyboard(tmp_path, video, scenes, scenes_json)
+    assert first is not None
+    json_path = tmp_path / "storyboard" / "source_storyboard.json"
+    # cache META stays valid; corrupt ONLY the artifact bytes so the cache-hit read hits bad JSON
+    json_path.write_text("{ this is not valid json ", encoding="utf-8")
+
+    rebuilt = understand._generate_source_storyboard(tmp_path, video, scenes, scenes_json)
+    assert rebuilt is not None  # no traceback; rebuilt
+    assert json.loads(json_path.read_text(encoding="utf-8"))["timeline"] == "source"
+
+
 # ── graceful None on no-frames AND run_cmd failure (brief still builds) ───────
 
 
