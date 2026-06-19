@@ -1352,18 +1352,28 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
 
     # Video filter chain: mask source subtitles first (drawbox), then burn our subtitles
     # on top. Either one forces a re-encode; with neither, the video stream is copied.
+    crf = str(int(CONFIG.get("output_crf", 18) or 18))
+    preset = str(CONFIG.get("output_preset", "veryfast") or "veryfast")
+    max_h = int(CONFIG.get("output_max_height", 0) or 0)
     vf_chain = []
     mask_filter = _source_subtitle_mask_filter()
     if mask_filter:
         vf_chain.append(mask_filter)
     if CONFIG.get("burn_subtitles", False):
         vf_chain.append(_subtitle_burn_filter(ass_path))
+    # Downscale LAST so the mask + burned subtitles render at native resolution and are then
+    # scaled down with the frame (crisp). -2 keeps aspect with an even width (libx264 needs it);
+    # 'min(ih,H)' only ever shrinks, never upscales a smaller source.
+    if max_h > 0:
+        vf_chain.append(f"scale=-2:'min(ih,{max_h})':flags=lanczos")
     if vf_chain:
-        cmd += ["-vf", ",".join(vf_chain), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
-        notes = ([] + (["遮挡原字幕"] if mask_filter else []) + (["压制解说字幕"] if CONFIG.get("burn_subtitles", False) else []))
-        log("视频重编码: " + " + ".join(notes))
+        cmd += ["-vf", ",".join(vf_chain), "-c:v", "libx264", "-preset", preset, "-crf", crf]
+        notes = ((["遮挡原字幕"] if mask_filter else [])
+                 + (["压制解说字幕"] if CONFIG.get("burn_subtitles", False) else [])
+                 + ([f"缩放≤{max_h}p"] if max_h > 0 else []))
+        log(f"视频重编码: {' + '.join(notes)} (crf={crf}, preset={preset})")
     elif CONFIG.get("force_video_reencode", False):
-        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
+        cmd += ["-c:v", "libx264", "-preset", preset, "-crf", crf]
     else:
         cmd += ["-c:v", "copy"]
 

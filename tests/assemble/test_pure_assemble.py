@@ -857,3 +857,29 @@ def test_subtitle_entries_never_drops_a_sub_threshold_chunk():
     assert "第三" in joined                                   # the tiny trailing chunk survives
     assert entries[-1]["end"] == pytest.approx(0.3)          # still closes at the audio end
     assert joined == "第一句子比较长一点点第二句子也比较长第三"
+
+
+def test_output_compression_knobs_default_and_override(monkeypatch):
+    """OUTPUT_CRF / OUTPUT_PRESET / OUTPUT_MAX_HEIGHT drive the re-encode; defaults keep the prior
+    visually-lossless behaviour (crf 18, veryfast, no scaling)."""
+    import importlib
+    import lib as _lib
+    try:
+        for var in ("OUTPUT_CRF", "OUTPUT_PRESET", "OUTPUT_MAX_HEIGHT"):
+            monkeypatch.delenv(var, raising=False)
+        importlib.reload(_lib)
+        assert _lib.CONFIG["output_crf"] == 18
+        assert _lib.CONFIG["output_preset"] == "veryfast"
+        assert _lib.CONFIG["output_max_height"] == 0          # 0 → no downscale
+
+        monkeypatch.setenv("OUTPUT_CRF", "24")
+        monkeypatch.setenv("OUTPUT_PRESET", "slow")
+        monkeypatch.setenv("OUTPUT_MAX_HEIGHT", "720")
+        importlib.reload(_lib)
+        assert _lib.CONFIG["output_crf"] == 24
+        assert _lib.CONFIG["output_preset"] == "slow"
+        assert _lib.CONFIG["output_max_height"] == 720
+    finally:
+        for var in ("OUTPUT_CRF", "OUTPUT_PRESET", "OUTPUT_MAX_HEIGHT"):
+            monkeypatch.delenv(var, raising=False)
+        importlib.reload(_lib)

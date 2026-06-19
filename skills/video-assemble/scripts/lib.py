@@ -266,6 +266,10 @@ CONFIG = {
     "burn_subtitles": env_bool("BURN_SUBTITLES", True),  # 烧录解说字幕（默认开；遮挡原字幕后需自带字幕，否则字幕区空白）
     "subtitle_original_in_gaps": env_bool("SUBTITLE_ORIGINAL_IN_GAPS", True),  # 原声留白处补烧原声台词字幕（来自 ASR）
     "force_video_reencode": env_bool("FORCE_VIDEO_REENCODE", False),  # 组装时重编码视频，修复部分容器时间戳问题
+    # 成片压制（仅在重编码时生效：烧字幕/遮罩/缩放/FORCE_VIDEO_REENCODE 任一触发重编码）。
+    "output_crf": env_int("OUTPUT_CRF", 18, minimum=0),          # x264 CRF；越大文件越小、画质越低（18≈视觉无损，23~26 体积更小）
+    "output_preset": os.environ.get("OUTPUT_PRESET", "veryfast"),  # x264 preset；slow/slower 同 CRF 下体积更小但更慢
+    "output_max_height": env_int("OUTPUT_MAX_HEIGHT", 0, minimum=0),  # >0 时把成片高度上限缩到该值(保持宽高比、偶数宽)；0=不缩放
     # 成片末端整体响度归一（默认混音偏轻，归一后更接近常见短视频响度；样片约 -11.9，默认取更安全的 -14）
     "final_loudnorm": env_bool("FINAL_LOUDNORM", True),  # 组装末端做一次整体响度归一
     "target_lufs": env_float("TARGET_LUFS", -14.0),       # 目标综合响度 (LUFS)
