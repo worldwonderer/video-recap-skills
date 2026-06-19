@@ -10,7 +10,7 @@
 
 ## Demo
 
-<video src="https://github.com/user-attachments/assets/92698ec6-0d23-4f9f-8825-c3684ef57aff" width="70%" controls></video>
+<video src="https://github.com/user-attachments/assets/92698ec6-0d23-4f9f-8825-c3684ef57aff" width="640" controls></video>
 
 Beyond the rendered MP4, you can export a **剪映/JianYing draft** to keep editing by hand — original clips, narration, BGM, and subtitles each on their own track:
 
