@@ -916,3 +916,29 @@ def test_output_downscale_filter_forces_even_height():
             height = 2 * math.trunc(min(ih, max_h) / 2)   # mirrors the ffmpeg expression
             assert height % 2 == 0
             assert height <= max_h and height <= ih
+
+
+def test_foreign_source_audio_near_mutes_original_under_narration(monkeypatch):
+    """FOREIGN_SOURCE_AUDIO near-mutes the original UNDER narration so a foreign-language
+    soundtrack (e.g. Japanese) doesn't bleed under Chinese narration as 怪音. Gaps stay full
+    (idle_orig_volume), and an explicit SPEECH_DUCKING_VOLUME still overrides the foreign default."""
+    import importlib
+    import lib as _lib
+    try:
+        monkeypatch.setenv("FOREIGN_SOURCE_AUDIO", "1")
+        monkeypatch.delenv("SPEECH_DUCKING_VOLUME", raising=False)
+        monkeypatch.delenv("ZONE_DUCKING_VOLUME", raising=False)
+        importlib.reload(_lib)
+        assert _lib.CONFIG["foreign_source_audio"] is True
+        assert _lib.CONFIG["speech_ducking_volume"] == 0.05   # under-narration original near-silent
+        assert _lib.CONFIG["zone_ducking_volume"] == 0.05
+        assert _lib.CONFIG["idle_orig_volume"] == 1.0          # gap/original blocks stay full volume
+
+        monkeypatch.setenv("SPEECH_DUCKING_VOLUME", "0.15")
+        importlib.reload(_lib)
+        assert _lib.CONFIG["speech_ducking_volume"] == 0.15    # explicit override wins over foreign default
+    finally:
+        monkeypatch.delenv("FOREIGN_SOURCE_AUDIO", raising=False)
+        monkeypatch.delenv("SPEECH_DUCKING_VOLUME", raising=False)
+        monkeypatch.delenv("ZONE_DUCKING_VOLUME", raising=False)
+        importlib.reload(_lib)  # restore default CONFIG for any later tests

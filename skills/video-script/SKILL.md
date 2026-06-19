@@ -21,6 +21,8 @@ Digest long dialogue via `asr_writing_chunks.json`; judge "is there speech/a sil
 via `timeline_fusion.json`. Check raw `vlm_analysis.json` / `asr_result.json` for details.
 In full mode, timestamps are **original-video time**. In orchestrated cut mode, pass 1 only writes `clip_plan.json`; after `edited_source.mp4` exists, pass 2 writes `narration.json` in **output timeline time**.
 
+写稿前先跑 `python3 skills/video-recap/scripts/recap_inspect.py --work-dir <work_dir> state` 看清楚当前模式、缺哪个产物、下一步该写什么。cut pass 2 写解说时用 `recap_inspect.py --work-dir <work_dir> clip-map --output-start <s> --output-end <e>`（或 `--source-start/--source-end`）核对输出↔原片时间轴，确认某段成片对应哪段原片、有没有跨剪辑边界或落进被剪掉的区间。
+
 ## Step 2 — write narration.json
 
 ```json
@@ -64,7 +66,7 @@ conservative auto-ASR mapping. See the brief's `原声留白字幕` section.
 
 A separate **quality** pass (LLM-as-judge), distinct from the mechanical lint below. Needs the chat API key (same as VLM).
 
-1. Run: `python3 scripts/review.py --work-dir <work_dir>`
+1. Run: `python3 scripts/review.py --work-dir <work_dir>` (auto-detects cut mode and grounds against the OUTPUT timeline when a validated cut is present; pass `--timeline source` to force source grounding)
 2. Open `narration_review.md`. For every `error` finding (ESPECIALLY `category=hallucination` — a claim
    not grounded in the visual/ASR evidence), revise `narration.json` and re-run review until either:
    - (a) verdict == `OK` with zero `error` findings, OR

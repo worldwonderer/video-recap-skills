@@ -32,6 +32,13 @@ def env_float(name, default, min_val=None):
 CONFIG = {
     "snap_clip_line_end": env_bool("SNAP_CLIP_LINE_END", True),
     "clip_snap_max_extend": env_float("CLIP_SNAP_MAX_EXTEND", 2.0, min_val=0.0),
+    # Keep clip boundaries off the ORIGINAL footage's hard cuts: a clip that opens/closes a few
+    # tenths of a second from a source shot-change shows a brief sliver of the adjacent shot that
+    # then hard-cuts again — a visible 闪烁/flicker at the edit point. Snap source_start forward
+    # past (and source_end back before) any shot-change within the margin.
+    "scene_cut_snap": env_bool("SCENE_CUT_SNAP", True),
+    "scene_cut_snap_margin": env_float("SCENE_CUT_SNAP_MARGIN", 0.5, min_val=0.0),    # 边界±此秒内有切镜头才避让
+    "scene_cut_detect_threshold": env_float("SCENE_CUT_DETECT_THRESHOLD", 0.4, min_val=0.0),  # ffmpeg scene 分数阈值(硬切)
 }
 
 

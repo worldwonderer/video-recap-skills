@@ -1,9 +1,11 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-cut' / 'scripts'))
+import types
 import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
-from cut import build_edited_source_video, lint_mapped_narration, map_narration_to_clips, normalize_clip_plan, parse_duration_seconds, snap_clip_ends_to_lines, source_time_to_output_time
+import cut
+from cut import build_edited_source_video, lint_mapped_narration, map_narration_to_clips, normalize_clip_plan, parse_duration_seconds, snap_clip_ends_to_lines, snap_clips_off_shot_changes, source_time_to_output_time
 
 
 def test_lint_mapped_narration_flags_dropped_and_sparse():
@@ -473,3 +475,74 @@ def test_snap_skips_malformed_silence_rows():
     plan = _make_plan([(0.0, 10.0)])
     snapped = snap_clip_ends_to_lines(plan, silence, video_duration=100.0, max_extend=5.0)
     assert snapped["clips"][0]["source_end"] == 12.0  # the well-formed row still snaps
+
+
+# ---------------------------------------------------------------------------
+# snap_clips_off_shot_changes tests (avoid 闪烁 at edit points)
+# ---------------------------------------------------------------------------
+
+def _fake_detector(changes):
+    """Stand in for _detect_shot_changes: return the seeded cuts that fall in the asked window."""
+    def detect(video, win_start, win_end, threshold, lead=0.25):
+        return sorted(c for c in changes if win_start <= c <= win_end)
+    return detect
+
+
+def test_scene_cut_snap_moves_start_forward_past_early_change(monkeypatch):
+    """A shot-change just after source_start (old-shot sliver) pushes source_start onto the cut."""
+    monkeypatch.setattr(cut, "_detect_shot_changes", _fake_detector([10.3]))
+    plan = _make_plan([(10.0, 30.0)])
+    snapped = snap_clips_off_shot_changes(plan, "v.mp4", video_duration=100.0, margin=0.5, threshold=0.4)
+    c = snapped["clips"][0]
+    assert c["source_start"] == 10.3 and c["source_end"] == 30.0
+    assert c["duration"] == 19.7
+    assert c["output_start"] == 0.0 and c["output_end"] == 19.7
+
+
+def test_scene_cut_snap_pulls_end_back_before_late_change(monkeypatch):
+    """A shot-change just before source_end (next-shot sliver) pulls source_end onto the cut."""
+    monkeypatch.setattr(cut, "_detect_shot_changes", _fake_detector([29.7]))
+    plan = _make_plan([(10.0, 30.0)])
+    snapped = snap_clips_off_shot_changes(plan, "v.mp4", video_duration=100.0, margin=0.5, threshold=0.4)
+    c = snapped["clips"][0]
+    assert c["source_start"] == 10.0 and c["source_end"] == 29.7
+
+
+def test_scene_cut_snap_leaves_clean_boundaries_untouched(monkeypatch):
+    """A cut in the middle of the clip (far from both boundaries) triggers no snap."""
+    monkeypatch.setattr(cut, "_detect_shot_changes", _fake_detector([20.0]))
+    plan = _make_plan([(10.0, 30.0)])
+    snapped = snap_clips_off_shot_changes(plan, "v.mp4", video_duration=100.0, margin=0.5, threshold=0.4)
+    c = snapped["clips"][0]
+    assert c["source_start"] == 10.0 and c["source_end"] == 30.0
+
+
+def test_scene_cut_snap_skips_when_snap_would_collapse_clip(monkeypatch):
+    """On a clip too short to keep min_keep after snapping, the boundary is left as-is (no collapse)."""
+    monkeypatch.setattr(cut, "_detect_shot_changes", _fake_detector([10.4]))
+    plan = _make_plan([(10.0, 10.6)])  # 0.6s clip, change at 10.4 inside both windows
+    snapped = snap_clips_off_shot_changes(plan, "v.mp4", video_duration=100.0, margin=0.5, threshold=0.4)
+    c = snapped["clips"][0]
+    assert c["source_start"] == 10.0 and c["source_end"] == 10.6  # unchanged, still a valid clip
+    assert c["duration"] == 0.6
+
+
+def test_scene_cut_snap_recomputes_output_across_multiple_clips(monkeypatch):
+    """Output timeline is repacked cursor-based after the source ranges shrink."""
+    monkeypatch.setattr(cut, "_detect_shot_changes", _fake_detector([10.3, 49.6]))
+    plan = _make_plan([(10.0, 20.0), (40.0, 50.0)])
+    snapped = snap_clips_off_shot_changes(plan, "v.mp4", video_duration=100.0, margin=0.5, threshold=0.4)
+    a, b = snapped["clips"]
+    assert a["source_start"] == 10.3 and a["output_start"] == 0.0 and a["output_end"] == 9.7
+    assert b["source_end"] == 49.6 and b["output_start"] == 9.7
+    assert snapped["total_duration"] == round(9.7 + 9.6, 3)
+
+
+def test_detect_shot_changes_offsets_by_seek_and_filters_window(monkeypatch):
+    """pts_time is rebased to the seek target, so seek+pts recovers absolute time; cuts outside
+    [win_start, win_end] (e.g. the seek/keyframe artifact) are dropped."""
+    stderr = "frame showinfo pts_time:1.762\n frame pts_time:5.866 \n frame pts_time:0.05\n"
+    monkeypatch.setattr(cut, "subprocess",
+                        types.SimpleNamespace(run=lambda *a, **k: CompletedProcess(a, 0, "", stderr)))
+    out = cut._detect_shot_changes("v.mkv", 55.0, 68.0, 0.4)  # seek=54.75
+    assert out == [56.512, 60.616]  # 54.8 (54.75+0.05) is < win_start → filtered

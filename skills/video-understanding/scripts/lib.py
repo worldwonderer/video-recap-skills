@@ -156,10 +156,10 @@ CONFIG = {
     "mimo_asr_model_source": "env" if os.environ.get("MIMO_ASR_MODEL") else "default",
     "mimo_asr_language": os.environ.get("MIMO_ASR_LANGUAGE", "auto"),  # auto | zh | en
     "mimo_asr_base64_max_mb": env_float("MIMO_ASR_BASE64_MAX_MB", 10.0, minimum=1.0),
-    # ASR 分段窗口秒数。越小 → 长视频的对白时间戳越精细（默认 30s）。旧值 180s 会把 >3min
+    # ASR 分段窗口秒数。越小 → 长视频的对白时间戳越精细（默认 15s）。旧值 180s 会把 >3min
     # 视频的对白塌缩成一个时间戳，既让 brief 无法定位对白，又触发 detect.py 的粗粒度跳过，
     # 使 overlaps_speech/安静窗口判断失真。代价是更多 ASR 调用；ASR 慢时可调大。
-    "asr_segment_seconds": env_float("ASR_SEGMENT_SECONDS", 30.0, minimum=5.0),
+    "asr_segment_seconds": env_float("ASR_SEGMENT_SECONDS", 15.0, minimum=5.0),
     "scene_threshold": 0.1,
     "scene_threshold_source": "default",
     "mimo_tts_model": os.environ.get("MIMO_TTS_MODEL", DEFAULT_MIMO_TTS_MODEL),
@@ -193,6 +193,12 @@ CONFIG = {
     "mimo_disable_thinking": env_bool("MIMO_DISABLE_THINKING", True),
     "mimo_disable_thinking_source": "env" if os.environ.get("MIMO_DISABLE_THINKING") else "default",
     "fps": 0,  # 0 = 自动（≤60s→2fps, ≤5min→1.5fps, >5min→1fps）
+    # Storyboard contact sheets (advisory): generated only in video-understanding (owns frames+fps).
+    # Kept ONLY here, matching the bundle convention that each lib.py carries the keys ITS skill uses
+    # (video-cut's lib.py is deliberately minimal); no other skill reads storyboard_*.
+    "storyboard": env_bool("STORYBOARD", True),  # generate source/edited storyboard contact sheets
+    "storyboard_max_tiles": env_int("STORYBOARD_MAX_TILES", 30, minimum=1),  # cap tiles per sheet for legibility
+    "storyboard_columns": env_int("STORYBOARD_COLUMNS", 6, minimum=1),  # tile grid columns
     # TTS 语速（字符/秒），由校准得出。MiMo TTS 中文约 3.5 字/秒
     # 生成解说时使用 speech_rate * safety_margin 作为约束
     "speech_rate": 3.5,

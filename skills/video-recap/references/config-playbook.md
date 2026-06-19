@@ -13,13 +13,14 @@ Defaults below are bundle-level defaults unless a note scopes them to a specific
 | VLM / chat model | `MIMO_MODEL` | `mimo-v2.5` | frame VLM + reviewer + consolidate |
 | ASR model | `MIMO_ASR_MODEL` | `mimo-v2.5-asr` | speech-to-text |
 | ASR language | `MIMO_ASR_LANGUAGE` | `auto` | `auto` / `zh` / `en` |
-| ASR window | `ASR_SEGMENT_SECONDS` | `30` | smaller → finer dialogue timestamps (stays under MiMo's 10MB base64 cap) |
+| ASR window | `ASR_SEGMENT_SECONDS` | `15` | smaller → finer dialogue timestamps (stays under MiMo's 10MB base64 cap) |
 | TTS model | `MIMO_TTS_MODEL` | `mimo-v2.5-tts` | the only TTS engine |
 | MiMo voice | `MIMO_TTS_VOICE` / `--mimo-tts-voice` | `冰糖` | |
 | Narration block coverage | `NARRATION_COVERAGE_TARGET` / `NARRATION_BLOCK_SECONDS` | `0.7` / `9.0` | current block-recap density controls; old `TARGET_SEGMENTS_PER_MINUTE` applies only to legacy single-pass cut mapping reports |
 | Narration speed | `NARRATION_SPEED` | `1.3` | global atempo on the voiceover; default leans snappy for short-form, set `1.0` for long-form/documentary |
 | Mask source subs | `MASK_SOURCE_SUBTITLES` / `SOURCE_SUBTITLE_MASK_RATIO` | on / `0.14` | effective only when burned recap subtitles are enabled; covers hardcoded source subtitles (bottom band) so only the recap's subtitles show. With `--no-burn-subtitles`, the mask is ignored and the MP4 stays unmasked while `.srt` is written |
 | Original ducking | `IDLE_ORIG_VOLUME` / `SPEECH_DUCKING_VOLUME` | `1.0` / `0.2` | the original returns to full-volume `IDLE` in deliberate gaps/original blocks, and ducks to `SPEECH` under narration. Inter-beat gaps shorter than `DUCK_BRIDGE_SECONDS` stay ducked so a single narration block does not swell between sentences. `DUCKING_ORIG_VOLUME` (`0.3`) is only the fallback when beats carry no placement info |
+| Foreign source audio | `FOREIGN_SOURCE_AUDIO` | off | set when the original audio is in a language the narration is **not** (e.g. a Japanese drama recapped in Chinese). The under-narration original (`SPEECH_DUCKING_VOLUME` / `ZONE_DUCKING_VOLUME`) drops from `0.2`/`0.12` to `0.05` so the foreign speech doesn't bleed under the narration as 怪音; original-audio gap blocks still play full-volume (`IDLE_ORIG_VOLUME`). Explicit `SPEECH_DUCKING_VOLUME`/`ZONE_DUCKING_VOLUME` still override. Pairs with bring-your-own `user_subtitles.*` for the foreign dialogue |
 | Duck fade | `DUCK_FADE_SECONDS` | `0.3` | ramp time for each duck transition, so full-volume original blocks and ducked narration blocks switch without clicks |
 | Duck bridge | `DUCK_BRIDGE_SECONDS` | `1.5` | inter-beat gaps shorter than this stay ducked inside one narration block; gaps >= this are treated as intentional original-audio blocks and return to `IDLE_ORIG_VOLUME` |
 | Background music | `BGM_PATH` / `BGM_VOLUME` / `BGM_DUCKING_VOLUME` | off / `0.18` / `0.10` | optional looped music bed mixed as its own track; point `BGM_PATH` at any audio file. It ducks to `BGM_DUCKING_VOLUME` under narration |
@@ -29,6 +30,7 @@ Defaults below are bundle-level defaults unless a note scopes them to a specific
 | Edit mode | `EDIT_MODE` / `--edit-mode` | `full` | `full` or `cut` |
 | Cut target | `TARGET_DURATION` / `--target-duration` | — | e.g. `10m` (cut mode) |
 | Scene threshold | `--scene-threshold` | `0.1` | scene-cut sensitivity |
+| Shot-change-aware cut | `SCENE_CUT_SNAP` / `SCENE_CUT_SNAP_MARGIN` / `SCENE_CUT_DETECT_THRESHOLD` | on / `0.5` / `0.4` | cut mode: nudge each clip boundary off the original footage's hard cuts so the edit point doesn't flash a sliver of the adjacent shot (闪烁). source_start moves forward onto / source_end back onto any shot-change within the margin; boundaries already on a cut, or that would shrink a clip below ~0.5s, are left as-is. Set `SCENE_CUT_SNAP=0` to disable |
 | VLM workers | `VLM_WORKERS` | `8` | lower to 1 if a proxy/WAF rate-limits |
 | Subtitle size | `SUBTITLE_FONT_SIZE` / `SUBTITLE_MARGIN_V` | `42` / `48` | look & placement |
 | 整理 / index | `--no-consolidate` / `--consolidate-asr` | on | build the understanding index (and optionally clean ASR); use `--no-consolidate` to skip |
