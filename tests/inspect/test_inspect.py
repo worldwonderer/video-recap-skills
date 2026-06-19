@@ -7,7 +7,7 @@ from pathlib import Path
 # bare `import inspect` (that would resolve the stdlib). Load it by explicit file path under a
 # private module name instead — this is the read-only advisory CLI under test.
 _INSPECT_PATH = (
-    Path(__file__).resolve().parents[2] / "skills" / "video-recap" / "scripts" / "inspect.py"
+    Path(__file__).resolve().parents[2] / "skills" / "video-recap" / "scripts" / "recap_inspect.py"
 )
 _spec = importlib.util.spec_from_file_location("recap_inspect", _INSPECT_PATH)
 recap_inspect = importlib.util.module_from_spec(_spec)

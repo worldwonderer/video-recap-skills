@@ -17,21 +17,9 @@ Two subcommands:
 Output: markdown by default; --json for machine-readable; --compact (default ON) truncates
 long free text — pass --full to keep it.
 """
-import os
-import sys
-
-# This script is named inspect.py per the bundle spec. When it is run directly, its own
-# directory sits at the front of sys.path and shadows the stdlib `inspect` module that
-# argparse's color support (Python 3.13+) imports lazily. Drop our directory from sys.path
-# and pre-load the genuine stdlib inspect so argparse resolves it, not this file. realpath is
-# used because macOS hands sys.path[0] the /private symlink resolution of /tmp etc.
-_HERE = os.path.realpath(os.path.dirname(os.path.abspath(__file__)))
-sys.path[:] = [p for p in sys.path if os.path.realpath(p or os.getcwd()) != _HERE]
-import inspect as _stdlib_inspect  # noqa: F401,E402  force the real stdlib inspect into sys.modules
-
-import argparse  # noqa: E402
-import json  # noqa: E402
-from pathlib import Path  # noqa: E402
+import argparse
+import json
+from pathlib import Path
 
 
 # --- artifact catalog --------------------------------------------------------
@@ -482,7 +470,7 @@ def _render_clip_map_md(result, compact):
 # --- CLI ---------------------------------------------------------------------
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        prog="inspect.py",
+        prog="recap_inspect.py",
         description="Advisory read-only inspection of a video-recap work_dir (pure JSON).")
     parser.add_argument("--work-dir", required=True, help="recap work_dir to inspect")
     parser.add_argument("--json", action="store_true", help="machine-readable JSON output")

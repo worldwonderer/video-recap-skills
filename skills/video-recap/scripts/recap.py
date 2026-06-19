@@ -435,7 +435,7 @@ def main():
             uargs.append("--consolidate-asr")
         _run("video-understanding", "understand.py", *uargs)
 
-    inspect_py = _entry("video-recap", "inspect.py")
+    inspect_py = _entry("video-recap", "recap_inspect.py")
 
     def _pause(need_text, inspect_hint=None):
         brief = work_dir / "agent_narration_brief.md"
