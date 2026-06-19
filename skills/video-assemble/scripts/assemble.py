@@ -278,16 +278,21 @@ def _subtitle_style_config():
     }
 
 
+def _has_user_subtitles(work_dir):
+    """True when the user dropped a bring-your-own original-subtitle file into work_dir."""
+    return work_dir is not None and any(
+        (Path(work_dir) / name).exists()
+        for name in ("user_subtitles.json", "user_subtitles.srt", "user_subtitles.ass")
+    )
+
+
 def assembly_settings_fingerprint(work_dir=None):
     """Settings that affect the rendered video, used by pipeline resume cache. When work_dir is
     given, a user_subtitles presence flag is included so dropping in a user-subtitle file rebuilds
     the cached subtitles."""
     burn_subtitles = bool(CONFIG.get("burn_subtitles", False))
     mask_source_subtitles = burn_subtitles and bool(CONFIG.get("mask_source_subtitles", False))
-    user_subtitles = work_dir is not None and any(
-        (Path(work_dir) / name).exists()
-        for name in ("user_subtitles.json", "user_subtitles.srt", "user_subtitles.ass")
-    )
+    user_subtitles = _has_user_subtitles(work_dir)
     fingerprint = {
         "version": SUBTITLE_RENDER_VERSION,
         "subtitle_text_normalize": SUBTITLE_TEXT_NORMALIZE_VERSION,
@@ -796,11 +801,14 @@ def _original_gap_subtitle_entries(tts_segments, work_dir, video_duration):
     """Subtitle entries for the ORIGINAL dialogue during the original-audio blocks (narration
     gaps), so the band is not blank while the original speaks. Off unless we are burning and
     subtitle_original_in_gaps is set; no-op when there is no ASR. Cut mode remaps ASR to output."""
-    # Only fill the gaps when we are masking the source's own subs (else they already show there
-    # and ours would double). subtitle_original_in_gaps is the explicit override.
+    # Fill the gaps when either (a) we are masking the source's own burned-in subs (so the band is
+    # blank without us), or (b) the user supplied their own subtitle file — a clear signal they want
+    # the original dialogue shown, e.g. a clean/foreign source with mask OFF (no burned subs to
+    # double). Without a user file we keep the mask requirement so we don't double the source's own
+    # visible subs. subtitle_original_in_gaps is the explicit override either way.
     if not (CONFIG.get("burn_subtitles", False)
-            and CONFIG.get("mask_source_subtitles", False)
-            and CONFIG.get("subtitle_original_in_gaps", True)):
+            and CONFIG.get("subtitle_original_in_gaps", True)
+            and (CONFIG.get("mask_source_subtitles", False) or _has_user_subtitles(work_dir))):
         return []
     gaps = _narration_gap_windows(tts_segments, video_duration)
     if not gaps:
