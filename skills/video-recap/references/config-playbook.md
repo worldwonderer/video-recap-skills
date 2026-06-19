@@ -13,7 +13,7 @@ Defaults below are bundle-level defaults unless a note scopes them to a specific
 | VLM / chat model | `MIMO_MODEL` | `mimo-v2.5` | frame VLM + reviewer + consolidate |
 | ASR model | `MIMO_ASR_MODEL` | `mimo-v2.5-asr` | speech-to-text |
 | ASR language | `MIMO_ASR_LANGUAGE` | `auto` | `auto` / `zh` / `en` |
-| ASR window | `ASR_SEGMENT_SECONDS` | `30` | smaller → finer dialogue timestamps (stays under MiMo's 10MB base64 cap) |
+| ASR window | `ASR_SEGMENT_SECONDS` | `15` | smaller → finer dialogue timestamps (stays under MiMo's 10MB base64 cap) |
 | TTS model | `MIMO_TTS_MODEL` | `mimo-v2.5-tts` | the only TTS engine |
 | MiMo voice | `MIMO_TTS_VOICE` / `--mimo-tts-voice` | `冰糖` | |
 | Narration block coverage | `NARRATION_COVERAGE_TARGET` / `NARRATION_BLOCK_SECONDS` | `0.7` / `9.0` | current block-recap density controls; old `TARGET_SEGMENTS_PER_MINUTE` applies only to legacy single-pass cut mapping reports |
