@@ -1031,6 +1031,16 @@ def _subtitle_burn_filter(subtitle_path):
     return f"subtitles=filename='{_escape_subtitle_filter_path(subtitle_path)}'"
 
 
+def _output_downscale_filter(max_h):
+    """Lanczos downscale that forces BOTH output dimensions even (libx264/yuv420p need it).
+
+    -2 keeps the aspect ratio with an even width; 2*trunc(min(ih,H)/2) caps the height at H
+    yet forces it even, so an odd OUTPUT_MAX_HEIGHT (e.g. 721) cannot produce an odd height
+    that makes libx264 abort with an empty output file. 'min(ih,H)' only ever shrinks.
+    """
+    return f"scale=-2:'2*trunc(min(ih,{max_h})/2)':flags=lanczos"
+
+
 def final_loudnorm_filter():
     """Final-mix loudness normalization filter from CONFIG, or None when disabled.
 
@@ -1352,7 +1362,7 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
 
     # Video filter chain: mask source subtitles first (drawbox), then burn our subtitles
     # on top. Either one forces a re-encode; with neither, the video stream is copied.
-    crf = str(int(CONFIG.get("output_crf", 18) or 18))
+    crf = str(CONFIG.get("output_crf", 18))  # env_int already clamps to >=0; keep 0 (lossless) intact
     preset = str(CONFIG.get("output_preset", "veryfast") or "veryfast")
     max_h = int(CONFIG.get("output_max_height", 0) or 0)
     vf_chain = []
@@ -1362,10 +1372,10 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
     if CONFIG.get("burn_subtitles", False):
         vf_chain.append(_subtitle_burn_filter(ass_path))
     # Downscale LAST so the mask + burned subtitles render at native resolution and are then
-    # scaled down with the frame (crisp). -2 keeps aspect with an even width (libx264 needs it);
-    # 'min(ih,H)' only ever shrinks, never upscales a smaller source.
+    # scaled down with the frame (crisp). The helper forces both dimensions even so an odd
+    # OUTPUT_MAX_HEIGHT can't crash libx264; 'min(ih,H)' only ever shrinks the source.
     if max_h > 0:
-        vf_chain.append(f"scale=-2:'min(ih,{max_h})':flags=lanczos")
+        vf_chain.append(_output_downscale_filter(max_h))
     if vf_chain:
         cmd += ["-vf", ",".join(vf_chain), "-c:v", "libx264", "-preset", preset, "-crf", crf]
         notes = ((["遮挡原字幕"] if mask_filter else [])

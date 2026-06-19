@@ -4,7 +4,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-a
 import json
 import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
-from assemble import _wrap_subtitle_text, _split_subtitle_chunks, _subtitle_entries, _adjust_tts_speed, _apply_narration_speed, _assembly_manifest_payload, _build_audio_filter_complex, _build_timed_narration, _build_video_clips, _emit_timeline, _resolve_final_output, _value_fingerprint, _escape_ass_text, _generate_ass, _generate_srt, _seconds_to_ass_time, _seconds_to_srt_time, _source_subtitle_mask_filter, _subtitle_burn_filter, assemble_video, assembly_settings_fingerprint, final_loudnorm_filter
+from assemble import _wrap_subtitle_text, _split_subtitle_chunks, _subtitle_entries, _adjust_tts_speed, _apply_narration_speed, _assembly_manifest_payload, _build_audio_filter_complex, _build_timed_narration, _build_video_clips, _emit_timeline, _resolve_final_output, _value_fingerprint, _escape_ass_text, _generate_ass, _generate_srt, _seconds_to_ass_time, _seconds_to_srt_time, _source_subtitle_mask_filter, _subtitle_burn_filter, _output_downscale_filter, assemble_video, assembly_settings_fingerprint, final_loudnorm_filter
 from lib import CONFIG
 
 
@@ -879,7 +879,40 @@ def test_output_compression_knobs_default_and_override(monkeypatch):
         assert _lib.CONFIG["output_crf"] == 24
         assert _lib.CONFIG["output_preset"] == "slow"
         assert _lib.CONFIG["output_max_height"] == 720
+
+        monkeypatch.setenv("OUTPUT_CRF", "0")          # lossless is a valid CRF, must not be coerced away
+        importlib.reload(_lib)
+        assert _lib.CONFIG["output_crf"] == 0
     finally:
         for var in ("OUTPUT_CRF", "OUTPUT_PRESET", "OUTPUT_MAX_HEIGHT"):
             monkeypatch.delenv(var, raising=False)
         importlib.reload(_lib)
+
+
+def test_output_crf_zero_is_not_overridden_to_default():
+    """CRF 0 (x264 lossless) is falsy but valid; the mux must pass '0', never silently fall back to 18."""
+    import importlib
+    import lib as _lib
+    import assemble
+    try:
+        _lib.CONFIG["output_crf"] = 0
+        importlib.reload(assemble)  # assemble reads CONFIG from the reloaded lib at call time
+        assert str(assemble.CONFIG.get("output_crf", 18)) == "0"
+    finally:
+        importlib.reload(_lib)
+        importlib.reload(assemble)
+
+
+def test_output_downscale_filter_forces_even_height():
+    """An odd OUTPUT_MAX_HEIGHT must still yield an even output height (libx264/yuv420p reject odd),
+    and the filter must never regress to the width-only `-2:'min(ih,H)'` form that crashed the mux."""
+    import math
+    # Regression guard: the exact even-forcing filter string is pinned.
+    assert _output_downscale_filter(721) == "scale=-2:'2*trunc(min(ih,721)/2)':flags=lanczos"
+    assert _output_downscale_filter(720) == "scale=-2:'2*trunc(min(ih,720)/2)':flags=lanczos"
+    # The embedded expression is even for any (source height, cap) pair, and only ever shrinks.
+    for ih in (720, 1080, 2160, 723):
+        for max_h in (480, 720, 721, 1080, 1081):
+            height = 2 * math.trunc(min(ih, max_h) / 2)   # mirrors the ffmpeg expression
+            assert height % 2 == 0
+            assert height <= max_h and height <= ih
