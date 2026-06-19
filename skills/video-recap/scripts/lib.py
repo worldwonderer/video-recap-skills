@@ -183,6 +183,12 @@ CONFIG = {
     # 生成解说时使用 speech_rate * safety_margin 作为约束
     "speech_rate": 3.5,
     "speech_safety_margin": 0.85,  # 保守系数：TTS 实际语速有 ±20% 波动
+    # Block-coverage lint thresholds — promoted from inline .get() literals to real CONFIG keys (tunable; defaults unchanged)
+    "narration_coverage_target": 0.7,   # aim ~70% narrated:original (7:3)
+    "narration_coverage_min": 0.5,      # below this coverage → under_narrated
+    "narration_block_seconds": 9.0,     # block cadence used to derive target block count
+    "original_block_min_seconds": 2.5,  # a deliberate original-audio gap must be at least this long
+    "narration_block_min_chars": 16,    # below this avg block size → fragmented_beats
     "fade_ms": 300,  # TTS fade-in/fade-out 时长(ms)
     "breath_ms": 250,  # 段间呼吸空间(ms)；block recap 块内连贯、块间留原声呼吸
     # Legacy single-pass cut mapping density fields; current writing uses block coverage controls below.

@@ -24,8 +24,12 @@ CATEGORIES = [
     "density", "pacing", "cliche", "incomplete", "disjoint_handoff", "other",
 ]
 
+# Categories whose findings are allowed to keep severity=error and thus gate strict
+# mode. Everything else is craft/subjective and is clamped to at most "warning".
+FACTUAL_CATEGORIES = {"hallucination", "incomplete"}
+
 RUBRIC = """你是中文视频解说稿的严格评审。依据以下规则审阅草稿，只指出真实问题，宁缺毋滥：
-1. 反幻觉（最重要）：解说里的人物、动作、因果、关系必须能从「画面证据」(frame_facts/描述) 或「对白」(ASR) 推断出来。凭空虚构、过度脑补 → severity=error, category=hallucination，指出是哪一句、依据缺在哪。
+1. 反幻觉（最重要）：解说里的人物、动作、因果、关系只要能由「画面证据」(frame_facts/描述) 或「对白」(ASR) 或「背景资料」(background_research) 任一支撑，即不算幻觉。只有与全部可得证据都矛盾的论断才是 severity=error, category=hallucination，并指出与哪条证据冲突。若与背景资料一致但画面/对白里看不到（合理推断、非矛盾），最多 severity=suggestion，不要判 error。
 2. 钩子：开头 1-2 段要制造悬念/利害，不是交代场景。弱钩子 → weak_hook。
 3. 主线：应有一条贯穿主线（目标/关系/悬念），每段推进它，不要每个场景从头讲。缺主线 → no_throughline。
 4. 给信息而非念画面：观众看得见动作表情；解说要讲动机/关系/潜台词/剧情意义。复述画面 → narrating_picture。
@@ -246,7 +250,8 @@ def _load_review_research_context(work_dir):
 def _format_review_research_context(research, limit=1200):
     """Compact background_research.json for the quality reviewer.
 
-    It is supporting context only: hallucination checks still require visual/ASR grounding.
+    Background research is valid grounding alongside visual/ASR: a claim it supports is
+    not a hallucination; only claims contradicting all available evidence are errors.
     """
     if not isinstance(research, dict) or not research:
         return ""
@@ -332,7 +337,7 @@ def build_review_messages(narration, vlm_analysis, asr_result, work_dir=None, re
         research_context = _format_review_research_context(_load_review_research_context(work_dir))
     user = (
         f"{RUBRIC}\n\n"
-        f"## 背景资料（辅助上下文，不可替代画面/对白证据）\n{research_context or '(无)'}\n\n"
+        f"## 背景资料（与画面/对白并列的有效依据：被其支撑的事实不算幻觉，仅与全部证据矛盾才算）\n{research_context or '(无)'}\n\n"
         f"## 画面证据（场景描述 + 帧实）\n{grounding or '(无)'}\n\n"
         f"## 对白（ASR）\n{dialogue or '(无对白/静音视频)'}\n\n"
         f"## 解说草稿（共 {len([s for s in (narration or []) if isinstance(s, dict)])} 段）\n{draft or '(空)'}\n"
@@ -369,6 +374,11 @@ def parse_review_response(text):
         cat = str(f.get("category", "other")).lower()
         if cat not in CATEGORIES:
             cat = "other"
+        # Only factual defects may gate strict mode (severity=error). Craft findings
+        # (weak_hook, narrating_picture, cliche, disjoint_handoff, ...) are advisory:
+        # clamp them to at most "warning" so they never block on subjective judgement.
+        if cat not in FACTUAL_CATEGORIES and sev == "error":
+            sev = "warning"
         findings.append({
             "segment": f.get("segment"),
             "severity": sev,
@@ -423,7 +433,8 @@ def review_narration(work_dir, *, timeline="source"):
         "model": CONFIG.get("vlm_model", ""),
         "messages": messages,
         "max_tokens": 2000,
-        "temperature": 0.2,
+        "temperature": 0,
+        "seed": 7,
     })
     content = ""
     try:

@@ -545,7 +545,15 @@ def lint_narration(narration, scenes_analysis=None, *, clip_plan=None, mode="ful
     metrics = {}
     if mode == "full" and len(sorted_segments) >= 2:
         span = sorted_segments[-1]["end"] - sorted_segments[0]["start"]
-        play_rate = max(CONFIG["speech_rate"] * float(CONFIG.get("narration_speed", 1.0) or 1.0), 0.1)
+        # Score coverage at the SAME conservative rate the writer is budgeted at
+        # (_recommended_char_budget uses speech_rate * speech_safety_margin * narration_speed),
+        # else the metric scores ~18% stricter than its own budget and false-flags under_narrated.
+        play_rate = max(
+            CONFIG["speech_rate"]
+            * float(CONFIG.get("speech_safety_margin", 0.85) or 0.85)
+            * float(CONFIG.get("narration_speed", 1.0) or 1.0),
+            0.1,
+        )
         spoken = [s["char_count"] / play_rate for s in sorted_segments]
         spoken_ends = [sorted_segments[i]["start"] + spoken[i] for i in range(len(sorted_segments))]
         narrated_seconds = sum(spoken)
@@ -1855,7 +1863,8 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         "7. In cut mode, select clips for plot causality, key dialogue, reveals, and emotional turns; avoid filler and repeated shots.",
         "8. Give every block an `emotion` that fits its whole arc; keep it STEADY across the block (it is one utterance) and shift only at a real emotional turn between blocks. Use a calm base (平静/深沉/严肃) for most of a section and save 震惊/悲伤/紧张 for the actual turns.",
         "9. Between blocks, leave a gap of a few seconds with NO narration so the original audio plays alone — pick those spots at genuinely strong original moments, not arbitrarily. BRIDGE them: the block right BEFORE a gap must lead INTO that original moment (end on a line that makes the viewer want to hear what comes next), and the block right AFTER it must pick UP / react to what the original just said or showed — the narration and the original it brackets are ONE continuous beat, not 各说各的.",
-        "10. After writing, run: `python3 skills/video-recap/scripts/recap.py <video> --work-dir <work_dir>`.",
+        "10. 不要在解说文本里使用破折号（——、—）：破折号烧进字幕里很突兀，该停顿就用逗号，该断句就用句号；同理 `original_subtitles.json` 里也不要用破折号。",
+        "11. After writing, run: `python3 skills/video-recap/scripts/recap.py <video> --work-dir <work_dir>`.",
         "",
         "## 原声留白字幕 `original_subtitles.json`（校对原声台词）",
         "",

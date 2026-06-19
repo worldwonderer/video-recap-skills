@@ -58,7 +58,7 @@ def test_build_review_messages_includes_bounded_research_context(tmp_path):
         work_dir=tmp_path,
     )[0]["content"]
 
-    assert "背景资料（辅助上下文，不可替代画面/对白证据）" in content
+    assert "背景资料（与画面/对白并列的有效依据：被其支撑的事实不算幻觉，仅与全部证据矛盾才算）" in content
     assert "范闲卷入监察院暗线" in content
     assert "角色0：简介0" in content
     assert "角色12" not in content

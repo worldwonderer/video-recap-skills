@@ -207,15 +207,22 @@ def test_agent_subtitles_preferred_over_asr(monkeypatch, tmp_path):
     assert "叶轻眉" in joined and "叶青眉" not in joined  # calibrated text, ASR error not used
 
 
-def test_over_dense_asr_line_skipped_in_fallback(monkeypatch, tmp_path):
-    # a long ASR block landing in a tiny gap would flash unreadable text → skip it (no agent file)
+def test_over_dense_asr_line_truncated_and_shown_in_fallback(monkeypatch, tmp_path):
+    # R3: a long ASR block landing in a tiny gap is FRONT-TRUNCATED to fit the gap at the max read
+    # rate and shown truncated — not dropped to blank (the old behavior was to skip it entirely).
     _burn_on(monkeypatch)
-    dense = "我既然回来了京都就是最安全的小姐遇害你和你的黑骑为什么不在京都我听命行事"  # ~34 chars
+    dense = "我既然回来了京都就是最安全的小姐遇害你和你的黑骑为什么不在京都我听命行事"  # ~34 chars, no sentence marks
     (tmp_path / "asr_result.json").write_text(
         json.dumps([{"start": 2.0, "end": 4.0, "text": dense}]), encoding="utf-8")  # 34 chars in a 2s slot
     segs = [{"actual_place_start": 6.0, "actual_place_end": 9.0, "narration": "解说"}]
-    # 34 chars / 2s = 17 ch/s > 9 ch/s guard → dropped
-    assert assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0) == []
+    # 2s slot * 9 ch/s = 18 chars max → shown truncated to the leading 18 chars, wrapped in 「」
+    entries = assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0)
+    assert entries  # shown, not dropped
+    joined = "".join(e["text"] for e in entries)
+    assert joined.startswith("「") and joined.endswith("」")
+    body = joined.strip("「」")
+    assert body and len(body) <= 18  # truncated to fit the gap at the max read rate
+    assert dense.startswith(body)   # it is the LEADING (front) portion of the dense line
 
 
 def test_calibrated_line_not_subject_to_density_guard(monkeypatch, tmp_path):
@@ -226,3 +233,160 @@ def test_calibrated_line_not_subject_to_density_guard(monkeypatch, tmp_path):
         json.dumps([{"start": 1.0, "end": 3.0, "text": dense}]), encoding="utf-8")
     segs = [{"actual_place_start": 6.0, "actual_place_end": 9.0, "narration": "解说"}]
     assert assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0)  # kept
+
+
+# --- Q7: 破折号 normalization -------------------------------------------------
+
+def test_normalize_subtitle_text_collapses_em_dashes():
+    # "——" → "，"; a lone "—" → "，"; never leaves a doubled comma
+    assert assemble._normalize_subtitle_text("他来了——然后走了") == "他来了，然后走了"
+    assert assemble._normalize_subtitle_text("等等—别走") == "等等，别走"
+    assert assemble._normalize_subtitle_text("一———二") == "一，二"  # any dash run collapses to one comma
+    assert assemble._normalize_subtitle_text("已经，——好") == "已经，好"  # no double comma
+    assert assemble._normalize_subtitle_text("") == ""
+    assert assemble._normalize_subtitle_text(None) == ""
+
+
+def test_generated_srt_and_ass_normalize_em_dashes(monkeypatch, tmp_path):
+    # narration text with a dash is normalized in BOTH generated srt and ass burned text
+    segs = [{"actual_place_start": 1.0, "actual_place_end": 4.0,
+             "narration": "我回来了——这一次", "start": 1.0, "end": 4.0}]
+    assemble._generate_srt(segs, tmp_path)
+    assemble._generate_ass(segs, tmp_path)
+    srt = (tmp_path / "subtitles.srt").read_text(encoding="utf-8")
+    ass = (tmp_path / "subtitles.ass").read_text(encoding="utf-8")
+    assert "——" not in srt and "—" not in srt
+    assert "——" not in ass and "—" not in ass
+    assert "我回来了，这一次" in srt
+
+
+def test_original_gap_text_normalizes_em_dashes(monkeypatch, tmp_path):
+    # the dash normalization also applies to original-gap subtitle text in the burned output
+    _burn_on(monkeypatch)
+    (tmp_path / "original_subtitles.json").write_text(
+        json.dumps([{"start": 1.0, "end": 4.0, "text": "活着——让我看看"}]), encoding="utf-8")
+    segs = [{"actual_place_start": 5.0, "actual_place_end": 8.0, "narration": "解说",
+             "start": 5.0, "end": 8.0}]
+    assemble._generate_ass(segs, tmp_path, 10.0)
+    ass = (tmp_path / "subtitles.ass").read_text(encoding="utf-8")
+    assert "——" not in ass and "—" not in ass
+    assert "活着，让我看看" in ass
+
+
+def test_fingerprint_includes_subtitle_text_normalize_version():
+    fp = assemble.assembly_settings_fingerprint()
+    assert fp["subtitle_text_normalize"] == assemble.SUBTITLE_TEXT_NORMALIZE_VERSION
+
+
+# --- R1: user-provided subtitle file as override primary ----------------------
+
+def test_user_json_output_time_used_verbatim_above_agent(monkeypatch, tmp_path):
+    _burn_on(monkeypatch)
+    # agent file would say one thing; the user file (bare list = OUTPUT-time) must override it
+    (tmp_path / "original_subtitles.json").write_text(
+        json.dumps([{"start": 1.0, "end": 4.0, "text": "代理版本"}]), encoding="utf-8")
+    (tmp_path / "user_subtitles.json").write_text(
+        json.dumps([{"start": 1.0, "end": 4.0, "text": "用户版本"}]), encoding="utf-8")
+    segs = [{"actual_place_start": 5.0, "actual_place_end": 8.0, "narration": "解说"}]
+    joined = "".join(e["text"] for e in assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0))
+    assert "用户版本" in joined and "代理版本" not in joined
+    # used verbatim at its OUTPUT time (1-4), no remap
+    entries = assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0)
+    assert all(1.0 <= e["start"] and e["end"] <= 4.0 + 1e-6 for e in entries)
+
+
+def test_user_json_wrapper_source_time_remapped(monkeypatch, tmp_path):
+    _burn_on(monkeypatch)
+    # SOURCE-time user json (timeline=source) is remapped to OUTPUT via the clip spans
+    (tmp_path / "clip_plan_validated.json").write_text(json.dumps({"clips": [
+        {"source_start": 10.0, "source_end": 20.0, "output_start": 0.0, "output_end": 10.0}]}),
+        encoding="utf-8")
+    (tmp_path / "user_subtitles.json").write_text(json.dumps({
+        "timeline": "source",
+        "lines": [{"start": 12.0, "end": 15.0, "text": "源时间台词"}],  # source 12-15 → output 2-5
+    }), encoding="utf-8")
+    segs = [{"actual_place_start": 6.0, "actual_place_end": 9.0, "narration": "解说"}]
+    entries = assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0)
+    assert entries
+    assert all(2.0 <= e["start"] and e["end"] <= 5.0 + 1e-6 for e in entries)
+
+
+def test_user_srt_default_source_time_remapped(monkeypatch, tmp_path):
+    _burn_on(monkeypatch)
+    # .srt defaults to SOURCE-time → remapped via clip spans (source 12-15 → output 2-5)
+    (tmp_path / "clip_plan_validated.json").write_text(json.dumps({"clips": [
+        {"source_start": 10.0, "source_end": 20.0, "output_start": 0.0, "output_end": 10.0}]}),
+        encoding="utf-8")
+    (tmp_path / "user_subtitles.srt").write_text(
+        "1\n00:00:12,000 --> 00:00:15,000\n源时间字幕\n", encoding="utf-8")
+    segs = [{"actual_place_start": 6.0, "actual_place_end": 9.0, "narration": "解说"}]
+    entries = assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0)
+    joined = "".join(e["text"] for e in entries)
+    assert "源时间字幕" in joined
+    assert all(2.0 <= e["start"] and e["end"] <= 5.0 + 1e-6 for e in entries)
+
+
+def test_user_subtitles_malformed_falls_back_no_crash(monkeypatch, tmp_path):
+    _burn_on(monkeypatch)
+    # garbage user json must not crash and must fall back to the agent file
+    (tmp_path / "user_subtitles.json").write_text("{ this is not json", encoding="utf-8")
+    (tmp_path / "original_subtitles.json").write_text(
+        json.dumps([{"start": 1.0, "end": 4.0, "text": "代理兜底"}]), encoding="utf-8")
+    segs = [{"actual_place_start": 5.0, "actual_place_end": 8.0, "narration": "解说"}]
+    joined = "".join(e["text"] for e in assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0))
+    assert "代理兜底" in joined
+    # an empty list is also malformed-ish → returns None and falls through the ladder
+    (tmp_path / "user_subtitles.json").write_text("[]", encoding="utf-8")
+    assert assemble._load_user_original_subtitles(tmp_path) is None
+
+
+def test_user_subtitles_absent_returns_none(tmp_path):
+    assert assemble._load_user_original_subtitles(tmp_path) is None
+
+
+def test_fingerprint_user_subtitles_flag(tmp_path):
+    assert assemble.assembly_settings_fingerprint(tmp_path)["user_subtitles"] is False
+    (tmp_path / "user_subtitles.json").write_text("[]", encoding="utf-8")
+    assert assemble.assembly_settings_fingerprint(tmp_path)["user_subtitles"] is True
+    # no work_dir → flag is constant False (back-compat for no-arg callers)
+    assert assemble.assembly_settings_fingerprint()["user_subtitles"] is False
+
+
+# --- R2: precise interval-clip path -------------------------------------------
+
+def test_precise_line_straddling_gap_boundary_is_split_across_gaps(monkeypatch, tmp_path):
+    # a calibrated/user line whose [start,end] straddles a narration window is CLIPPED into each
+    # gap it overlaps (split), not snapped to one gap (midpoint) and not dropped.
+    _burn_on(monkeypatch)
+    # line 3-10 straddles narration window [5,7]: overlaps gap [0,5] (3-5) and gap [7,12] (7-10)
+    (tmp_path / "user_subtitles.json").write_text(
+        json.dumps([{"start": 3.0, "end": 10.0, "text": "横跨解说块的原声台词"}]), encoding="utf-8")
+    segs = [{"actual_place_start": 5.0, "actual_place_end": 7.0, "narration": "解说"}]
+    entries = assemble._original_gap_subtitle_entries(segs, tmp_path, 12.0)
+    assert entries
+    before = [e for e in entries if e["end"] <= 5.0 + 1e-6]
+    after = [e for e in entries if e["start"] >= 7.0 - 1e-6]
+    assert before, "expected a fragment clipped into the pre-narration gap [3,5]"
+    assert after, "expected a fragment clipped into the post-narration gap [7,10]"
+    # no fragment ever bleeds into the narration window [5,7]
+    for e in entries:
+        assert e["end"] <= 5.0 + 1e-6 or e["start"] >= 7.0 - 1e-6
+
+
+# --- R3: coarse-ASR fallback hardening ----------------------------------------
+
+def test_asr_multi_sentence_entry_is_split(monkeypatch, tmp_path):
+    # a single ASR block with several sentences is pre-split on 。！？ before gap assignment,
+    # so each sentence is placed by its own midpoint instead of the whole block by one midpoint.
+    _burn_on(monkeypatch)
+    # one ASR entry 1-10 spanning two narration gaps; its two sentences land in different gaps
+    (tmp_path / "asr_result.json").write_text(json.dumps([
+        {"start": 1.0, "end": 10.0, "text": "第一句话。第二句话。"}]), encoding="utf-8")
+    # narration window [5.0,5.4] splits [0,5] and [5.4,12]; sentence midpoints fall either side
+    segs = [{"actual_place_start": 5.0, "actual_place_end": 5.4, "narration": "解说"}]
+    entries = assemble._original_gap_subtitle_entries(segs, tmp_path, 12.0)
+    joined = "".join(e["text"] for e in entries)
+    assert "第一句话" in joined and "第二句话" in joined
+    # the two sentences are placed in different gaps (one before, one after the narration window)
+    assert any(e["end"] <= 5.0 + 1e-6 for e in entries)
+    assert any(e["start"] >= 5.4 - 1e-6 for e in entries)

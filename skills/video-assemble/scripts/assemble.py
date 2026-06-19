@@ -66,7 +66,7 @@ def _assembly_manifest_payload(input_video, tts_segments, work_dir, output_path,
         "source_video_fingerprint": source_video_fingerprint,
         "tts_meta": str(Path(tts_meta_path).resolve()) if tts_meta_path else None,
         "tts_segments": len(tts_segments or []),
-        "assembly_settings": assembly_settings_fingerprint(),
+        "assembly_settings": assembly_settings_fingerprint(work_dir),
         "output_path": str(output_path.resolve()),
     }
     if final_output is not None:
@@ -278,12 +278,20 @@ def _subtitle_style_config():
     }
 
 
-def assembly_settings_fingerprint():
-    """Settings that affect the rendered video, used by pipeline resume cache."""
+def assembly_settings_fingerprint(work_dir=None):
+    """Settings that affect the rendered video, used by pipeline resume cache. When work_dir is
+    given, a user_subtitles presence flag is included so dropping in a user-subtitle file rebuilds
+    the cached subtitles."""
     burn_subtitles = bool(CONFIG.get("burn_subtitles", False))
     mask_source_subtitles = burn_subtitles and bool(CONFIG.get("mask_source_subtitles", False))
+    user_subtitles = work_dir is not None and any(
+        (Path(work_dir) / name).exists()
+        for name in ("user_subtitles.json", "user_subtitles.srt", "user_subtitles.ass")
+    )
     fingerprint = {
         "version": SUBTITLE_RENDER_VERSION,
+        "subtitle_text_normalize": SUBTITLE_TEXT_NORMALIZE_VERSION,
+        "user_subtitles": user_subtitles,
         "burn_subtitles": burn_subtitles,
         "force_video_reencode": bool(CONFIG.get("force_video_reencode", False)),
         "video_filters": {
@@ -393,6 +401,21 @@ def _subtitle_entry_chunks(raw_chunks):
             continue
         out.append({"raw": chunk, "text": display})
     return out
+
+
+SUBTITLE_TEXT_NORMALIZE_VERSION = 1  # bump to rebuild cached subtitles when normalization changes
+
+
+def _normalize_subtitle_text(s):
+    """Normalize Chinese em-dashes in burned subtitle text: a run of one-or-more "—" (incl. "——")
+    collapses to a single "，". Then collapse any resulting double commas ("，，"→"，") so the dash
+    swap never leaves a doubled comma. Empty/None passes through as "" unchanged."""
+    text = str(s or "")
+    if not text:
+        return text
+    text = re.sub(r"—+", "，", text)
+    text = re.sub(r"，{2,}", "，", text)
+    return text
 
 
 def _split_subtitle_chunks(text, max_chars):
@@ -582,6 +605,117 @@ def _load_agent_original_subtitles(work_dir):
     return out or None
 
 
+def _clean_subtitle_segments(raw):
+    """Coerce an iterable of {start,end,text} dicts to validated, positive-span segments."""
+    out = []
+    for s in raw or []:
+        if not isinstance(s, dict):
+            continue
+        try:
+            start, end = float(s["start"]), float(s["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        text = str(s.get("text", "")).strip()
+        if text and end > start:
+            out.append({"start": start, "end": end, "text": text})
+    return out
+
+
+def _parse_srt_timestamp(value):
+    """Parse an SRT 'HH:MM:SS,mmm' (or ASS 'H:MM:SS.cc') timestamp into seconds, or None."""
+    m = re.match(r"\s*(\d+):(\d{1,2}):(\d{1,2})[.,](\d{1,3})\s*$", str(value))
+    if not m:
+        return None
+    h, mm, ss, frac = m.groups()
+    return int(h) * 3600 + int(mm) * 60 + int(ss) + int(frac) / (10 ** len(frac))
+
+
+def _parse_srt_text(text):
+    """Minimal SRT parser → [{start,end,text}]. Tolerant of blank lines / missing indices."""
+    segs = []
+    for block in re.split(r"\n\s*\n", str(text).replace("\r\n", "\n").replace("\r", "\n")):
+        lines = [ln for ln in block.split("\n") if ln.strip()]
+        if not lines:
+            continue
+        if lines[0].strip().isdigit():
+            lines = lines[1:]
+        if not lines or "-->" not in lines[0]:
+            continue
+        parts = lines[0].split("-->")
+        if len(parts) != 2:
+            continue
+        start, end = _parse_srt_timestamp(parts[0]), _parse_srt_timestamp(parts[1])
+        body = " ".join(lines[1:]).strip()
+        if start is not None and end is not None and end > start and body:
+            segs.append({"start": start, "end": end, "text": body})
+    return segs
+
+
+def _parse_ass_text(text):
+    """Minimal ASS Dialogue parser → [{start,end,text}] (Start, End are fields 2 and 3)."""
+    segs = []
+    for line in str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if not line.startswith("Dialogue:"):
+            continue
+        fields = line[len("Dialogue:"):].split(",", 9)
+        if len(fields) < 10:
+            continue
+        start, end = _parse_srt_timestamp(fields[1]), _parse_srt_timestamp(fields[2])
+        body = re.sub(r"\{[^}]*\}", "", fields[9]).replace("\\N", " ").replace("\\n", " ").strip()
+        if start is not None and end is not None and end > start and body:
+            segs.append({"start": start, "end": end, "text": body})
+    return segs
+
+
+def _load_user_original_subtitles(work_dir):
+    """User-supplied original-dialogue subtitles, the highest-priority source (above the agent file).
+
+    Accepts (first existing wins):
+      - user_subtitles.json: a bare list [{start,end,text}] (treated as OUTPUT-time, used verbatim),
+        OR a wrapper {"timeline":"source"|"output", "lines":[...]} — "source" is remapped to OUTPUT
+        via the cut clip spans, "output" (default) is used directly.
+      - user_subtitles.srt / user_subtitles.ass: parsed minimally and defaulted to SOURCE-time,
+        so they are remapped to OUTPUT via the cut clip spans.
+    Returns OUTPUT-time [{start,end,text}], or None when absent/malformed (caller falls back)."""
+    work = Path(work_dir)
+    json_path = work / "user_subtitles.json"
+    if json_path.exists():
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return None
+        if isinstance(data, list):
+            segs, timeline = _clean_subtitle_segments(data), "output"
+        elif isinstance(data, dict):
+            segs = _clean_subtitle_segments(data.get("lines"))
+            timeline = str(data.get("timeline", "output")).lower()
+        else:
+            return None
+        if not segs:
+            return None
+        if timeline == "source":
+            segs = _map_asr_to_output(segs, _output_clip_spans(work))
+        return segs or None
+
+    for name in ("user_subtitles.srt", "user_subtitles.ass"):
+        path = work / name
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        parser = _parse_ass_text if name.endswith(".ass") else _parse_srt_text
+        segs = _clean_subtitle_segments(parser(text))
+        if not segs:
+            return None
+        # .srt/.ass default to SOURCE-time → remap onto the output timeline (identity in full mode).
+        segs = _map_asr_to_output(segs, _output_clip_spans(work))
+        return segs or None
+
+    return None
+
+
 def _output_clip_spans(work_dir):
     """Cut-mode source→output clip spans using the same freshness logic as video clips."""
     try:
@@ -672,35 +806,105 @@ def _original_gap_subtitle_entries(tts_segments, work_dir, video_duration):
     if not gaps:
         return []
 
-    # Prefer the agent-calibrated transcript; else fall back to a conservative ASR mapping.
-    agent = _load_agent_original_subtitles(work_dir)
-    if agent is not None:
-        candidates, calibrated = agent, True
+    # Source ladder (highest priority first): user-supplied file → agent-calibrated transcript →
+    # conservative auto-ASR mapping. The user file and the agent file are time-precise (their spans
+    # are the real on-screen windows), so they take the interval-clip "precise" path; raw ASR is
+    # coarse and stays on the midpoint+over-render-guard fallback path.
+    user = _load_user_original_subtitles(work_dir)
+    if user is not None:
+        candidates, precise = user, True
     else:
-        asr = _load_original_asr(work_dir)
-        if not asr:
-            return []
-        candidates, calibrated = _map_asr_to_output(asr, _output_clip_spans(work_dir)), False
+        agent = _load_agent_original_subtitles(work_dir)
+        if agent is not None:
+            candidates, precise = agent, True
+        else:
+            asr = _load_original_asr(work_dir)
+            if not asr:
+                return []
+            candidates, precise = _map_asr_to_output(asr, _output_clip_spans(work_dir)), False
 
     max_chars = int(CONFIG.get("subtitle_max_chars", 20))
+    if precise:
+        return _precise_gap_entries(candidates, gaps, max_chars)
+    return _fallback_gap_entries(candidates, gaps, max_chars)
+
+
+def _precise_gap_entries(candidates, gaps, max_chars):
+    """Precise path for time-accurate sources (user / agent-calibrated): interval-CLIP each line
+    across the gap boundaries it overlaps, emitting one sub-entry per overlapped gap (clipped to
+    that gap). A line straddling two gaps is split, not snapped to one or dropped; only sub-fragments
+    shorter than _MIN_READABLE_SECONDS are dropped. No over-render guard (the source is trusted)."""
     entries = []
     for seg in candidates:
-        # Assign each line to the ONE gap its midpoint falls in, then clip to that gap — so a long
-        # source line never gets shown in several gaps or crammed where it isn't actually spoken.
-        mid = (seg["start"] + seg["end"]) / 2.0
-        gap = next(((gs, ge) for gs, ge in gaps if gs <= mid < ge), None)
-        if gap is None:
-            continue
-        cs, ce = max(seg["start"], gap[0]), min(seg["end"], gap[1])
-        if ce - cs < _MIN_READABLE_SECONDS:
-            continue
         text = str(seg["text"]).strip()
-        # Over-render guard (fallback only): a raw ASR block too dense to read in the time it lands
-        # would flash unreadable text for audio that was cut/ducked — skip it (the agent fixes this).
-        if not calibrated and len(text) > (ce - cs) * _MAX_ORIGINAL_READ_CPS:
+        if not text:
             continue
-        entries.extend(_bracketed_original_chunks(text, cs, ce, max_chars))
+        for gs, ge in gaps:
+            cs, ce = max(seg["start"], gs), min(seg["end"], ge)
+            if ce - cs < _MIN_READABLE_SECONDS:
+                continue
+            entries.extend(_bracketed_original_chunks(text, cs, ce, max_chars))
     return entries
+
+
+def _split_sentences_keep_delims(text):
+    """Split on terminal CJK sentence marks 。！？ keeping each delimiter with its sentence. A
+    fragment that is only closing quotes/brackets (e.g. a trailing 」 after a 。 inside a quote) is
+    re-attached to the previous sentence so quoted speech is never split off into a bare 」."""
+    parts = [p.strip() for p in re.split(r"(?<=[。！？])", str(text)) if p.strip()]
+    merged = []
+    for part in parts:
+        if merged and all(ch in _SUBTITLE_CLOSING_QUOTES for ch in part):
+            merged[-1] += part
+        else:
+            merged.append(part)
+    return merged
+
+
+def _fallback_gap_entries(candidates, gaps, max_chars):
+    """Coarse-ASR fallback: assign each line to the ONE gap its midpoint falls in, then clip to that
+    gap — so a long source line never shows in several gaps or where it isn't actually spoken.
+    Hardened: multi-sentence entries are pre-split (on 。！？) so each sentence is placed by its own
+    midpoint; and an over-dense line is FRONT-TRUNCATED to fit its gap at the max read rate (shown
+    truncated) instead of being dropped to blank."""
+    entries = []
+    for seg in candidates:
+        for sentence in _split_sentences_keep_delims(seg["text"]) or [str(seg["text"]).strip()]:
+            # distribute the sentence's window proportionally inside the parent line's span
+            sub = _sentence_subspan(seg, sentence)
+            mid = (sub["start"] + sub["end"]) / 2.0
+            gap = next(((gs, ge) for gs, ge in gaps if gs <= mid < ge), None)
+            if gap is None:
+                continue
+            cs, ce = max(sub["start"], gap[0]), min(sub["end"], gap[1])
+            if ce - cs < _MIN_READABLE_SECONDS:
+                continue
+            text = sentence.strip()
+            if not text:
+                continue
+            max_len = int((ce - cs) * _MAX_ORIGINAL_READ_CPS)
+            if max_len <= 0:
+                continue
+            if len(text) > max_len:
+                # over-dense: show the leading portion that fits the gap, not a blank
+                text = text[:max_len]
+            entries.extend(_bracketed_original_chunks(text, cs, ce, max_chars))
+    return entries
+
+
+def _sentence_subspan(seg, sentence):
+    """The slice of seg's [start,end] window that this sentence occupies, by character proportion.
+    Single-sentence lines return the whole span unchanged."""
+    full = str(seg["text"]).strip()
+    if not full or sentence.strip() == full:
+        return {"start": seg["start"], "end": seg["end"]}
+    idx = full.find(sentence.strip())
+    if idx < 0:
+        return {"start": seg["start"], "end": seg["end"]}
+    span = seg["end"] - seg["start"]
+    s = seg["start"] + span * (idx / len(full))
+    e = seg["start"] + span * ((idx + len(sentence.strip())) / len(full))
+    return {"start": s, "end": e}
 
 
 def _combined_subtitle_entries(narration, work_dir, video_duration):
@@ -723,7 +927,7 @@ def _generate_srt(narration, work_dir, video_duration=None):
         end_ts = _seconds_to_srt_time(entry["end"])
         srt_lines.append(str(idx))
         srt_lines.append(f"{start_ts} --> {end_ts}")
-        srt_lines.append(entry["text"])
+        srt_lines.append(_normalize_subtitle_text(entry["text"]))
         srt_lines.append("")
     srt_path = work_dir / "subtitles.srt"
     srt_path.write_text("\n".join(srt_lines), encoding="utf-8")
@@ -777,7 +981,7 @@ def _generate_ass(narration, work_dir, video_duration=None):
                else _combined_subtitle_entries(narration, work_dir, video_duration))
     # entries are already split into short one-line chunks, so no wrapping here.
     for entry in entries:
-        text = _escape_ass_text(entry["text"])
+        text = _escape_ass_text(_normalize_subtitle_text(entry["text"]))
         ass_lines.append(
             "Dialogue: 0,"
             f"{_seconds_to_ass_time(entry['start'])},{_seconds_to_ass_time(entry['end'])},"

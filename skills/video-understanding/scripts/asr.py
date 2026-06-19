@@ -12,6 +12,91 @@ from lib import log, run_cmd, get_video_duration, mimo_asr_api_call, file_finger
 _ASR_AUDIO_MIME = "audio/wav"
 
 
+def _load_name_glossary(work_dir):
+    """从 background_research.json 收集已知人名（characters 键 + character_details 键及别名）。
+
+    返回去重后、长度 >=2 的人名列表（按长度降序，长名优先匹配）。文件缺失或无名字时返回 []。
+    """
+    research_path = Path(work_dir) / "background_research.json"
+    if not research_path.exists():
+        return []
+    try:
+        data = json.loads(research_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+
+    names = set()
+    characters = data.get("characters")
+    if isinstance(characters, dict):
+        names.update(characters.keys())
+    details = data.get("character_details")
+    if isinstance(details, dict):
+        for key, val in details.items():
+            names.add(key)
+            if isinstance(val, dict):
+                aliases = val.get("aliases")
+                if isinstance(aliases, list):
+                    names.update(a for a in aliases if isinstance(a, str))
+
+    cleaned = {n for n in names if isinstance(n, str) and len(n) >= 2}
+    return sorted(cleaned, key=len, reverse=True)
+
+
+def _correct_text_with_glossary(text, names):
+    """用人名表修正 ASR 同音字错误（如 叶青眉 → 叶轻眉）。
+
+    对每个已知人名，扫描文本中所有等长窗口；若某窗口与人名恰好相差一个字符（仅一处不同），
+    则替换为该人名。严格约束为「恰好一字之差」，避免过度纠正（叶轻风 与 叶轻眉 也是一字之差，
+    但这正是限制为单字替换的边界——只有当窗口本身不是任何已知人名时才会被改写）。
+    """
+    if not text or not names:
+        return text
+    name_set = set(names)
+    for name in names:
+        n = len(name)
+        if n < 2 or len(text) < n:
+            continue
+        i = 0
+        while i <= len(text) - n:
+            window = text[i:i + n]
+            # Only rewrite a one-char-off window when it is NOT itself a known name —
+            # otherwise a distinct real name one char away (叶轻风 vs 叶轻眉) would be corrupted.
+            if window != name and window not in name_set and _one_char_diff(window, name):
+                text = text[:i] + name + text[i + n:]
+                i += n
+            else:
+                i += 1
+    return text
+
+
+def _one_char_diff(a, b):
+    """两个等长字符串是否恰好相差一个字符（仅一处不同）。"""
+    if len(a) != len(b):
+        return False
+    diff = 0
+    for ca, cb in zip(a, b):
+        if ca != cb:
+            diff += 1
+            if diff > 1:
+                return False
+    return diff == 1
+
+
+def _apply_glossary_corrections(segments, work_dir):
+    """对已转录的 segments 就地应用人名表修正；无人名表时为 no-op。"""
+    names = _load_name_glossary(work_dir)
+    if not names:
+        return segments
+    for seg in segments:
+        original = seg.get("text") or ""
+        corrected = _correct_text_with_glossary(original, names)
+        if corrected != original:
+            seg["text"] = corrected
+    return segments
+
+
 def _audio_meta_path(work_dir):
     return Path(work_dir) / "audio.wav.meta.json"
 
@@ -66,6 +151,9 @@ def transcribe_audio(video_path, work_dir):
     else:
         # 长音频，分段转录（更细的窗口 → 更精细的对白时间戳）
         asr_result = _segment_and_transcribe(audio_wav, segments_dir, duration, segment_length)
+
+    # 用 background_research.json 的人名表修正 ASR 同音字错误（如 叶青眉 → 叶轻眉）；无人名表时为 no-op
+    _apply_glossary_corrections(asr_result, work_dir)
 
     # 保存
     asr_file.write_text(json.dumps(asr_result, ensure_ascii=False, indent=2), encoding="utf-8")
