@@ -106,6 +106,14 @@ _raw_mimo_asr_api_url = (
     or default_mimo_api_url(_mimo_asr_api_key)
 )
 
+# Cross-language source: when the original audio is in a language the narration is NOT in
+# (e.g. a Japanese drama recapped in Chinese), the original speech bleeding under the narration
+# is just noise the viewer can't parse — it reads as 怪音. In that mode the original is ducked to
+# near-silent UNDER narration; it still plays full-volume in the original-audio gap blocks, where
+# a single language is fine. Explicit SPEECH_DUCKING_VOLUME / ZONE_DUCKING_VOLUME still override.
+_foreign_source_audio = env_bool("FOREIGN_SOURCE_AUDIO", False)
+_foreign_under_narration_volume = 0.05  # original volume under narration when source audio is foreign
+
 CONFIG = {
     "api_provider": "mimo",
     "api_provider_source": "default",
@@ -209,7 +217,9 @@ CONFIG = {
     "ducking_makeup": 1.2,
     "ducking_narr_weight": 1.5,
     "ducking_orig_volume": env_float("DUCKING_ORIG_VOLUME", 0.3, minimum=0.0),  # 解说时原声基准音量
-    "zone_ducking_volume": 0.12,    # 解说时原声压低到的音量
+    "foreign_source_audio": _foreign_source_audio,  # 原声语言≠解说语言：解说下原声压到近静音(消除"怪音"双语重叠)
+    "zone_ducking_volume": env_float("ZONE_DUCKING_VOLUME",
+        _foreign_under_narration_volume if _foreign_source_audio else 0.12, minimum=0.0),  # 解说时原声压低到的音量
     "zone_fade_seconds": 0.5,      # 解说/原声切换的淡入淡出时长(秒)
     "idle_orig_volume": env_float("IDLE_ORIG_VOLUME", 1.0, minimum=0.0),  # 解说块之间的"原声块"音量：默认满音量(1.0)，让精彩原声整段放出来，不被压低（用户要求解说成块、原声也成块）
     "duck_fade_seconds": env_float("DUCK_FADE_SECONDS", 0.3, minimum=0.0),  # 解说块/原声块切换的淡入淡出(秒)，略放宽到 0.3 让满音量↔压低的过渡更顺
@@ -235,7 +245,8 @@ CONFIG = {
     "visual_beat_max_facts": 3,  # 单段解说最多建议覆盖的 frame_facts 锚点数量
     "asr_chunk_min_chars": env_int("ASR_CHUNK_MIN_CHARS", 500, minimum=1),  # brief 中 ASR 写作分块最小字数/词数
     "asr_chunk_max_chars": env_int("ASR_CHUNK_MAX_CHARS", 800, minimum=1),  # brief 中 ASR 写作分块最大字数/词数
-    "speech_ducking_volume": env_float("SPEECH_DUCKING_VOLUME", 0.2, minimum=0.0),    # 解说与对白重叠时原声音量
+    "speech_ducking_volume": env_float("SPEECH_DUCKING_VOLUME",
+        _foreign_under_narration_volume if _foreign_source_audio else 0.2, minimum=0.0),    # 解说与对白重叠时原声音量
     "silence_noise_threshold": "-25dB",  # ffmpeg silencedetect 噪声阈值
     "silence_min_duration": 0.3,     # 静音最短持续秒数
     "quiet_window_min": 1.0,         # 可放解说的安静窗口最短秒数
