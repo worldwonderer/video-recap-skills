@@ -436,7 +436,7 @@ def main():
         description="video-voiceover: synthesize narration audio segments from narration.json.")
     ap.add_argument("--work-dir", required=True)
     ap.add_argument("--narration", default=None,
-                    help="narration json (default: narration_mapped.json if present, else narration.json)")
+                    help="narration json (default: <work-dir>/narration.json; pass narration_mapped.json explicitly for legacy cut runs)")
     ap.add_argument("--mimo-voice", default=None, help="MiMo TTS voice name")
     ap.add_argument("--allow-partial-tts", action="store_true",
                     help="allow output when some narration segments fail TTS")
@@ -449,11 +449,10 @@ def main():
     if args.narration:
         narration_path = Path(args.narration)
     else:
-        # Cut mode remaps narration to the output timeline (narration_mapped.json);
-        # prefer it when present so a direct run in a cut work_dir voices the right
-        # timestamps. The orchestrator always passes --narration explicitly.
-        mapped = work_dir / "narration_mapped.json"
-        narration_path = mapped if mapped.exists() else work_dir / "narration.json"
+        # Canonical cut mode is cut-first/narrate-second: narration.json is already on the
+        # output timeline. A stale legacy narration_mapped.json in the same work_dir must not
+        # silently override it; legacy direct-cut callers can still pass --narration explicitly.
+        narration_path = work_dir / "narration.json"
     narration = json.loads(narration_path.read_text(encoding="utf-8"))
     tts_segments, engine_used = synthesize_tts(narration, work_dir)
     (work_dir / "tts_meta.json").write_text(

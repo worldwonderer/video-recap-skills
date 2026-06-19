@@ -32,7 +32,7 @@ flowchart LR
 ## Why use it?
 
 - **One key, runs anywhere.** ASR, VLM, and TTS all go through [Xiaomi MiMo](https://platform.xiaomimimo.com); `ffmpeg` is the only local dependency.
-- **Research before you write.** Get the plot and characters into `background_research.json` first, so the VLM actually knows who's who.
+- **Research when it matters.** When the title/story context is known or the brief says the substrate is thin, put character relationships and plot background in `background_research.json` so the VLM knows who's who; skip it when network/context is unavailable.
 - **Narration in blocks, original in blocks.** Narration plays in connected blocks, each voiced in one pass; in the gaps between, the original audio plays at full volume — roughly 7:3.
 - **Cut first, no drift.** `--edit-mode cut` renders the cut first, then you narrate against that timeline, so picture and voice stay in sync; an LLM pass reviews the draft before TTS.
 - **Keep editing in 剪映.** Optionally export a multi-track 剪映 draft — original, narration, BGM, and subtitles each on a track; the core render needs only `ffmpeg`.

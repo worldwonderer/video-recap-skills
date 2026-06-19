@@ -99,7 +99,7 @@
 
 ## narration.json
 
-Agent 撰写的解说词（字段详见 `agent-mode-workflow.md`）。full 模式下使用原视频时间；cut 模式下也先使用原视频时间，CLI 会生成 `narration_mapped.json`：
+Agent 撰写的解说词。full 模式下使用原视频时间；**orchestrated cut 模式（`video-recap --edit-mode cut`）下，第二次暂停时已经先剪出 `edited_source.mp4`，因此 `narration.json` 必须直接使用剪后成片的 OUTPUT 时间轴（0..成片总时长），不会再生成或消费 `narration_mapped.json`。只有 legacy direct `video-cut` 单 pass 路径才会把原视频时间的 narration remap 成 `narration_mapped.json`：
 
 ```json
 [
@@ -178,7 +178,7 @@ CLI 校验 `clip_plan.json` 后写出，额外包含输出时间轴：
 
 ## narration_mapped.json
 
-cut 模式下由 CLI 生成，`start/end` 已变成短视频输出时间，`source_start/source_end` 保留原视频时间：
+仅 legacy direct `video-cut` 单 pass 路径会生成。orchestrated cut 模式不使用它：Agent 在 pass2 直接按剪后成片 OUTPUT 时间轴写 `narration.json`。当 legacy 路径启用时，`start/end` 已变成短视频输出时间，`source_start/source_end` 保留原视频时间：
 
 ```json
 [
