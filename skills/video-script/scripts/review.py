@@ -451,13 +451,30 @@ def review_narration(work_dir, *, timeline="source"):
     return review
 
 
+def _auto_timeline(work_dir):
+    """Default the grounding timeline so a manual `review.py --work-dir` matches what the
+    orchestrator does: cut_output when this is a validated cut (clip_plan_validated.json +
+    edited_source.mp4 both present), else source. Without this, reviewing a cut narration on
+    the default 'source' timeline compares OUTPUT-time narration against SOURCE-time evidence
+    and floods false-positive 'hallucination' findings."""
+    work_dir = Path(work_dir)
+    if (work_dir / "clip_plan_validated.json").exists() and (work_dir / "edited_source.mp4").exists():
+        return "cut_output"
+    return "source"
+
+
 def main():
     ap = argparse.ArgumentParser(description="Review an agent-written narration.json for quality (LLM-as-judge).")
     ap.add_argument("--work-dir", required=True)
-    ap.add_argument("--timeline", choices=["source", "cut_output"], default="source",
-                    help="grounding timeline for narration.json; cut_output remaps source VLM/ASR via clip_plan_validated.json")
+    ap.add_argument("--timeline", choices=["source", "cut_output"], default=None,
+                    help="grounding timeline for narration.json; DEFAULT auto-detects cut_output when a "
+                         "validated cut (clip_plan_validated.json + edited_source.mp4) is present, else source. "
+                         "cut_output remaps source VLM/ASR to the cut output timeline via clip_plan_validated.json")
     args = ap.parse_args()
-    review = review_narration(args.work_dir, timeline=args.timeline)
+    timeline = args.timeline or _auto_timeline(args.work_dir)
+    if args.timeline is None and timeline != "source":
+        log(f"评审 grounding 时间轴自动判定为 {timeline}（检测到已校验的剪辑产物）")
+    review = review_narration(args.work_dir, timeline=timeline)
     print(json.dumps({
         "status": "reviewed",
         "verdict": review["verdict"],

@@ -122,6 +122,16 @@ def test_review_scene_grounding_tolerates_non_numeric_frame_fact_keys():
     assert "非数字锚点" in content
     assert "数字锚点" in content
 
+def test_auto_timeline_detects_validated_cut(tmp_path):
+    """A bare work_dir reviews on the source timeline; a validated cut (clip_plan_validated.json
+    + edited_source.mp4) auto-selects cut_output so manual review matches the orchestrator."""
+    assert review._auto_timeline(tmp_path) == "source"
+    (tmp_path / "clip_plan_validated.json").write_text("{}", encoding="utf-8")
+    assert review._auto_timeline(tmp_path) == "source"  # plan alone is not enough
+    (tmp_path / "edited_source.mp4").write_bytes(b"")
+    assert review._auto_timeline(tmp_path) == "cut_output"
+
+
 def test_cut_output_review_remaps_grounding_to_output_timeline():
     spans = [{"source_start": 10.0, "source_end": 20.0, "output_start": 0.0, "output_end": 10.0}]
     vlm, asr = review.remap_grounding_to_output_timeline(

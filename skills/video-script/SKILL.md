@@ -64,7 +64,7 @@ conservative auto-ASR mapping. See the brief's `原声留白字幕` section.
 
 A separate **quality** pass (LLM-as-judge), distinct from the mechanical lint below. Needs the chat API key (same as VLM).
 
-1. Run: `python3 scripts/review.py --work-dir <work_dir>`
+1. Run: `python3 scripts/review.py --work-dir <work_dir>` (auto-detects cut mode and grounds against the OUTPUT timeline when a validated cut is present; pass `--timeline source` to force source grounding)
 2. Open `narration_review.md`. For every `error` finding (ESPECIALLY `category=hallucination` — a claim
    not grounded in the visual/ASR evidence), revise `narration.json` and re-run review until either:
    - (a) verdict == `OK` with zero `error` findings, OR
