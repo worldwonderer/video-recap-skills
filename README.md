@@ -6,15 +6,15 @@
 
 中文 · [English](README.en.md)
 
-**在 claude code 仅需一句话把视频剪辑成解说视频。** ，本地只要 `ffmpeg` 加小米 MiMo Token Plan 的 API Key，不用 GPU、不用下载模型，macOS / Linux / Windows 均可运行。
+**在 claude code 仅需一句话把视频剪辑成解说视频。** 本地只要 `ffmpeg` 加小米 MiMo Token Plan 的 API Key，不用 GPU、不用下载模型，macOS / Linux / Windows 均可运行。
 
 ## 演示
 
 <video src="https://github.com/user-attachments/assets/aa96bd1d-ce4b-42bd-a7df-439aeb63dd18" width="640" controls></video>
 
-成片之外，还能一键导出**剪映草稿**手动精修，原片、解说、BGM、字幕各一轨：
+成片之外，还能一键导出**剪映草稿**手动精修，原片、解说、BGM、字幕：
 
-<img alt="导出的剪映草稿：原片、解说、BGM、字幕各一轨" src="docs/jianying-export.png" width="100%">
+<img alt="导出的剪映草稿：原片、解说、BGM、字幕" src="docs/jianying-export.png" width="100%">
 
 ## 这是什么
 
@@ -34,7 +34,7 @@ flowchart LR
 - **一个 key 跑全程。** ASR、VLM、TTS 全走[小米 MiMo](https://platform.xiaomimimo.com)，本地除了 `ffmpeg` 没别的依赖。
 - **该查资料时先查。** 片名/剧情明确或 brief 提示素材偏薄时，把人物关系、剧情背景存进 `background_research.json`，VLM 才更容易认出谁是谁。
 - **解说成块，原声也成块。** 解说一段段连着讲、整块一次配音，段间留白把精彩原声整段放回满音量——大致七三开。
-- **先剪后配，画面不串。** `--edit-mode cut` 先把长视频剪成成片，再对着成片写解说，时间轴天然对齐。
+- **先剪后配，画面对齐。** `--edit-mode cut` 先把长视频剪成成片，再对着成片写解说，时间轴天然对齐。
 - **能接着在剪映里改。** 可选导出多轨剪映草稿，原片、解说、BGM、字幕各占一轨。
 
 ## 安装
