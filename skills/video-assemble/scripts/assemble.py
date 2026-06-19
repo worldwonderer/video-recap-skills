@@ -1047,6 +1047,16 @@ def _subtitle_burn_filter(subtitle_path):
     return f"subtitles=filename='{_escape_subtitle_filter_path(subtitle_path)}'"
 
 
+def _output_downscale_filter(max_h):
+    """Lanczos downscale that forces BOTH output dimensions even (libx264/yuv420p need it).
+
+    -2 keeps the aspect ratio with an even width; 2*trunc(min(ih,H)/2) caps the height at H
+    yet forces it even, so an odd OUTPUT_MAX_HEIGHT (e.g. 721) cannot produce an odd height
+    that makes libx264 abort with an empty output file. 'min(ih,H)' only ever shrinks.
+    """
+    return f"scale=-2:'2*trunc(min(ih,{max_h})/2)':flags=lanczos"
+
+
 def final_loudnorm_filter():
     """Final-mix loudness normalization filter from CONFIG, or None when disabled.
 
@@ -1368,18 +1378,28 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
 
     # Video filter chain: mask source subtitles first (drawbox), then burn our subtitles
     # on top. Either one forces a re-encode; with neither, the video stream is copied.
+    crf = str(CONFIG.get("output_crf", 18))  # env_int already clamps to >=0; keep 0 (lossless) intact
+    preset = str(CONFIG.get("output_preset", "veryfast") or "veryfast")
+    max_h = int(CONFIG.get("output_max_height", 0) or 0)
     vf_chain = []
     mask_filter = _source_subtitle_mask_filter()
     if mask_filter:
         vf_chain.append(mask_filter)
     if CONFIG.get("burn_subtitles", False):
         vf_chain.append(_subtitle_burn_filter(ass_path))
+    # Downscale LAST so the mask + burned subtitles render at native resolution and are then
+    # scaled down with the frame (crisp). The helper forces both dimensions even so an odd
+    # OUTPUT_MAX_HEIGHT can't crash libx264; 'min(ih,H)' only ever shrinks the source.
+    if max_h > 0:
+        vf_chain.append(_output_downscale_filter(max_h))
     if vf_chain:
-        cmd += ["-vf", ",".join(vf_chain), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
-        notes = ([] + (["遮挡原字幕"] if mask_filter else []) + (["压制解说字幕"] if CONFIG.get("burn_subtitles", False) else []))
-        log("视频重编码: " + " + ".join(notes))
+        cmd += ["-vf", ",".join(vf_chain), "-c:v", "libx264", "-preset", preset, "-crf", crf]
+        notes = ((["遮挡原字幕"] if mask_filter else [])
+                 + (["压制解说字幕"] if CONFIG.get("burn_subtitles", False) else [])
+                 + ([f"缩放≤{max_h}p"] if max_h > 0 else []))
+        log(f"视频重编码: {' + '.join(notes)} (crf={crf}, preset={preset})")
     elif CONFIG.get("force_video_reencode", False):
-        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
+        cmd += ["-c:v", "libx264", "-preset", preset, "-crf", crf]
     else:
         cmd += ["-c:v", "copy"]
 
