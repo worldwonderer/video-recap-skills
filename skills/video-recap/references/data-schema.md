@@ -193,6 +193,23 @@ CLI 校验 `clip_plan.json` 后写出，额外包含输出时间轴：
 ]
 ```
 
+## original_subtitles.json / user_subtitles.{json,srt,ass}（可选，原声留白字幕）
+
+解说块之间的原声留白会把【原声台词】烧成字幕（assemble 阶段用 `「」` 包裹以区分解说）。来源优先级（高→低）：
+
+1. **`work_dir/user_subtitles.json`**（用户自带，最准）— 数组 `[{start,end,text}]` 默认按**成片 OUTPUT** 时间轴直接使用；也可写成 `{"timeline": "source"|"output", "lines": [...]}`，`source` 表示按**原片**时间轴给出，由 assemble 依 `clip_plan_validated.json` 映射到成片。
+2. **`work_dir/user_subtitles.srt` / `.ass`**（用户自带）— 默认按**原片**时间轴解析后映射到成片。
+3. **`work_dir/original_subtitles.json`**（Agent 校对，cut pass2 写）— OUTPUT 时间轴 `[{start,end,text}]`，订正 ASR 错字/人名、只写留白里真正出声的句子。
+4. **ASR 兜底** — 无上述文件时，用 `asr_result.json` 按留白粗略映射（中点估时，可能偏多偏乱）。
+
+来源 1–3 为「精确来源」：每条按句**区间裁剪**落到所覆盖的留白边界（跨边界会拆分），不走 ASR 兜底的中点估时；over-dense 行截断显示而非丢弃。
+
+```json
+[
+  {"start": 2.0, "end": 5.0, "text": "原声台词一句"}
+]
+```
+
 ## background_research.json
 
 可选的背景调研结果（由 Agent 使用任意可用搜索/浏览方式整理）：

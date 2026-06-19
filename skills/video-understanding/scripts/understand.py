@@ -16,7 +16,12 @@ from lib import CONFIG, log, get_video_duration, api_call, file_fingerprint, loa
 from extract import extract_frames
 from detect import detect_scenes, detect_silence_periods
 from asr import transcribe_audio
-from vlm import analyze_scenes, analyze_video_overview, mimo_video_overview_cache_fresh
+from vlm import (
+    analyze_scenes,
+    analyze_video_overview,
+    mimo_video_overview_cache_fresh,
+    _is_mimo_chunk_usable,
+)
 from brief import build_agent_brief, assess_understanding_substrate
 
 
@@ -96,6 +101,47 @@ def _write_mimo_overview_status(work_dir, status, message="", artifact=None, *, 
         "message": message,
         "artifact": artifact,
     })
+
+
+def _merge_overview_into_scenes(scenes, overview_path):
+    """Make the MiMo video-overview the PRIMARY per-scene description when present.
+
+    The frame VLM still provides `frame_facts` (timestamped grounding) and `depth_analysis`;
+    this only replaces the per-scene `description` with the motion-aware video-overview analysis,
+    keeping the original frame description under `frame_description` for provenance/fallback.
+    Scenes whose overview chunk was missing or moderation-rejected keep the frame description.
+
+    In-memory only — `vlm_analysis.json` on disk stays the pure frame-VLM product, so the VLM
+    cache stays coherent and the merge is re-derived (frames + overview) every run. Because
+    `frame_facts` is untouched, `assess_understanding_substrate` (which grades on frame_facts +
+    ASR) cannot regress; richer descriptions can only help.
+    """
+    overview = _load_json(overview_path) if Path(overview_path).exists() else None
+    if not isinstance(overview, dict):
+        return scenes
+    by_scene = {}
+    for chunk in overview.get("chunks") or []:
+        if not isinstance(chunk, dict):
+            continue
+        content = str(chunk.get("content", "")).strip()
+        if content and _is_mimo_chunk_usable(content):
+            by_scene.setdefault(chunk.get("scene_id"), []).append(content)
+    if not by_scene:
+        return scenes
+    enriched = 0
+    for scene in scenes or []:
+        if not isinstance(scene, dict):
+            continue
+        contents = by_scene.get(scene.get("scene_id"))
+        if not contents:
+            continue
+        scene.setdefault("frame_description", scene.get("description", ""))
+        scene["description"] = "\n".join(contents)
+        scene["description_source"] = "mimo_video_overview"
+        enriched += 1
+    if enriched:
+        log(f"已用 MiMo 视频概览增强 {enriched} 个场景的描述（逐帧 frame_facts 保留作锚点）")
+    return scenes
 
 
 def _write_consolidation_status(work_dir, status, message="", artifacts=None, *, enabled=True, do_asr=False, do_index=True):
@@ -484,6 +530,10 @@ def main():
     else:
         overview_path.unlink(missing_ok=True)
         _write_mimo_overview_status(work_dir, "disabled", "MiMo 分片视频概览未启用", None, enabled=False)
+
+    # Make the video-overview the primary per-scene description (frame_facts stay the anchor).
+    # No-op/revert when overview is absent, so disabling it cleanly returns to frame descriptions.
+    vlm_analysis = _merge_overview_into_scenes(vlm_analysis, overview_path)
 
     # optional consolidation (整理): build the understanding index before the brief folds it in
     if args.consolidate or args.consolidate_asr:

@@ -48,6 +48,14 @@ def _parse_vlm_depth_response(raw_text):
     return description, depth_analysis, frame_facts
 
 
+def _max_frames_for_duration(duration):
+    """Frames the VLM sees for one scene: ~1 per `vlm_seconds_per_frame`, floor 3, capped by
+    `vlm_max_frames`. Replaces the old hard cap of 6 that starved long/merged scenes."""
+    spf = float(CONFIG.get("vlm_seconds_per_frame", 4.0) or 4.0)
+    ceiling = int(CONFIG.get("vlm_max_frames", 16) or 16)
+    return max(3, min(ceiling, round(max(0.0, float(duration)) / spf)))
+
+
 def analyze_scenes(scenes, frames, work_dir):
     """对每个场景的关键帧调用 VLM 进行视觉分析（并行）"""
     if not scenes:
@@ -99,10 +107,7 @@ def analyze_scenes(scenes, frames, work_dir):
             scene_frames = [min(frames, key=lambda f: abs(frame_times.get(f, 999) - mid))]
 
         duration = scene["end"] - scene["start"]
-        if duration > 8:
-            max_frames = min(6, max(3, int(duration / 3)))
-        else:
-            max_frames = 3
+        max_frames = _max_frames_for_duration(duration)
 
         if len(scene_frames) > max_frames:
             step = len(scene_frames) / max_frames
@@ -126,7 +131,7 @@ def analyze_scenes(scenes, frames, work_dir):
         payload = {
             "model": CONFIG["vlm_model"],
             "messages": [{"role": "user", "content": content_parts}],
-            "max_tokens": 800,
+            "max_tokens": int(CONFIG.get("vlm_max_tokens", 1500) or 1500),
         }
 
         log(f"VLM 分析场景 {i+1}/{len(scenes)} ({len(scene_frames)} 帧)...")
@@ -150,7 +155,7 @@ def analyze_scenes(scenes, frames, work_dir):
                 payload = {
                     "model": CONFIG["vlm_model"],
                     "messages": [{"role": "user", "content": retry_parts}],
-                    "max_tokens": 800,
+                    "max_tokens": int(CONFIG.get("vlm_max_tokens", 1500) or 1500),
                 }
 
         if not raw_response.strip():
@@ -539,10 +544,15 @@ def analyze_video_overview(video_path, work_dir, scenes=None):
         return None
 
     if unusable_chunks:
+        # Degrade gracefully instead of aborting the whole understanding: some chunks get
+        # moderation-rejected (e.g. a burned-in watermark / violent frames). Write the overview
+        # from the usable chunks; the scenes whose chunks were rejected simply fall back to the
+        # frame-VLM description downstream. (Aborting here would make overview unsafe to enable
+        # by default on any moderated source.)
         sample = ", ".join(str(chunk["chunk_id"] + 1) for chunk in unusable_chunks[:5])
-        raise RuntimeError(
-            f"MiMo 视频概览部分分片无有效内容 {len(unusable_chunks)}/{len(chunks)}，"
-            f"未写入最终缓存；已保留可用分片，待重试分片: {sample}"
+        log(
+            f"MiMo 视频概览：{len(unusable_chunks)}/{len(chunks)} 段无有效内容（疑似内容审核），"
+            f"以可用分片降级产出，未覆盖场景回退到逐帧描述。样例分片: {sample}"
         )
 
     content = "\n\n".join(
@@ -560,6 +570,8 @@ def analyze_video_overview(video_path, work_dir, scenes=None):
         "fps": CONFIG.get("mimo_video_fps", 2.0),
         "media_resolution": CONFIG.get("mimo_media_resolution", "default"),
         "input": "scene_chunks",
+        "partial": bool(unusable_chunks),
+        "unusable_chunk_count": len(unusable_chunks),
         "source_video_fingerprint": file_fingerprint(video_path),
         "chunk_max_seconds": CONFIG.get("mimo_video_chunk_max_seconds", 20.0),
         "settings": mimo_video_settings_fingerprint(),

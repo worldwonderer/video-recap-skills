@@ -517,8 +517,10 @@ def test_is_mimo_chunk_usable():
 
 
 
-def test_mixed_unusable_chunks_do_not_write_fresh_overview(monkeypatch, tmp_path):
-    """A single empty/refused MiMo chunk must remain retryable, not become a fresh final overview."""
+def test_mixed_unusable_chunks_degrade_to_usable_overview(monkeypatch, tmp_path):
+    """A single empty/refused MiMo chunk no longer aborts the whole overview: it degrades to the
+    usable chunks (partial=true) so enabling overview by default is safe on moderated sources;
+    the scene whose chunk was rejected falls back to the frame description downstream."""
     video = tmp_path / "video.mp4"
     video.write_bytes(b"fake-video")
     monkeypatch.setitem(CONFIG, "mimo_video_overview", True)
@@ -549,13 +551,17 @@ def test_mixed_unusable_chunks_do_not_write_fresh_overview(monkeypatch, tmp_path
     monkeypatch.setattr("vlm._analyze_mimo_video_chunk", mixed)
 
     scenes = [{"scene_id": 1, "start": 0.0, "end": 5.0}]
-    with pytest.raises(RuntimeError, match="部分分片无有效内容"):
-        analyze_video_overview(video, tmp_path, scenes)
+    overview = analyze_video_overview(video, tmp_path, scenes)
 
-    assert not (tmp_path / "mimo_video_overview.json").exists()
-    partial = json.loads((tmp_path / "mimo_video_overview.partial.json").read_text(encoding="utf-8"))
-    assert len(partial["chunks"]) == 2
-    assert all(item["content"] for item in partial["chunks"].values())
+    # degraded, not aborted: a final overview is written from the usable chunks only
+    assert overview is not None
+    assert overview["partial"] is True
+    assert overview["unusable_chunk_count"] >= 1
+    final = json.loads((tmp_path / "mimo_video_overview.json").read_text(encoding="utf-8"))
+    assert len(final["chunks"]) >= 1
+    assert all(item["content"] for item in final["chunks"])
+    # the incremental partial cache is cleaned up once the final overview is written
+    assert not (tmp_path / "mimo_video_overview.partial.json").exists()
 
 
 def test_final_overview_cache_rejects_unusable_cached_chunk(monkeypatch, tmp_path):

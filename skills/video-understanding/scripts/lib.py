@@ -173,14 +173,18 @@ CONFIG = {
     "mimo_tts_style_source": "env" if os.environ.get("MIMO_TTS_STYLE") else "default",
     "mimo_media_resolution": os.environ.get("MIMO_MEDIA_RESOLUTION", "default"),
     "mimo_media_resolution_source": "env" if os.environ.get("MIMO_MEDIA_RESOLUTION") else "default",
-    "mimo_video_overview": env_bool("MIMO_VIDEO_OVERVIEW", False),
+    "mimo_video_overview": env_bool("MIMO_VIDEO_OVERVIEW", False),  # opt-in (--mimo-video-overview / =1); when on it becomes the PRIMARY per-scene description, frames stay the anchor/fallback
     "mimo_video_overview_source": "env" if os.environ.get("MIMO_VIDEO_OVERVIEW") else "default",
-    "mimo_video_fps": env_float("MIMO_VIDEO_FPS", 2.0, minimum=0.1),
+    "mimo_video_fps": env_float("MIMO_VIDEO_FPS", 3.0, minimum=0.1),
     "mimo_video_fps_source": "env" if os.environ.get("MIMO_VIDEO_FPS") else "default",
     "mimo_video_chunk_max_seconds": env_float("MIMO_VIDEO_CHUNK_MAX_SECONDS", 20.0, minimum=1.0),
     "mimo_video_chunk_min_seconds": env_float("MIMO_VIDEO_CHUNK_MIN_SECONDS", 1.0, minimum=0.2),
     "mimo_video_chunk_timeout": env_int("MIMO_VIDEO_CHUNK_TIMEOUT", 180, minimum=1),
     "mimo_video_base64_max_mb": env_float("MIMO_VIDEO_BASE64_MAX_MB", 45.0, minimum=1.0),
+    # Per-scene frame VLM sampling — scale frames with scene length instead of a hard cap of 6
+    "vlm_seconds_per_frame": env_float("VLM_SECONDS_PER_FRAME", 4.0, minimum=0.5),
+    "vlm_max_frames": env_int("VLM_MAX_FRAMES", 16, minimum=3),
+    "vlm_max_tokens": env_int("VLM_MAX_TOKENS", 1500, minimum=200),
     "mimo_video_prompt": os.environ.get(
         "MIMO_VIDEO_PROMPT",
         "请用中文分析这个视频分片的主要人物、场景变化、关键动作、情绪走向和剧情冲突，"
