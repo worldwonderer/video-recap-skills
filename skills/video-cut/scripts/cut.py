@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 
 from lib import CONFIG, get_video_duration, log, run_cmd
@@ -309,6 +310,92 @@ def snap_clip_ends_to_lines(plan, silence_periods, video_duration, max_extend):
     return result
 
 
+def _detect_shot_changes(video, win_start, win_end, threshold, lead=0.25):
+    """Absolute source-time hard cuts inside [win_start, win_end] via ffmpeg's scene metric.
+
+    Input-seek to a little before the window: the rebased output PTS restarts at ~0 at the seek
+    target, so `seek + pts_time` recovers absolute source time. The `lead` keeps the seek/keyframe
+    settling artifact frame outside [win_start, win_end] so it is filtered out, not mistaken for a
+    cut. Returns [] on any ffmpeg trouble (advisory pass must never block the cut).
+    """
+    win_start = max(0.0, float(win_start))
+    win_end = max(win_start, float(win_end))
+    if win_end - win_start < 1e-3:
+        return []
+    seek = max(0.0, win_start - lead)
+    dur = (win_end - seek) + 0.1
+    cmd = ["ffmpeg", "-hide_banner", "-nostats", "-ss", f"{seek:.3f}", "-i", str(video),
+           "-t", f"{dur:.3f}", "-an", "-sn",
+           "-filter:v", f"select='gt(scene,{threshold})',showinfo", "-f", "null", "-"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except (OSError, ValueError):
+        return []
+    changes = []
+    for m in re.finditer(r"pts_time:([0-9.]+)", proc.stderr or ""):
+        t = seek + float(m.group(1))
+        if win_start <= t <= win_end:
+            changes.append(round(t, 3))
+    return sorted(set(changes))
+
+
+def snap_clips_off_shot_changes(plan, video, video_duration, margin, threshold, min_keep=0.5):
+    """Nudge each clip's boundaries clear of the ORIGINAL footage's hard cuts to avoid 闪烁.
+
+    A clip whose source_start sits just before a shot-change opens on a brief sliver of the old
+    shot that then hard-cuts again; one whose source_end sits just after a shot-change closes on a
+    sliver of the next shot. Both flash at the edit point. So:
+      - move source_start FORWARD onto a shot-change in (start, start+margin]  → clean open
+      - move source_end   BACK   onto a shot-change in [end-margin, end)       → clean close
+    Boundaries already on a cut, or with no nearby cut, are left untouched. Snaps that would shrink
+    a clip below `min_keep` are skipped. Recomputes the output timeline cursor-based. Advisory: any
+    detection failure leaves that boundary as-is.
+    """
+    margin = float(margin)
+    if margin <= 0 or not plan.get("clips"):
+        return plan
+    clips = [dict(c) for c in plan["clips"]]
+    n_start = n_end = 0
+    for clip in clips:
+        s = float(clip["source_start"])
+        e = float(clip["source_end"])
+        new_s, new_e = s, e
+        # Opening: a shot-change just AFTER source_start leaves an old-shot sliver before it.
+        start_changes = [c for c in _detect_shot_changes(video, s, min(e, s + margin), threshold)
+                         if c > s + 1e-3]
+        if start_changes:
+            cand = max(start_changes)          # open after the last rapid cut in the window
+            if cand < e - min_keep:
+                new_s = round(cand, 3)
+        # Closing: a shot-change just BEFORE source_end leaves a next-shot sliver after it.
+        end_changes = [c for c in _detect_shot_changes(video, max(new_s, e - margin), e, threshold)
+                       if c < e - 1e-3]
+        if end_changes:
+            cand = min(end_changes)            # close before the first rapid cut in the window
+            if cand > new_s + min_keep:
+                new_e = round(cand, 3)
+        n_start += new_s != s
+        n_end += new_e != e
+        clip["source_start"] = new_s
+        clip["source_end"] = new_e
+
+    # Recompute output timeline cursor-based (same cursor logic as snap_clip_ends_to_lines).
+    cursor = 0.0
+    for clip in clips:
+        duration = round(clip["source_end"] - clip["source_start"], 3)
+        clip["duration"] = duration
+        clip["output_start"] = round(cursor, 3)
+        clip["output_end"] = round(cursor + duration, 3)
+        cursor += duration
+
+    if n_start or n_end:
+        log(f"避让原片切镜头: {n_start} 个起点前移、{n_end} 个终点回收 (margin={margin}s, 阈值={threshold})")
+    result = dict(plan)
+    result["clips"] = clips
+    result["total_duration"] = round(sum(c["duration"] for c in clips), 3)
+    return result
+
+
 def source_time_to_output_time(source_time, clips):
     """Map a source timestamp into the post-concat output timeline."""
     ts = float(source_time)
@@ -567,6 +654,18 @@ def main():
             silence_periods,
             video_duration,
             CONFIG.get("clip_snap_max_extend", 2.0),
+        )
+
+    # Keep boundaries off the original footage's hard cuts (avoids 闪烁 at the edit point).
+    # Runs after the line-snap so it refines the final source ranges; video-clean wins on the rare
+    # boundary that is both in a quiet window and beside a shot-change.
+    if CONFIG.get("scene_cut_snap", True):
+        validated_plan = snap_clips_off_shot_changes(
+            validated_plan,
+            args.video,
+            video_duration,
+            CONFIG.get("scene_cut_snap_margin", 0.5),
+            CONFIG.get("scene_cut_detect_threshold", 0.4),
         )
 
     if isinstance(validated_plan, dict):
