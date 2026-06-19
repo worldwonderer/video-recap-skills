@@ -6,7 +6,7 @@ import json
 
 from brief import (CONFIG, build_agent_brief, _chunk_asr_for_writing, _load_clean_asr,
                    _load_consolidation, _format_consolidation, _clean_asr_prompt_fingerprint,
-                   _index_prompt_fingerprint)
+                   _index_prompt_fingerprint, _load_optional_stage_status)
 
 SCENES = [{"scene_id": 0, "start": 0.0, "end": 6.0, "description": "门口对峙"}]
 ASR = [{"start": 1.0, "end": 5.0, "text": "第一句对白。第二句反击。"}]
@@ -35,6 +35,62 @@ def test_brief_noop_without_consolidation(tmp_path):
     written = json.loads((tmp_path / "asr_writing_chunks.json").read_text(encoding="utf-8"))
     assert written == _chunk_asr_for_writing(ASR, SCENES)
     assert (tmp_path / "timeline_fusion.json").exists()
+
+
+def test_optional_stage_warnings_surface_failed_overview_and_consolidation(tmp_path):
+    (tmp_path / "mimo_video_overview.status.json").write_text(json.dumps({
+        "stage": "mimo_video_overview",
+        "enabled": True,
+        "status": "failed",
+        "message": "quota timeout with stack trace that should not be repeated" * 5,
+        "artifact": None,
+    }), encoding="utf-8")
+    (tmp_path / "consolidation.status.json").write_text(json.dumps({
+        "stage": "consolidation",
+        "enabled": True,
+        "do_asr": False,
+        "do_index": True,
+        "status": "failed",
+        "message": "index api failed",
+        "artifacts": [],
+    }), encoding="utf-8")
+
+    text = build_agent_brief(SCENES, ASR, SILENCE, 6.0, tmp_path, mimo_overview_enabled=True).read_text(encoding="utf-8")
+
+    assert "Optional stage warnings" in text
+    assert "mimo_video_overview: failed" in text
+    assert "consolidation: failed" in text
+    assert "quota timeout" in text
+
+
+def test_optional_stage_warnings_flag_missing_enabled_artifacts(tmp_path):
+    (tmp_path / "mimo_video_overview.status.json").write_text(json.dumps({
+        "stage": "mimo_video_overview",
+        "enabled": True,
+        "status": "ok",
+        "message": "ok",
+        "artifact": "mimo_video_overview.json",
+    }), encoding="utf-8")
+    (tmp_path / "consolidation.status.json").write_text(json.dumps({
+        "stage": "consolidation",
+        "enabled": True,
+        "do_asr": False,
+        "do_index": True,
+        "status": "ok",
+        "message": "ok",
+        "artifacts": ["understanding_index.json"],
+    }), encoding="utf-8")
+
+    text = build_agent_brief(SCENES, ASR, SILENCE, 6.0, tmp_path, mimo_overview_enabled=True).read_text(encoding="utf-8")
+
+    assert "mimo_video_overview: missing_artifact" in text
+    assert "consolidation: missing_index" in text
+
+
+def test_optional_stage_status_loader_is_defensive(tmp_path):
+    assert _load_optional_stage_status(tmp_path, "missing.status.json") == {}
+    (tmp_path / "bad.status.json").write_text("[1, 2, 3]", encoding="utf-8")
+    assert _load_optional_stage_status(tmp_path, "bad.status.json") == {}
 
 
 def test_brief_folds_in_index_when_present(tmp_path):

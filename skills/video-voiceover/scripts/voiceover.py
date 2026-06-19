@@ -371,6 +371,7 @@ def tts_settings_fingerprint(engine=None):
         "mimo_tts_model": CONFIG.get("mimo_tts_model"),
         "mimo_tts_voice": CONFIG.get("mimo_tts_voice"),
         "mimo_tts_style": CONFIG.get("mimo_tts_style"),
+        "narration_speed": float(CONFIG.get("narration_speed", 1.0) or 1.0),
     }
 
 

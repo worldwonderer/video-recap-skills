@@ -197,7 +197,13 @@ def _scene_grounding(vlm_analysis, limit=60):
         fact_txt = ""
         picks = []
         if isinstance(facts, dict):  # canonical shape: {"<ts>": ["action", ...]} (vlm.py)
-            for ts in sorted(facts.keys(), key=lambda x: float(x)):
+            def fact_sort_key(value):
+                try:
+                    return (0, float(value))
+                except (TypeError, ValueError):
+                    return (1, str(value))
+
+            for ts in sorted(facts.keys(), key=fact_sort_key):
                 vals = facts[ts]
                 picks.extend(vals if isinstance(vals, list) else [str(vals)])
         elif isinstance(facts, list):  # defensive: legacy list shape
@@ -221,6 +227,88 @@ def _asr_grounding(asr_result, limit=80):
     return "\n".join(lines)
 
 
+def _clip_text(text, limit):
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    return value[:limit]
+
+
+def _load_review_research_context(work_dir):
+    path = Path(work_dir) / "background_research.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _format_review_research_context(research, limit=1200):
+    """Compact background_research.json for the quality reviewer.
+
+    It is supporting context only: hallucination checks still require visual/ASR grounding.
+    """
+    if not isinstance(research, dict) or not research:
+        return ""
+    lines = []
+    for key, label in (
+        ("synopsis", "Synopsis"),
+        ("episode_context", "Episode context"),
+        ("worldbuilding", "Worldbuilding"),
+    ):
+        value = _clip_text(research.get(key), 500)
+        if value:
+            lines.append(f"- {label}: {value}")
+
+    characters = research.get("characters")
+    if isinstance(characters, dict) and characters:
+        lines.append("- Characters:")
+        for name, desc in list(characters.items())[:12]:
+            clean_name = _clip_text(name, 60)
+            clean_desc = _clip_text(desc, 160)
+            if clean_name:
+                lines.append(f"    - {clean_name}：{clean_desc}")
+
+    details = research.get("character_details")
+    if isinstance(details, dict) and details:
+        lines.append("- Character details:")
+        for name, info in list(details.items())[:8]:
+            if not isinstance(info, dict):
+                continue
+            bits = []
+            aliases = info.get("aliases")
+            if isinstance(aliases, list) and aliases:
+                bits.append("别名 " + "/".join(_clip_text(alias, 40) for alias in aliases[:4] if _clip_text(alias, 40)))
+            role = _clip_text(info.get("role"), 80)
+            if role:
+                bits.append(role)
+            rels = info.get("relationships")
+            if isinstance(rels, list) and rels:
+                bits.append("；".join(_clip_text(rel, 80) for rel in rels[:4] if _clip_text(rel, 80)))
+            clean_name = _clip_text(name, 60)
+            if clean_name and bits:
+                lines.append(f"    - {clean_name}：{'；'.join(bits)}")
+
+    arcs = research.get("plot_arcs")
+    if isinstance(arcs, list) and arcs:
+        lines.append("- Plot arcs:")
+        for arc in arcs[:8]:
+            if isinstance(arc, dict):
+                name = _clip_text(arc.get("name"), 80)
+                desc = _clip_text(arc.get("description"), 180)
+                status = _clip_text(arc.get("status"), 40)
+                if name or desc:
+                    tail = f" [{status}]" if status else ""
+                    lines.append(f"    - {name}：{desc}{tail}")
+            else:
+                val = _clip_text(arc, 180)
+                if val:
+                    lines.append(f"    - {val}")
+
+    text = "\n".join(lines).strip()
+    return text[:limit]
+
+
 def _format_draft(narration):
     lines = []
     for i, seg in enumerate(narration or []):
@@ -235,13 +323,16 @@ def _format_draft(narration):
     return "\n".join(lines)
 
 
-def build_review_messages(narration, vlm_analysis, asr_result):
+def build_review_messages(narration, vlm_analysis, asr_result, work_dir=None, research_context=None):
     """Pure: assemble the reviewer chat messages (testable without the API)."""
     grounding = _scene_grounding(vlm_analysis)
     dialogue = _asr_grounding(asr_result)
     draft = _format_draft(narration)
+    if research_context is None and work_dir is not None:
+        research_context = _format_review_research_context(_load_review_research_context(work_dir))
     user = (
         f"{RUBRIC}\n\n"
+        f"## 背景资料（辅助上下文，不可替代画面/对白证据）\n{research_context or '(无)'}\n\n"
         f"## 画面证据（场景描述 + 帧实）\n{grounding or '(无)'}\n\n"
         f"## 对白（ASR）\n{dialogue or '(无对白/静音视频)'}\n\n"
         f"## 解说草稿（共 {len([s for s in (narration or []) if isinstance(s, dict)])} 段）\n{draft or '(空)'}\n"
@@ -327,7 +418,7 @@ def review_narration(work_dir, *, timeline="source"):
     elif timeline != "source":
         raise SystemExit(f"unknown review timeline: {timeline}")
 
-    messages = build_review_messages(narration, vlm_analysis, asr_result)
+    messages = build_review_messages(narration, vlm_analysis, asr_result, work_dir=work_dir)
     resp = api_call({
         "model": CONFIG.get("vlm_model", ""),
         "messages": messages,

@@ -184,11 +184,11 @@ CONFIG = {
     "speech_rate": 3.5,
     "speech_safety_margin": 0.85,  # 保守系数：TTS 实际语速有 ±20% 波动
     "fade_ms": 300,  # TTS fade-in/fade-out 时长(ms)
-    "breath_ms": 250,  # 段间呼吸空间(ms)；连续原声铺底风格用短停顿保持节奏
-    # 解说密度目标（连续原声铺底的高密度 recap 风格；写入 brief 并由 lint 检查）
-    "target_segments_per_minute": 9.6,   # 目标解说密度（段/分钟）
-    "min_segments_per_minute": 6.24,     # 低于此密度时 lint 警告
-    "max_narration_gap_seconds": 11.0,   # 相邻解说段最大间隔；超过则 lint 警告（保持连续铺底）
+    "breath_ms": 250,  # 段间呼吸空间(ms)；block recap 块内连贯、块间留原声呼吸
+    # Legacy single-pass cut mapping density fields; current writing uses block coverage controls below.
+    "target_segments_per_minute": 9.6,   # legacy single-pass cut mapping report only; block recap uses narration_coverage_*
+    "min_segments_per_minute": 6.24,     # legacy single-pass cut mapping report only
+    "max_narration_gap_seconds": 11.0,   # legacy single-pass cut mapping report only
     "ducking_mode": "fixed",  # fixed | sidechaincompress | none
     "ducking_threshold": 0.15,
     "ducking_ratio": 3,

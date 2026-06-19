@@ -213,6 +213,11 @@ def test_research_context_feeds_vlm_from_background_research(tmp_path):
         "synopsis": "现代灵魂穿越古代的故事。",
         "episode_context": "第一集，主角范闲登场。",
         "characters": {"范闲": "核心男主角", "张庆": "年轻黑衣男子，戴眼镜，大学生"},
+        "character_details": {
+            "范闲": {"aliases": ["小范大人"], "role": "主角", "relationships": ["与五竹互相信任"]},
+        },
+        "plot_arcs": [{"name": "身世线", "description": "查清母亲死亡真相", "status": "进行中"}],
+        "cultural_notes": [{"item": "监察院", "explanation": "权力机构"}],
         "noise": "x" * 5000,
     }, ensure_ascii=False), encoding="utf-8")
 
@@ -221,6 +226,11 @@ def test_research_context_feeds_vlm_from_background_research(tmp_path):
     assert "现代灵魂穿越古代" in ctx
     assert "范闲（核心男主角）" in ctx
     assert "张庆（年轻黑衣男子，戴眼镜，大学生）" in ctx
+    assert "小范大人" in ctx
+    assert "与五竹互相信任" in ctx
+    assert "身世线" in ctx and "查清母亲死亡真相" in ctx
+    assert "监察院" in ctx
+    assert "noise" not in ctx
     assert len(ctx) <= 1200  # bounded so it never blows the VLM prompt budget
 
 

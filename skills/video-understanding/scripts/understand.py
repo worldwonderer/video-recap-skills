@@ -74,6 +74,50 @@ def _remove_stage_meta(artifact_path):
     _artifact_meta_path(artifact_path).unlink(missing_ok=True)
 
 
+def _short_status_message(message, limit=240):
+    """Compact optional-stage messages for sidecars; no tracebacks or bulky payloads."""
+    text = " ".join(str(message or "").split())
+    return text[:limit]
+
+
+def _write_optional_stage_status(work_dir, filename, payload):
+    path = Path(work_dir) / filename
+    safe = dict(payload)
+    safe["message"] = _short_status_message(safe.get("message", ""))
+    path.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _write_mimo_overview_status(work_dir, status, message="", artifact=None, *, enabled=None):
+    return _write_optional_stage_status(work_dir, "mimo_video_overview.status.json", {
+        "stage": "mimo_video_overview",
+        "enabled": bool(CONFIG.get("mimo_video_overview", False)) if enabled is None else bool(enabled),
+        "status": status,
+        "message": message,
+        "artifact": artifact,
+    })
+
+
+def _write_consolidation_status(work_dir, status, message="", artifacts=None, *, enabled=True, do_asr=False, do_index=True):
+    return _write_optional_stage_status(work_dir, "consolidation.status.json", {
+        "stage": "consolidation",
+        "enabled": bool(enabled),
+        "do_asr": bool(do_asr),
+        "do_index": bool(do_index),
+        "status": status,
+        "message": message,
+        "artifacts": list(artifacts or []),
+    })
+
+
+def _present_consolidation_artifacts(work_dir):
+    work_dir = Path(work_dir)
+    return [
+        name for name in ("understanding_index.json", "asr_clean.json")
+        if (work_dir / name).exists()
+    ]
+
+
 def _scene_cache_payload(video_path):
     return {
         "schema_version": 1,
@@ -207,14 +251,19 @@ def _frames_cache_valid(video_path, work_dir, fps):
     return manifest == expected
 
 
+def _clip_text(text, limit):
+    value = " ".join(str(text or "").split()).strip()
+    return value[:limit]
+
+
 def _research_context(work_dir):
     """Fold background_research.json into a compact context string for the VLM prompt.
 
     The agent does story research first (per references/research-guide.md) and writes
-    work_dir/background_research.json; this surfaces the synopsis, episode/world context,
-    and named characters so per-scene VLM analysis can name people and read scenes with
-    plot knowledge instead of labelling everyone "黑衣男子". Returns "" when no usable
-    research file is present, so behaviour is unchanged without it.
+    work_dir/background_research.json; this surfaces synopsis, named characters,
+    relationships, plot arcs, and cultural notes so scene VLM analysis can name people
+    and read scenes with plot knowledge instead of labelling everyone "黑衣男子".
+    Returns "" when no usable research file is present, so behaviour is unchanged.
     """
     path = Path(work_dir) / "background_research.json"
     if not path.exists():
@@ -227,17 +276,75 @@ def _research_context(work_dir):
         return ""
     parts = []
     for key in ("synopsis", "episode_context", "worldbuilding"):
-        val = str(data.get(key, "")).strip()
+        val = _clip_text(data.get(key), 320)
         if val:
             parts.append(val)
     chars = data.get("characters")
     if isinstance(chars, dict) and chars:
         named = "；".join(
-            f"{name}（{str(desc).strip()}）" for name, desc in list(chars.items())[:12]
-            if str(name).strip()
+            f"{_clip_text(name, 40)}（{_clip_text(desc, 120)}）"
+            for name, desc in list(chars.items())[:12]
+            if _clip_text(name, 40)
         )
         if named:
             parts.append("主要人物：" + named)
+    details = data.get("character_details")
+    if isinstance(details, dict) and details:
+        detail_lines = []
+        for name, info in list(details.items())[:8]:
+            if not isinstance(info, dict):
+                continue
+            bits = []
+            aliases = info.get("aliases")
+            if isinstance(aliases, list) and aliases:
+                clean_aliases = [_clip_text(alias, 30) for alias in aliases[:3]]
+                clean_aliases = [alias for alias in clean_aliases if alias]
+                if clean_aliases:
+                    bits.append("别名" + "/".join(clean_aliases))
+            role = _clip_text(info.get("role"), 60)
+            if role:
+                bits.append(role)
+            rels = info.get("relationships")
+            if isinstance(rels, list) and rels:
+                clean_rels = [_clip_text(rel, 60) for rel in rels[:3]]
+                bits.extend(rel for rel in clean_rels if rel)
+            clean_name = _clip_text(name, 40)
+            if clean_name and bits:
+                detail_lines.append(f"{clean_name}（{'；'.join(bits)}）")
+        if detail_lines:
+            parts.append("人物关系：" + "；".join(detail_lines))
+    arcs = data.get("plot_arcs")
+    if isinstance(arcs, list) and arcs:
+        arc_lines = []
+        for arc in arcs[:6]:
+            if not isinstance(arc, dict):
+                val = _clip_text(arc, 120)
+                if val:
+                    arc_lines.append(val)
+                continue
+            name = _clip_text(arc.get("name"), 50)
+            desc = _clip_text(arc.get("description"), 120)
+            status = _clip_text(arc.get("status"), 30)
+            if name or desc:
+                tail = f"[{status}]" if status else ""
+                arc_lines.append(f"{name}：{desc}{tail}".strip("："))
+        if arc_lines:
+            parts.append("剧情线：" + "；".join(arc_lines))
+    notes = data.get("cultural_notes")
+    if isinstance(notes, list) and notes:
+        note_lines = []
+        for note in notes[:4]:
+            if not isinstance(note, dict):
+                val = _clip_text(note, 100)
+                if val:
+                    note_lines.append(val)
+                continue
+            item = _clip_text(note.get("item"), 50)
+            expl = _clip_text(note.get("explanation"), 100)
+            if item or expl:
+                note_lines.append(f"{item}：{expl}".strip("："))
+        if note_lines:
+            parts.append("背景注释：" + "；".join(note_lines))
     return " ".join(parts).strip()[:1200]
 
 
@@ -356,24 +463,74 @@ def main():
         if not CONFIG.get("mimo_video_api_key"):
             log("跳过 MiMo 分片视频概览：未设置 MIMO_API_KEY")
             overview_path.unlink(missing_ok=True)
+            _write_mimo_overview_status(
+                work_dir, "skipped_no_key", "未设置 MIMO_API_KEY，MiMo 分片视频概览未运行", None,
+            )
         elif mimo_video_overview_cache_fresh(overview_path, video, scenes):
             log("跳过 MiMo 分片视频概览（缓存匹配）")
+            _write_mimo_overview_status(work_dir, "cached", "缓存匹配", overview_path.name)
         else:
             overview_path.unlink(missing_ok=True)
             try:
-                analyze_video_overview(video, work_dir, scenes)
+                overview = analyze_video_overview(video, work_dir, scenes)
             except Exception as e:
                 log(f"MiMo 分片视频概览失败（忽略）: {e}")
+                _write_mimo_overview_status(work_dir, "failed", e, None)
+            else:
+                if overview_path.exists() and overview:
+                    _write_mimo_overview_status(work_dir, "ok", "MiMo 分片视频概览完成", overview_path.name)
+                else:
+                    _write_mimo_overview_status(work_dir, "failed", "MiMo 分片视频概览未产出有效 artifact", None)
     else:
         overview_path.unlink(missing_ok=True)
+        _write_mimo_overview_status(work_dir, "disabled", "MiMo 分片视频概览未启用", None, enabled=False)
 
     # optional consolidation (整理): build the understanding index before the brief folds it in
     if args.consolidate or args.consolidate_asr:
         from consolidate import consolidate
         try:
-            consolidate(work_dir, do_asr=args.consolidate_asr, do_index=True)
+            consolidate(work_dir, do_asr=args.consolidate_asr, do_index=args.consolidate)
         except Exception as e:
             log(f"consolidate 跳过（忽略）: {e}")
+            _write_consolidation_status(
+                work_dir, "failed", e, _present_consolidation_artifacts(work_dir),
+                do_asr=args.consolidate_asr, do_index=args.consolidate,
+            )
+        else:
+            expected = []
+            skipped = []
+            if args.consolidate:
+                if vlm_analysis:
+                    expected.append("understanding_index.json")
+                else:
+                    skipped.append("无 vlm_analysis，跳过 index")
+            if args.consolidate_asr:
+                if asr_result:
+                    expected.append("asr_clean.json")
+                else:
+                    skipped.append("无 ASR 文本，跳过 ASR 清洗")
+            artifacts = _present_consolidation_artifacts(work_dir)
+            missing = [name for name in expected if name not in artifacts]
+            if missing:
+                _write_consolidation_status(
+                    work_dir, "failed", f"未产出预期 artifact: {', '.join(missing)}", artifacts,
+                    do_asr=args.consolidate_asr, do_index=args.consolidate,
+                )
+            elif expected:
+                _write_consolidation_status(
+                    work_dir, "ok", "consolidation 完成", artifacts,
+                    do_asr=args.consolidate_asr, do_index=args.consolidate,
+                )
+            else:
+                _write_consolidation_status(
+                    work_dir, "skipped", "；".join(skipped) or "无可整理输入", artifacts,
+                    do_asr=args.consolidate_asr, do_index=args.consolidate,
+                )
+    else:
+        _write_consolidation_status(
+            work_dir, "disabled", "consolidation 未启用", [], enabled=False,
+            do_asr=False, do_index=False,
+        )
 
     # understanding substrate warning + writing brief
     substrate = assess_understanding_substrate(vlm_analysis, asr_result)

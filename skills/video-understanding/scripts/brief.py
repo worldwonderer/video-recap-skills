@@ -845,73 +845,102 @@ def _load_background_research(work_dir):
     return data if isinstance(data, dict) else {}
 
 
-def _format_background_research(research):
-    """Render background_research.json into a compact Story-context brief section."""
-    if not research:
+def _clip_text(text, limit):
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    return value[:limit]
+
+
+def _format_background_research(research, limit=1800):
+    """Render background_research.json into a bounded Story-context brief section."""
+    if not isinstance(research, dict) or not research:
         return []
     lines = ["## Story context (from background_research.json)", ""]
-    synopsis = str(research.get("synopsis", "")).strip()
-    if synopsis:
-        lines.append(f"- Synopsis: {synopsis}")
-    world = str(research.get("worldbuilding", "")).strip()
-    if world:
-        lines.append(f"- Worldbuilding: {world}")
-    episode = str(research.get("episode_context", "")).strip()
-    if episode:
-        lines.append(f"- Episode context: {episode}")
+    for key, label in (
+        ("synopsis", "Synopsis"),
+        ("worldbuilding", "Worldbuilding"),
+        ("episode_context", "Episode context"),
+    ):
+        value = _clip_text(research.get(key), 500)
+        if value:
+            lines.append(f"- {label}: {value}")
 
     characters = research.get("characters")
     if isinstance(characters, dict) and characters:
         lines.append("- Characters:")
-        for name, desc in characters.items():
-            lines.append(f"    - {name}: {str(desc).strip()}")
+        for name, desc in list(characters.items())[:12]:
+            clean_name = _clip_text(name, 60)
+            clean_desc = _clip_text(desc, 160)
+            if clean_name:
+                lines.append(f"    - {clean_name}: {clean_desc}")
 
     details = research.get("character_details")
     if isinstance(details, dict) and details:
         lines.append("- Character details:")
-        for name, info in details.items():
+        for name, info in list(details.items())[:8]:
             if not isinstance(info, dict):
                 continue
             bits = []
             aliases = info.get("aliases")
             if isinstance(aliases, list) and aliases:
-                bits.append("别名 " + "/".join(str(a) for a in aliases))
-            if info.get("role"):
-                bits.append(str(info["role"]))
+                clean_aliases = [_clip_text(alias, 40) for alias in aliases[:4]]
+                clean_aliases = [alias for alias in clean_aliases if alias]
+                if clean_aliases:
+                    bits.append("别名 " + "/".join(clean_aliases))
+            role = _clip_text(info.get("role"), 80)
+            if role:
+                bits.append(role)
             rels = info.get("relationships")
             if isinstance(rels, list) and rels:
-                bits.append("；".join(str(r) for r in rels))
-            lines.append(f"    - {name}: {', '.join(bits)}" if bits else f"    - {name}")
+                clean_rels = [_clip_text(rel, 80) for rel in rels[:4]]
+                clean_rels = [rel for rel in clean_rels if rel]
+                if clean_rels:
+                    bits.append("；".join(clean_rels))
+            clean_name = _clip_text(name, 60)
+            if clean_name and bits:
+                lines.append(f"    - {clean_name}: {'; '.join(bits)}")
 
     arcs = research.get("plot_arcs")
     if isinstance(arcs, list) and arcs:
         lines.append("- Plot arcs:")
-        for arc in arcs:
-            if isinstance(arc, dict):
-                name = str(arc.get("name", "")).strip()
-                desc = str(arc.get("description", "")).strip()
-                status = str(arc.get("status", "")).strip()
+        for arc in arcs[:8]:
+            if not isinstance(arc, dict):
+                value = _clip_text(arc, 180)
+                if value:
+                    lines.append(f"    - {value}")
+                continue
+            name = _clip_text(arc.get("name"), 80)
+            desc = _clip_text(arc.get("description"), 180)
+            status = _clip_text(arc.get("status"), 40)
+            if name or desc:
                 tail = f" [{status}]" if status else ""
                 lines.append(f"    - {name}: {desc}{tail}".rstrip())
 
     notes = research.get("cultural_notes")
     if isinstance(notes, list) and notes:
         lines.append("- Cultural notes:")
-        for note in notes:
-            if isinstance(note, dict):
-                item = str(note.get("item", "")).strip()
-                expl = str(note.get("explanation", "")).strip()
-                if item and expl:
-                    lines.append(f"    - {item}: {expl}")
-                elif item or expl:
-                    lines.append(f"    - {item or expl}")
+        for note in notes[:6]:
+            if not isinstance(note, dict):
+                value = _clip_text(note, 160)
+                if value:
+                    lines.append(f"    - {value}")
+                continue
+            item = _clip_text(note.get("item"), 80)
+            expl = _clip_text(note.get("explanation"), 160)
+            if item and expl:
+                lines.append(f"    - {item}: {expl}")
+            elif item or expl:
+                lines.append(f"    - {item or expl}")
 
     lines.extend([
         "",
         "Use these names, relationships, and stakes in the narration instead of generic labels like \"男子\"/\"白发女子\".",
         "",
     ])
-    return lines
+    text = "\n".join(lines)
+    if len(text) <= limit:
+        return lines
+    clipped = text[:limit].rsplit("\n", 1)[0].rstrip()
+    return clipped.splitlines() + ["", "[Story context clipped to keep ASR/visual evidence in context]", ""]
 
 
 def assess_understanding_substrate(scenes_analysis, asr_result, *, has_story_context=False):
@@ -1307,6 +1336,73 @@ def _load_mimo_overview_for_brief(work_dir, scenes_analysis, enabled=None, video
         return {}
     return overview if _mimo_overview_matches_current_inputs(overview, scenes_analysis, video_path=video_path) else {}
 
+
+def _load_optional_stage_status(work_dir, filename):
+    """Load optional-stage status sidecars defensively."""
+    path = Path(work_dir) / filename
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _status_message(message, limit=180):
+    text = " ".join(str(message or "").split())
+    return text[:limit]
+
+
+def _optional_stage_warning(stage, status, message):
+    line = f"- {stage}: {status}"
+    msg = _status_message(message)
+    return f"{line} — {msg}" if msg else line
+
+
+def _format_optional_stage_warnings(work_dir, *, mimo_overview_enabled=None, mimo_overview=None, consolidation_index=None):
+    """Surface fail-open optional-stage loss near the top of the brief."""
+    work_dir = Path(work_dir)
+    warnings = []
+
+    overview_enabled = (
+        bool(CONFIG.get("mimo_video_overview", False))
+        if mimo_overview_enabled is None else bool(mimo_overview_enabled)
+    )
+    overview_status = _load_optional_stage_status(work_dir, "mimo_video_overview.status.json")
+    if overview_status.get("enabled") and overview_status.get("status") in {"failed", "skipped_no_key"}:
+        warnings.append(_optional_stage_warning(
+            "mimo_video_overview", overview_status.get("status"), overview_status.get("message")
+        ))
+    elif overview_enabled and not mimo_overview:
+        warnings.append(_optional_stage_warning(
+            "mimo_video_overview", "missing_artifact",
+            "enabled but no valid mimo_video_overview.json is available to this brief",
+        ))
+
+    consolidation_status = _load_optional_stage_status(work_dir, "consolidation.status.json")
+    if consolidation_status.get("enabled"):
+        if consolidation_status.get("status") == "failed":
+            warnings.append(_optional_stage_warning(
+                "consolidation", "failed", consolidation_status.get("message")
+            ))
+        elif consolidation_status.get("do_index") and not consolidation_index:
+            warnings.append(_optional_stage_warning(
+                "consolidation", "missing_index",
+                "enabled but no valid understanding_index.json is available to this brief",
+            ))
+
+    if not warnings:
+        return []
+    return [
+        "## Optional stage warnings",
+        "",
+        "These stages are fail-open; continue, but do not assume their missing context exists.",
+        *warnings,
+        "",
+    ]
+
+
 def _parse_target_seconds(value):
     """Parse a cut-mode target duration ("30m" / "600" / "1h5m" / "00:30:00") to seconds.
 
@@ -1571,14 +1667,18 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
     target_pause_ms = CONFIG.get("breath_ms", 250)
     edit_mode = CONFIG.get("edit_mode", "full")
     target_duration = CONFIG.get("target_duration") or "(not set)"
-    # Cut mode sizes narration to the OUTPUT (the kept clips), not the full source:
-    # a 2h source otherwise asks for blocks that the cut drops, leaving narration
-    # describing footage the viewer never sees.
+    # Cut mode sizes narration to the OUTPUT (the kept clips), not the full source.
+    # In pass 2, prefer the actual validated edited_source duration; target_duration is
+    # only a planning goal and can differ after clip snapping or under/over-selection.
     output_seconds = video_duration
     if edit_mode == "cut":
-        target_seconds = _parse_target_seconds(CONFIG.get("target_duration"))
-        if target_seconds:
-            output_seconds = min(video_duration, target_seconds)
+        spans = _load_cut_output_spans_for_brief(work_dir, required=False)
+        if spans:
+            output_seconds = max(span["output_end"] for span in spans)
+        else:
+            target_seconds = _parse_target_seconds(CONFIG.get("target_duration"))
+            if target_seconds:
+                output_seconds = min(video_duration, target_seconds)
     # Block count from coverage, not beats/min: narrate ~coverage_target of the timeline in blocks of
     # ~block_seconds each, leaving the rest as original-audio blocks. Big blocks ⇒ far fewer beats
     # than the old per-sentence model (a 5min recap ⇒ ~20 blocks, not ~48 sentences).
@@ -1639,10 +1739,20 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         "",
     ])
 
+    consolidation_index = _load_consolidation(work_dir, scenes_analysis)
+    mimo_overview = _load_mimo_overview_for_brief(
+        work_dir, scenes_analysis, enabled=mimo_overview_enabled, video_path=mimo_overview_video_path,
+    )
+    lines.extend(_format_optional_stage_warnings(
+        work_dir,
+        mimo_overview_enabled=mimo_overview_enabled,
+        mimo_overview=mimo_overview,
+        consolidation_index=consolidation_index,
+    ))
     lines.extend(_format_substrate_warning(substrate))
     lines.extend(_format_research_directive(work_dir, substrate))
     lines.extend(_format_background_research(_load_background_research(work_dir)))
-    lines.extend(_format_consolidation(_load_consolidation(work_dir, scenes_analysis)))
+    lines.extend(_format_consolidation(consolidation_index))
 
     asr_for_chunks = _load_clean_asr(work_dir, asr_result) or asr_result
     chunk_scenes, chunk_asr = scenes_analysis, asr_for_chunks
@@ -1659,9 +1769,6 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
     lines.extend(_format_asr_chunks_for_brief(asr_chunks))
     lines.extend(_format_timeline_fusion_for_brief(timeline_fusion))
 
-    mimo_overview = _load_mimo_overview_for_brief(
-        work_dir, scenes_analysis, enabled=mimo_overview_enabled, video_path=mimo_overview_video_path,
-    )
     overview_text = (mimo_overview.get("content") or "").strip()
     if overview_text:
         lines.extend([

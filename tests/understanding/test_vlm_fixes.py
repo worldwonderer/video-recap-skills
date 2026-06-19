@@ -11,6 +11,7 @@ import pytest
 
 from lib import CONFIG
 from vlm import (
+    _parse_vlm_depth_response,
     _load_mimo_partial,
     _mimo_cached_chunks_fingerprint,
     _mimo_overview_payload_fingerprint,
@@ -21,6 +22,19 @@ from vlm import (
     mimo_video_overview_cache_fresh,
     mimo_video_settings_fingerprint,
 )
+
+
+def test_parse_frame_facts_splits_chinese_and_english_punctuation():
+    raw = """【描述】
+门口对峙
+【帧标签】
+1.0s | 男子握紧拳头，女子后退一步; 门缓缓关上、灯光变暗；气氛紧张
+【深层分析】
+关系破裂"""
+
+    _description, _depth, facts = _parse_vlm_depth_response(raw)
+
+    assert facts["1.0"] == ["男子握紧拳头", "女子后退一步", "门缓缓关上", "灯光变暗", "气氛紧张"]
 
 
 # ── BUG 4: 显式 null content 必须降级到 reasoning_content 再到 "" ──────────────

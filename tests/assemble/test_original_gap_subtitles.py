@@ -42,6 +42,20 @@ def test_output_clip_spans_from_validated_plan(tmp_path):
     assert spans[1]["source_start"] == 50.0 and spans[1]["output_end"] == 16.0
 
 
+
+
+def test_output_clip_spans_ignore_stale_validated_plan(tmp_path):
+    raw = {"clips": [{"start": 40.0, "end": 45.0}]}
+    (tmp_path / "clip_plan.json").write_text(json.dumps(raw), encoding="utf-8")
+    (tmp_path / "clip_plan_validated.json").write_text(json.dumps({
+        "raw_plan_fingerprint": "stale",
+        "clips": [{"source_start": 0.0, "source_end": 10.0, "output_start": 0.0, "output_end": 10.0}],
+    }), encoding="utf-8")
+
+    spans = assemble._output_clip_spans(tmp_path)
+
+    assert spans == [{"source_start": 40.0, "source_end": 45.0, "output_start": 0.0, "output_end": 5.0}]
+
 def test_map_asr_identity_in_full_mode():
     asr = [{"start": 1.0, "end": 2.0, "text": "x"}]
     assert assemble._map_asr_to_output(asr, None) == [{"start": 1.0, "end": 2.0, "text": "x"}]

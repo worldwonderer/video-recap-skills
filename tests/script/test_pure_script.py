@@ -185,6 +185,33 @@ def test_build_agent_brief_cut_pass2_is_output_timeline(monkeypatch, tmp_path):
     assert "step 1 of 2" not in text
 
 
+
+
+def test_build_agent_brief_cut_pass2_sizes_to_actual_validated_duration(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "edit_mode", "cut")
+    monkeypatch.setitem(CONFIG, "target_duration", "1m")
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    (tmp_path / "edited_source.mp4").write_bytes(b"edited")
+    (tmp_path / "clip_plan_validated.json").write_text(json.dumps({
+        "clips": [
+            {"source_start": 10.0, "source_end": 20.0, "output_start": 0.0, "output_end": 10.0},
+            {"source_start": 40.0, "source_end": 50.0, "output_start": 10.0, "output_end": 20.0},
+        ],
+        "total_duration": 20.0,
+    }), encoding="utf-8")
+
+    text = build_agent_brief(
+        [{"scene_id": 0, "start": 10.0, "end": 50.0, "description": "保留片段"}],
+        [],
+        [],
+        120.0,
+        tmp_path,
+    ).read_text(encoding="utf-8")
+
+    assert "across the ~20s CUT OUTPUT" in text
+    assert "edited_source.mp4` (~20s)" in text
+    assert "~1min" not in text
+
 def test_build_agent_brief_thin_substrate_relaxes_density(monkeypatch, tmp_path):
     """Thin/empty substrate must turn the density target into a ceiling, not a quota,
     so the agent is not forced to fill beats with 看图说话."""

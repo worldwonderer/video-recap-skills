@@ -141,10 +141,6 @@ def _run_narration_review(work_dir, args, *, timeline="source"):
     return True
 
 
-def _run_advisory_review(work_dir, args, *, timeline="source"):
-    return _run_narration_review(work_dir, args, timeline=timeline)
-
-
 def _file_fingerprint(path, chunk_size=1024 * 1024):
     h = hashlib.sha256()
     with Path(path).open("rb") as f:

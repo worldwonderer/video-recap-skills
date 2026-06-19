@@ -34,6 +34,56 @@ def test_build_review_messages_includes_draft_and_grounding():
     assert "你给我站住" in content and "握紧拳头" in content
 
 
+def test_build_review_messages_includes_bounded_research_context(tmp_path):
+    (tmp_path / "background_research.json").write_text(json.dumps({
+        "synopsis": "范闲卷入监察院暗线。",
+        "episode_context": "本集他第一次公开试探对手。",
+        "worldbuilding": "庆国朝堂暗流涌动。",
+        "characters": {f"角色{i}": f"简介{i}" for i in range(20)},
+        "character_details": {
+            "范闲": {"role": "主角", "aliases": ["小范大人"], "relationships": ["与五竹互相信任"]},
+        },
+        "plot_arcs": [
+            {"name": f"线索{i}", "description": f"描述{i}", "status": "进行中"}
+            for i in range(12)
+        ],
+        "cultural_notes": [{"item": "夜宴", "explanation": "权力试探"}],
+        "noise": "x" * 5000,
+    }, ensure_ascii=False), encoding="utf-8")
+
+    content = review.build_review_messages(
+        [{"start": 1.0, "end": 4.0, "narration": "他开始反击。"}],
+        [],
+        [],
+        work_dir=tmp_path,
+    )[0]["content"]
+
+    assert "背景资料（辅助上下文，不可替代画面/对白证据）" in content
+    assert "范闲卷入监察院暗线" in content
+    assert "角色0：简介0" in content
+    assert "角色12" not in content
+    assert "线索7：描述7 [进行中]" in content
+    assert "线索8" not in content
+    assert "noise" not in content
+
+
+def test_review_narration_passes_background_research_to_reviewer(monkeypatch, tmp_path):
+    (tmp_path / "narration.json").write_text(json.dumps([{"start": 1, "end": 4, "narration": "测试。"}]), encoding="utf-8")
+    (tmp_path / "vlm_analysis.json").write_text("[]", encoding="utf-8")
+    (tmp_path / "asr_result.json").write_text("[]", encoding="utf-8")
+    (tmp_path / "background_research.json").write_text(json.dumps({"synopsis": "主角秘密查案"}, ensure_ascii=False), encoding="utf-8")
+    payloads = []
+
+    def fake_api(payload):
+        payloads.append(payload)
+        return {"choices": [{"message": {"content": '{"verdict":"OK","summary":"ok","findings":[]}'}}]}
+
+    monkeypatch.setattr("review.api_call", fake_api)
+    review.review_narration(tmp_path)
+
+    assert "主角秘密查案" in payloads[0]["messages"][0]["content"]
+
+
 def test_review_narration_writes_artifacts(monkeypatch, tmp_path):
     (tmp_path / "narration.json").write_text(json.dumps([{"start": 1, "end": 4, "narration": "测试。"}]), encoding="utf-8")
     (tmp_path / "vlm_analysis.json").write_text("[]", encoding="utf-8")
@@ -58,6 +108,19 @@ def test_review_reads_dict_frame_facts():
     content = review.build_review_messages(narration, vlm, [])[0]["content"]
     assert "男子握紧拳头" in content and "女子后退一步" in content
 
+
+
+
+def test_review_scene_grounding_tolerates_non_numeric_frame_fact_keys():
+    content = review.build_review_messages(
+        [{"start": 0.0, "end": 1.0, "narration": "测试。"}],
+        [{"scene_id": 0, "start": 0, "end": 2, "description": "门口对峙",
+          "frame_facts": {"intro": ["非数字锚点"], "1.0": ["数字锚点"]}}],
+        [],
+    )[0]["content"]
+
+    assert "非数字锚点" in content
+    assert "数字锚点" in content
 
 def test_cut_output_review_remaps_grounding_to_output_timeline():
     spans = [{"source_start": 10.0, "source_end": 20.0, "output_start": 0.0, "output_end": 10.0}]

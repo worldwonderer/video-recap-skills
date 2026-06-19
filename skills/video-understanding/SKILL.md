@@ -30,7 +30,7 @@ the current source video plus output-affecting settings. `--force` recomputes.
 export MIMO_API_KEY=***          # one key drives ASR (mimo-v2.5-asr) + VLM (mimo-v2.5)
 ```
 
-ASR uses MiMo `mimo-v2.5-asr`; without `MIMO_API_KEY` it is skipped (or pass `--skip-asr`).
+ASR uses MiMo `mimo-v2.5-asr`; pass `--skip-asr` to skip dialogue transcription. The full understanding run still requires `MIMO_API_KEY` for VLM scene analysis.
 Optional MiMo scene-chunk video understanding: `--mimo-video-overview`.
 
 If `work_dir/background_research.json` exists (story research the agent did first, see

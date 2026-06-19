@@ -583,9 +583,11 @@ def _load_agent_original_subtitles(work_dir):
 
 
 def _output_clip_spans(work_dir):
-    """Cut-mode source→output clip spans from clip_plan_validated.json (or clip_plan.json),
-    each {source_start, source_end, output_start, output_end}. None in full mode (no cut)."""
-    plan = _load_work_json(work_dir, "clip_plan_validated.json") or _load_work_json(work_dir, "clip_plan.json")
+    """Cut-mode source→output clip spans using the same freshness logic as video clips."""
+    try:
+        plan = _load_cut_timeline_plan(work_dir)
+    except (OSError, ValueError, json.JSONDecodeError):
+        plan = None
     if not plan:
         return None
     entries = plan.get("clips", plan) if isinstance(plan, dict) else plan

@@ -242,6 +242,92 @@ def test_understand_removes_stale_mimo_overview_before_failed_recompute(monkeypa
     understand.main()
 
     assert not stale_overview.exists()
+    status = json.loads((tmp_path / "mimo_video_overview.status.json").read_text(encoding="utf-8"))
+    assert status["stage"] == "mimo_video_overview"
+    assert status["enabled"] is True
+    assert status["status"] == "failed"
+    assert "overview refresh failed" in status["message"]
+    assert status["artifact"] is None
+
+
+def test_understand_writes_overview_status_when_key_missing(monkeypatch, tmp_path):
+    """Enabled-but-no-key overview skip must be visible to downstream brief/review."""
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    frame = tmp_path / "frames" / "frame_00001.jpg"
+    frame.parent.mkdir()
+    frame.write_bytes(b"frame")
+
+    def fake_detect(video_path, work_dir, threshold=None):
+        scenes = [{"scene_id": 0, "start": 0.0, "end": 10.0}]
+        (Path(work_dir) / "scenes.json").write_text(json.dumps(scenes), encoding="utf-8")
+        return scenes
+
+    monkeypatch.setitem(understand.CONFIG, "fps", 1.0)
+    monkeypatch.setitem(understand.CONFIG, "api_key", "tp-test")
+    monkeypatch.setitem(understand.CONFIG, "mimo_video_overview", True)
+    monkeypatch.setitem(understand.CONFIG, "mimo_video_api_key", "")
+    monkeypatch.setattr("understand.get_video_duration", lambda path: 10.0)
+    monkeypatch.setattr("understand.api_call", lambda payload: {"choices": [{"message": {"content": "ok"}}]})
+    monkeypatch.setattr("understand.extract_frames", lambda video_path, work_dir: [frame])
+    monkeypatch.setattr("understand.detect_scenes", fake_detect)
+    monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "understand.analyze_scenes",
+        lambda scenes, frames, work_dir: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
+    )
+    monkeypatch.setattr("understand.build_agent_brief", lambda *a, **k: tmp_path / "agent_narration_brief.md")
+    monkeypatch.setattr(sys, "argv", ["understand.py", str(video), "--work-dir", str(tmp_path), "--skip-asr", "--no-consolidate"])
+
+    understand.main()
+
+    status = json.loads((tmp_path / "mimo_video_overview.status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "skipped_no_key"
+    assert status["artifact"] is None
+
+
+def test_understand_writes_failed_consolidation_status(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    frame = tmp_path / "frames" / "frame_00001.jpg"
+    frame.parent.mkdir()
+    frame.write_bytes(b"frame")
+
+    def fake_detect(video_path, work_dir, threshold=None):
+        scenes = [{"scene_id": 0, "start": 0.0, "end": 10.0}]
+        (Path(work_dir) / "scenes.json").write_text(json.dumps(scenes), encoding="utf-8")
+        return scenes
+
+    def fake_consolidate(work_dir, do_asr=False, do_index=True):
+        del work_dir, do_asr, do_index
+        return {}
+
+    monkeypatch.setitem(understand.CONFIG, "fps", 1.0)
+    monkeypatch.setitem(understand.CONFIG, "api_key", "tp-test")
+    monkeypatch.setitem(understand.CONFIG, "mimo_video_overview", False)
+    monkeypatch.setattr("understand.get_video_duration", lambda path: 10.0)
+    monkeypatch.setattr("understand.api_call", lambda payload: {"choices": [{"message": {"content": "ok"}}]})
+    monkeypatch.setattr("understand.extract_frames", lambda video_path, work_dir: [frame])
+    monkeypatch.setattr("understand.detect_scenes", fake_detect)
+    monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "understand.analyze_scenes",
+        lambda scenes, frames, work_dir: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
+    )
+    monkeypatch.setattr("understand.build_agent_brief", lambda *a, **k: tmp_path / "agent_narration_brief.md")
+    monkeypatch.setattr("consolidate.consolidate", fake_consolidate, raising=False)
+    monkeypatch.setattr(sys, "argv", ["understand.py", str(video), "--work-dir", str(tmp_path), "--skip-asr"])
+
+    understand.main()
+
+    status = json.loads((tmp_path / "consolidation.status.json").read_text(encoding="utf-8"))
+    assert status["stage"] == "consolidation"
+    assert status["enabled"] is True
+    assert status["do_asr"] is False
+    assert status["do_index"] is True
+    assert status["status"] == "failed"
+    assert "understanding_index.json" in status["message"]
+    assert status["artifacts"] == []
 
 
 def _run_understand_for_cache_tests(monkeypatch, tmp_path, video, *, argv_extra=None):

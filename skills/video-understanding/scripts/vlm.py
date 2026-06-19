@@ -34,7 +34,7 @@ def _parse_vlm_depth_response(raw_text):
             m = re.match(r'([\d.]+)\s*s?\s*\|\s*(.+)', line)
             if m:
                 ts = m.group(1)
-                actions = [a.strip() for a in m.group(2).split(",") if a.strip()]
+                actions = [a.strip() for a in re.split(r"[，,；;、]+", m.group(2)) if a.strip()]
                 if actions:
                     frame_facts[ts] = actions
 

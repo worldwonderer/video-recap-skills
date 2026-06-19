@@ -60,6 +60,24 @@ def test_synthesize_segment_reuses_only_matching_cache(monkeypatch, tmp_path):
     assert (tts_dir / "narr_000.wav").read_text(encoding="utf-8") == "audio:第二版。"
 
 
+def test_tts_cache_key_changes_with_narration_speed(monkeypatch, tmp_path):
+    """narration_speed changes truncation decisions, so it must invalidate cached audio."""
+    seg = {"start": 0.0, "end": 2.0, "narration": "缓存语速。"}
+    tts_dir = tmp_path / "tts_segments"
+    tts_dir.mkdir()
+
+    monkeypatch.setitem(CONFIG, "tts_dynamic_params", False)
+    monkeypatch.setitem(CONFIG, "mimo_tts_model", "mimo-v2.5-tts")
+    monkeypatch.setitem(CONFIG, "mimo_tts_voice", "冰糖")
+
+    monkeypatch.setitem(CONFIG, "narration_speed", 1.0)
+    key_normal = voiceover._prepare_tts_segment(0, seg, [seg], tts_dir, "mimo-tts")[4]
+    monkeypatch.setitem(CONFIG, "narration_speed", 1.3)
+    key_fast = voiceover._prepare_tts_segment(0, seg, [seg], tts_dir, "mimo-tts")[4]
+
+    assert key_normal != key_fast
+
+
 def test_synthesize_segment_block_truncation_accounts_for_narration_speed(monkeypatch, tmp_path):
     # assemble speeds every segment up by narration_speed before placement, so the slot holds
     # raw_dur / narration_speed. A block whose RAW tts overflows the slot but fits after the 1.3x

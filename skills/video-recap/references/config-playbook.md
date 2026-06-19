@@ -16,7 +16,7 @@ Defaults below are bundle-level defaults unless a note scopes them to a specific
 | ASR window | `ASR_SEGMENT_SECONDS` | `30` | smaller → finer dialogue timestamps (stays under MiMo's 10MB base64 cap) |
 | TTS model | `MIMO_TTS_MODEL` | `mimo-v2.5-tts` | the only TTS engine |
 | MiMo voice | `MIMO_TTS_VOICE` / `--mimo-tts-voice` | `冰糖` | |
-| Narration density | `TARGET_SEGMENTS_PER_MINUTE` | `9.6` | min `MIN_SEGMENTS_PER_MINUTE=6.24` |
+| Narration block coverage | `NARRATION_COVERAGE_TARGET` / `NARRATION_BLOCK_SECONDS` | `0.7` / `9.0` | current block-recap density controls; old `TARGET_SEGMENTS_PER_MINUTE` applies only to legacy single-pass cut mapping reports |
 | Narration speed | `NARRATION_SPEED` | `1.3` | global atempo on the voiceover; default leans snappy for short-form, set `1.0` for long-form/documentary |
 | Mask source subs | `MASK_SOURCE_SUBTITLES` / `SOURCE_SUBTITLE_MASK_RATIO` | on / `0.14` | effective only when burned recap subtitles are enabled; covers hardcoded source subtitles (bottom band) so only the recap's subtitles show. With `--no-burn-subtitles`, the mask is ignored and the MP4 stays unmasked while `.srt` is written |
 | Original ducking | `IDLE_ORIG_VOLUME` / `SPEECH_DUCKING_VOLUME` | `1.0` / `0.2` | the original returns to full-volume `IDLE` in deliberate gaps/original blocks, and ducks to `SPEECH` under narration. Inter-beat gaps shorter than `DUCK_BRIDGE_SECONDS` stay ducked so a single narration block does not swell between sentences. `DUCKING_ORIG_VOLUME` (`0.3`) is only the fallback when beats carry no placement info |

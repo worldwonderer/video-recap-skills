@@ -86,6 +86,30 @@ def test_understanding_brief_cut_pass2_writes_output_time_evidence(monkeypatch, 
     assert "ASR chunk 1: 101.0-105.0s" not in text
 
 
+
+
+def test_understanding_brief_cut_pass2_sizes_to_actual_validated_duration(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "edit_mode", "cut")
+    monkeypatch.setitem(CONFIG, "target_duration", "1m")
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    (tmp_path / "edited_source.mp4").write_bytes(b"edited")
+    (tmp_path / "clip_plan_validated.json").write_text(json.dumps({
+        "clips": [{"source_start": 100.0, "source_end": 118.0, "output_start": 0.0, "output_end": 18.0}],
+        "total_duration": 18.0,
+    }), encoding="utf-8")
+
+    text = build_agent_brief(
+        [{"scene_id": 7, "start": 100.0, "end": 118.0, "description": "保留片段"}],
+        [],
+        [],
+        120.0,
+        tmp_path,
+    ).read_text(encoding="utf-8")
+
+    assert "across the ~18s CUT OUTPUT" in text
+    assert "edited_source.mp4` (~18s)" in text
+    assert "~1min" not in text
+
 def test_understanding_brief_cut_pass2_requires_fresh_output_spans(monkeypatch, tmp_path):
     monkeypatch.setitem(CONFIG, "edit_mode", "cut")
     monkeypatch.setitem(CONFIG, "target_duration", "10s")
