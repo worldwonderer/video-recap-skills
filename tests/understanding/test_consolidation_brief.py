@@ -37,6 +37,20 @@ def test_brief_noop_without_consolidation(tmp_path):
     assert (tmp_path / "timeline_fusion.json").exists()
 
 
+def test_chunk_asr_tolerates_mixed_int_str_scene_ids():
+    """Regression (cut-mode pass2): _remap_brief_evidence_to_output_timeline gives a SPLIT
+    scene a str id like '5.0' while unsplit scenes keep int ids. A chunk spanning both must
+    not crash sorted(current_scene_ids) with 'int < str'."""
+    scenes = [
+        {"scene_id": 5, "start": 0.0, "end": 3.0, "description": "a"},
+        {"scene_id": "5.0", "start": 3.0, "end": 6.0, "description": "b"},
+    ]
+    asr = [{"start": 1.0, "end": 5.0, "text": "一句横跨两个场景的较长原声对白内容。"}]
+    chunks = _chunk_asr_for_writing(asr, scenes)  # must not raise TypeError
+    ids = chunks[0]["scene_ids"]
+    assert 5 in ids and "5.0" in ids  # both id types survive the type-safe sort
+
+
 def test_optional_stage_warnings_surface_failed_overview_and_consolidation(tmp_path):
     (tmp_path / "mimo_video_overview.status.json").write_text(json.dumps({
         "stage": "mimo_video_overview",
