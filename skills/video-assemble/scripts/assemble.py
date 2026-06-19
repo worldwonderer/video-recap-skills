@@ -9,7 +9,7 @@ from lib import CONFIG
 from lib import log, run_cmd, get_video_duration
 from timeline import build_timeline, save_timeline
 
-SUBTITLE_RENDER_VERSION = 3
+SUBTITLE_RENDER_VERSION = 4  # bumped: BYO user_subtitles now fill gaps even with mask off
 ASSEMBLY_MANIFEST = "assembly_manifest.json"
 _SUBTITLE_TERMINAL_PUNCTUATION = "。！？!?…."
 _SUBTITLE_CLOSING_QUOTES = "」』”’）)]】》〉\"'"
