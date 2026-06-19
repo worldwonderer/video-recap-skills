@@ -10,7 +10,7 @@
 
 ## 演示
 
-https://github.com/user-attachments/assets/92698ec6-0d23-4f9f-8825-c3684ef57aff
+https://github.com/user-attachments/assets/aa96bd1d-ce4b-42bd-a7df-439aeb63dd18
 
 成片之外，还能一键导出**剪映草稿**手动精修——原片、解说、BGM、字幕各一轨：
 
