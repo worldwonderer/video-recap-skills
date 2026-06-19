@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 if [ "$#" -gt 0 ]; then
   test_groups="$*"
 else
-  test_groups="understanding cut voiceover assemble script orchestrator"
+  test_groups="understanding cut voiceover assemble script orchestrator inspect"
 fi
 
 for skill_group in $test_groups; do

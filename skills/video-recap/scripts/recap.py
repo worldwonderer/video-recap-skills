@@ -435,7 +435,9 @@ def main():
             uargs.append("--consolidate-asr")
         _run("video-understanding", "understand.py", *uargs)
 
-    def _pause(need_text):
+    inspect_py = _entry("video-recap", "inspect.py")
+
+    def _pause(need_text, inspect_hint=None):
         brief = work_dir / "agent_narration_brief.md"
         cont = _continuation_command(video, work_dir, args)
         print("=" * 50)
@@ -445,6 +447,8 @@ def main():
             print("[video-recap] ⚑ 理解素材偏薄：先按 brief 顶部「Research the story FIRST」调研并写 "
                   "background_research.json，再写解说，避免看图说话。")
         print(f"[video-recap] ⏸  阅读 {brief}（按 video-script 规则）后写入 {need_text}")
+        if inspect_hint:
+            print(f"[video-recap]    先核对状态/时间轴（建议性）: {inspect_hint}")
         print(f"[video-recap]    写完后重跑继续: {cont}")
         print("=" * 50)
 
@@ -462,7 +466,8 @@ def main():
         if not narration_json.exists():
             _understand()
             _write_run_manifest(work_dir, video, args)
-            _pause(f"{narration_json}")
+            _pause(f"{narration_json}",
+                   inspect_hint=f"python3 {inspect_py} --work-dir {work_dir} state")
             return
         _reject_stale_manifest()
         _run("video-script", "validate.py", "--work-dir", work_dir, "--mode", "full")
@@ -475,7 +480,8 @@ def main():
             # PASS 1: understand -> agent writes clip_plan.json ONLY.
             _understand()
             _write_run_manifest(work_dir, video, args)
-            _pause(f"{clip_plan_json}（只写剪辑计划；解说下一步对着剪好的成片写）")
+            _pause(f"{clip_plan_json}（只写剪辑计划；解说下一步对着剪好的成片写）",
+                   inspect_hint=f"python3 {inspect_py} --work-dir {work_dir} state")
             return
         _reject_stale_manifest()
         cp_fp = _file_md5(clip_plan_json)
@@ -488,7 +494,9 @@ def main():
             # PASS 2: rebuild the brief (now an OUTPUT-timeline variant) and pause for narration.
             _understand()
             _write_phase_ledger(work_dir, clip_plan_fingerprint=cp_fp, edited_source_rendered=True)
-            _pause(f"{narration_json}（用成片 OUTPUT 时间轴写解说，对着 {edited_source}）")
+            _pause(f"{narration_json}（用成片 OUTPUT 时间轴写解说，对着 {edited_source}）",
+                   inspect_hint=(f"python3 {inspect_py} --work-dir {work_dir} "
+                                 "clip-map --output-start <s> --output-end <e>  # 核对输出↔原片时间轴"))
             return
         if _cut_narration_is_stale(_read_phase_ledger(work_dir), cp_fp):
             raise SystemExit(
