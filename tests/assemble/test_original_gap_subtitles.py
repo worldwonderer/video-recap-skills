@@ -148,8 +148,8 @@ def test_generate_ass_includes_original_only_with_duration(monkeypatch, tmp_path
 
 
 def test_original_line_assigned_to_single_gap_by_midpoint(monkeypatch, tmp_path):
-    # a line whose MIDPOINT sits in a narration window is dropped by the fallback (conservative) —
-    # it is not shown in several gaps or crammed where it isn't actually spoken
+    # a WHOLE sentence whose char-proportional midpoint sits in a narration window is dropped by the
+    # fallback (conservative) — it is not shown in several gaps or crammed where it isn't spoken.
     _burn_on(monkeypatch)
     (tmp_path / "asr_result.json").write_text(
         json.dumps([{"start": 3.0, "end": 10.0, "text": "一句横跨解说块的原声"}]), encoding="utf-8")
@@ -211,17 +211,17 @@ def test_over_dense_asr_line_truncated_and_shown_in_fallback(monkeypatch, tmp_pa
     # R3: a long ASR block landing in a tiny gap is FRONT-TRUNCATED to fit the gap at the max read
     # rate and shown truncated — not dropped to blank (the old behavior was to skip it entirely).
     _burn_on(monkeypatch)
-    dense = "我既然回来了京都就是最安全的小姐遇害你和你的黑骑为什么不在京都我听命行事"  # ~34 chars, no sentence marks
+    dense = "我既然回来了京都就是最安全的小姐遇害你和你的黑骑为什么不在京都我听命行事"  # 36 chars, no sentence marks
     (tmp_path / "asr_result.json").write_text(
-        json.dumps([{"start": 2.0, "end": 4.0, "text": dense}]), encoding="utf-8")  # 34 chars in a 2s slot
-    segs = [{"actual_place_start": 6.0, "actual_place_end": 9.0, "narration": "解说"}]
-    # 2s slot * 9 ch/s = 18 chars max → shown truncated to the leading 18 chars, wrapped in 「」
+        json.dumps([{"start": 0.5, "end": 2.0, "text": dense}]), encoding="utf-8")
+    # narration fills [2, 9.7]; the dense line sits in the small [0,2] gap (~1.5s from its 0.5 onset)
+    segs = [{"actual_place_start": 2.0, "actual_place_end": 9.7, "narration": "解说"}]
     entries = assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0)
     assert entries  # shown, not dropped
     joined = "".join(e["text"] for e in entries)
     assert joined.startswith("「") and joined.endswith("」")
     body = joined.strip("「」")
-    assert body and len(body) <= 18  # truncated to fit the gap at the max read rate
+    assert body and len(body) <= 14  # ~1.5s * 9 ch/s → front-truncated to fit the gap
     assert dense.startswith(body)   # it is the LEADING (front) portion of the dense line
 
 

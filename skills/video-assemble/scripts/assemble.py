@@ -509,6 +509,7 @@ _MIN_GAP_TO_SUBTITLE = 0.8       # shortest original-audio gap (s) worth subtitl
 _MIN_READABLE_SECONDS = 0.3      # shortest on-screen time (s) for an original-dialogue line
 _MIN_ASR_CLIP_OVERLAP = 0.05     # shortest ASR↔clip overlap (s) to keep when remapping to output
 _MAX_ORIGINAL_READ_CPS = 9.0     # densest an AUTO (uncalibrated) original line may be shown — skip cram
+_AUTO_ORIGINAL_READ_CPS = 6.0    # comfortable read rate when packing coarse-ASR lines from a gap start
 
 
 def _distribute_chunks(chunks, start, end):
@@ -880,33 +881,48 @@ def _split_sentences_keep_delims(text):
 
 
 def _fallback_gap_entries(candidates, gaps, max_chars):
-    """Coarse-ASR fallback: assign each line to the ONE gap its midpoint falls in, then clip to that
-    gap — so a long source line never shows in several gaps or where it isn't actually spoken.
-    Hardened: multi-sentence entries are pre-split (on 。！？) so each sentence is placed by its own
-    midpoint; and an over-dense line is FRONT-TRUNCATED to fit its gap at the max read rate (shown
-    truncated) instead of being dropped to blank."""
-    entries = []
+    """Coarse-ASR fallback. Each coarse-ASR line spans a whole window with no per-sentence onset, so
+    it is split into WHOLE sentences (never mid-word); each sentence is assigned to the gap its
+    char-proportional midpoint lands in, and within a gap the assigned sentences are packed
+    SEQUENTIALLY from the first one's estimated onset at a comfortable read rate — so two lines in
+    one gap never overlap or scatter to char-proportional tail slots — capped at the gap end. An
+    over-dense gap front-truncates (shown) rather than dropping to blank."""
+    # 1) split each coarse line into WHOLE sentences (never mid-word) and assign each to the gap
+    #    its char-proportional midpoint lands in (the only "which gap" signal coarse ASR gives).
+    buckets = {}  # gap_index -> [(estimated_onset, sentence_text)]
     for seg in candidates:
         for sentence in _split_sentences_keep_delims(seg["text"]) or [str(seg["text"]).strip()]:
-            # distribute the sentence's window proportionally inside the parent line's span
-            sub = _sentence_subspan(seg, sentence)
-            mid = (sub["start"] + sub["end"]) / 2.0
-            gap = next(((gs, ge) for gs, ge in gaps if gs <= mid < ge), None)
-            if gap is None:
-                continue
-            cs, ce = max(sub["start"], gap[0]), min(sub["end"], gap[1])
-            if ce - cs < _MIN_READABLE_SECONDS:
-                continue
             text = sentence.strip()
             if not text:
                 continue
-            max_len = int((ce - cs) * _MAX_ORIGINAL_READ_CPS)
-            if max_len <= 0:
+            sub = _sentence_subspan(seg, sentence)
+            mid = (sub["start"] + sub["end"]) / 2.0
+            gi = next((i for i, (gs, ge) in enumerate(gaps) if gs <= mid < ge), None)
+            if gi is None:
                 continue
-            if len(text) > max_len:
-                # over-dense: show the leading portion that fits the gap, not a blank
-                text = text[:max_len]
-            entries.extend(_bracketed_original_chunks(text, cs, ce, max_chars))
+            buckets.setdefault(gi, []).append((sub["start"], text))
+    # 2) within each gap, pack the assigned sentences SEQUENTIALLY from the gap onset at a
+    #    comfortable read rate. Anchoring to the gap onset (vs each sentence's char-proportional
+    #    tail position) stops a line heard early from being shoved to the END of its window — the
+    #    coarse-ASR lag. Full mode keeps the real ASR onset (the first sentence's own start); an
+    #    over-dense gap front-truncates (shown) rather than dropping to blank.
+    entries = []
+    for gi, items in buckets.items():
+        gs, ge = gaps[gi]
+        items.sort(key=lambda it: it[0])
+        # start at the first assigned sentence's estimated onset (clamped into the gap), then pack
+        # the rest sequentially so they never overlap or scatter to char-proportional tail slots.
+        cursor = min(ge, max(gs, min(start for start, _ in items)))
+        for _, text in items:
+            if cursor >= ge - _MIN_READABLE_SECONDS:
+                break
+            ce2 = min(ge, cursor + max(_MIN_READABLE_SECONDS, len(text) / _AUTO_ORIGINAL_READ_CPS))
+            if ce2 - cursor < _MIN_READABLE_SECONDS:
+                break
+            max_len = int((ce2 - cursor) * _MAX_ORIGINAL_READ_CPS)
+            shown = text if len(text) <= max_len else text[:max_len]
+            entries.extend(_bracketed_original_chunks(shown, cursor, ce2, max_chars))
+            cursor = ce2
     return entries
 
 
