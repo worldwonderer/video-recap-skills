@@ -193,6 +193,12 @@ CONFIG = {
     "mimo_disable_thinking": env_bool("MIMO_DISABLE_THINKING", True),
     "mimo_disable_thinking_source": "env" if os.environ.get("MIMO_DISABLE_THINKING") else "default",
     "fps": 0,  # 0 = 自动（≤60s→2fps, ≤5min→1.5fps, >5min→1fps）
+    # Storyboard contact sheets (advisory): generated only in video-understanding (owns frames+fps).
+    # Kept ONLY here, matching the bundle convention that each lib.py carries the keys ITS skill uses
+    # (video-cut's lib.py is deliberately minimal); no other skill reads storyboard_*.
+    "storyboard": env_bool("STORYBOARD", True),  # generate source/edited storyboard contact sheets
+    "storyboard_max_tiles": env_int("STORYBOARD_MAX_TILES", 30, minimum=1),  # cap tiles per sheet for legibility
+    "storyboard_columns": env_int("STORYBOARD_COLUMNS", 6, minimum=1),  # tile grid columns
     # TTS 语速（字符/秒），由校准得出。MiMo TTS 中文约 3.5 字/秒
     # 生成解说时使用 speech_rate * safety_margin 作为约束
     "speech_rate": 3.5,
