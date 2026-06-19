@@ -104,7 +104,7 @@ def test_vlm_resume_cache_persists_on_failure_and_resumes(monkeypatch, tmp_path)
 
     with pytest.raises(RuntimeError, match="断点续传"):
         analyze_scenes(scenes, frames, tmp_path)
-    cache = json.loads((tmp_path / "vlm_scene_cache.json").read_text())
+    cache = json.loads((tmp_path / "vlm_scene_cache.json").read_text(encoding="utf-8"))
     assert len(cache) == 2  # the two scenes that succeeded are cached for resume
 
     state["fail_mid"] = False
@@ -134,7 +134,7 @@ def test_vlm_resume_cache_invalidates_on_request_setting_flip(monkeypatch, tmp_p
 
     with pytest.raises(RuntimeError, match="断点续传"):
         analyze_scenes(scenes, frames, tmp_path)
-    assert len(json.loads((tmp_path / "vlm_scene_cache.json").read_text())) == 2
+    assert len(json.loads((tmp_path / "vlm_scene_cache.json").read_text(encoding="utf-8"))) == 2
 
     # Flip the request setting and re-run with a non-failing API. The per-scene key now differs,
     # so NONE of the 2 cached scenes are reused — all 3 are re-analyzed under the new setting.
