@@ -839,11 +839,29 @@ def _precise_gap_entries(candidates, gaps, max_chars):
         text = str(seg["text"]).strip()
         if not text:
             continue
+        seg_start, seg_end = float(seg["start"]), float(seg["end"])
+        seg_dur = seg_end - seg_start
+        overlaps = []
         for gs, ge in gaps:
-            cs, ce = max(seg["start"], gs), min(seg["end"], ge)
-            if ce - cs < _MIN_READABLE_SECONDS:
-                continue
+            cs, ce = max(seg_start, gs), min(seg_end, ge)
+            if ce - cs >= _MIN_READABLE_SECONDS:
+                overlaps.append((cs, ce))
+        if not overlaps:
+            continue
+        if len(overlaps) == 1 or seg_dur <= 0:
+            # the common case (a line authored within one gap): show it whole in that gap
+            cs, ce = overlaps[0]
             entries.extend(_bracketed_original_chunks(text, cs, ce, max_chars))
+            continue
+        # the line straddles a narration block: show each gap only ITS portion of the text
+        # (proportional to the time the line overlaps that gap) instead of the whole line twice.
+        n = len(text)
+        for cs, ce in overlaps:
+            lo = max(0, int(round((cs - seg_start) / seg_dur * n)))
+            hi = min(n, int(round((ce - seg_start) / seg_dur * n)))
+            piece = text[lo:hi].strip()
+            if piece:
+                entries.extend(_bracketed_original_chunks(piece, cs, ce, max_chars))
     return entries
 
 

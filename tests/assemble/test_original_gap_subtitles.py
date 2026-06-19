@@ -371,6 +371,10 @@ def test_precise_line_straddling_gap_boundary_is_split_across_gaps(monkeypatch, 
     # no fragment ever bleeds into the narration window [5,7]
     for e in entries:
         assert e["end"] <= 5.0 + 1e-6 or e["start"] >= 7.0 - 1e-6
+    # each gap shows only ITS portion — the FULL line is never duplicated whole into both gaps
+    assert all("横跨解说块的原声台词" not in e["text"] for e in entries)
+    # the per-gap pieces are different slices (no duplication)
+    assert before[0]["text"] != after[0]["text"]
 
 
 # --- R3: coarse-ASR fallback hardening ----------------------------------------
