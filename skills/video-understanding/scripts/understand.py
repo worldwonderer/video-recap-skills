@@ -500,7 +500,7 @@ def main():
         log("VLM API 连通性预检...")
         api_call({"model": CONFIG.get("vlm_model", ""),
                   "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5})
-        vlm_analysis = analyze_scenes(scenes, frames, work_dir)
+        vlm_analysis = analyze_scenes(scenes, frames, work_dir, resume=not args.force)
         _write_stage_meta(vlm_json, vlm_meta)
 
     # Step 4.1: optional MiMo scene-chunk video understanding

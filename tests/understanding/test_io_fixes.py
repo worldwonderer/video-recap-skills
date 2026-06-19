@@ -192,7 +192,7 @@ def test_understand_reextracts_frames_when_source_video_changes(monkeypatch, tmp
     monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
     monkeypatch.setattr(
         "understand.analyze_scenes",
-        lambda scenes, frames, work_dir: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
+        lambda scenes, frames, work_dir, **kwargs: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
     )
     monkeypatch.setattr("understand.build_agent_brief", lambda *a, **k: tmp_path / "agent_narration_brief.md")
     monkeypatch.setattr(sys, "argv", ["understand.py", str(new_video), "--work-dir", str(tmp_path), "--skip-asr"])
@@ -233,7 +233,7 @@ def test_understand_removes_stale_mimo_overview_before_failed_recompute(monkeypa
     monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
     monkeypatch.setattr(
         "understand.analyze_scenes",
-        lambda scenes, frames, work_dir: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
+        lambda scenes, frames, work_dir, **kwargs: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
     )
     monkeypatch.setattr("understand.analyze_video_overview", fail_overview)
     monkeypatch.setattr("understand.build_agent_brief", lambda *a, **k: tmp_path / "agent_narration_brief.md")
@@ -274,7 +274,7 @@ def test_understand_writes_overview_status_when_key_missing(monkeypatch, tmp_pat
     monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
     monkeypatch.setattr(
         "understand.analyze_scenes",
-        lambda scenes, frames, work_dir: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
+        lambda scenes, frames, work_dir, **kwargs: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
     )
     monkeypatch.setattr("understand.build_agent_brief", lambda *a, **k: tmp_path / "agent_narration_brief.md")
     monkeypatch.setattr(sys, "argv", ["understand.py", str(video), "--work-dir", str(tmp_path), "--skip-asr", "--no-consolidate"])
@@ -312,7 +312,7 @@ def test_understand_writes_failed_consolidation_status(monkeypatch, tmp_path):
     monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
     monkeypatch.setattr(
         "understand.analyze_scenes",
-        lambda scenes, frames, work_dir: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
+        lambda scenes, frames, work_dir, **kwargs: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
     )
     monkeypatch.setattr("understand.build_agent_brief", lambda *a, **k: tmp_path / "agent_narration_brief.md")
     monkeypatch.setattr("consolidate.consolidate", fake_consolidate, raising=False)
@@ -482,7 +482,7 @@ def test_understand_recomputes_vlm_when_context_changes(monkeypatch, tmp_path):
     video.write_bytes(b"video")
     calls = []
 
-    def fake_vlm(scenes, frames, work_dir):
+    def fake_vlm(scenes, frames, work_dir, **kwargs):
         calls.append(understand.CONFIG.get("context_info", ""))
         result = [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": calls[-1]}]
         (Path(work_dir) / "vlm_analysis.json").write_text(json.dumps(result), encoding="utf-8")
@@ -506,7 +506,7 @@ def test_understand_recomputes_vlm_when_api_endpoint_changes(monkeypatch, tmp_pa
     video.write_bytes(b"video")
     calls = []
 
-    def fake_vlm(scenes, frames, work_dir):
+    def fake_vlm(scenes, frames, work_dir, **kwargs):
         calls.append(understand.CONFIG.get("api_url", ""))
         result = [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": calls[-1]}]
         (Path(work_dir) / "vlm_analysis.json").write_text(json.dumps(result), encoding="utf-8")
@@ -530,7 +530,7 @@ def test_understand_recomputes_vlm_when_thinking_behavior_changes(monkeypatch, t
     video.write_bytes(b"video")
     calls = []
 
-    def fake_vlm(scenes, frames, work_dir):
+    def fake_vlm(scenes, frames, work_dir, **kwargs):
         calls.append(understand.CONFIG.get("mimo_disable_thinking"))
         result = [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": str(calls[-1])}]
         (Path(work_dir) / "vlm_analysis.json").write_text(json.dumps(result), encoding="utf-8")
@@ -592,7 +592,7 @@ def test_understand_omits_stale_mimo_overview_when_overview_disabled(monkeypatch
     monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
     monkeypatch.setattr(
         "understand.analyze_scenes",
-        lambda scenes, frames, work_dir: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
+        lambda scenes, frames, work_dir, **kwargs: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
     )
     monkeypatch.setattr(sys, "argv", ["understand.py", str(video), "--work-dir", str(tmp_path), "--skip-asr"])
 

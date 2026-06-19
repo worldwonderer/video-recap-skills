@@ -56,7 +56,41 @@ def _max_frames_for_duration(duration):
     return max(3, min(ceiling, round(max(0.0, float(duration)) / spf)))
 
 
-def analyze_scenes(scenes, frames, work_dir):
+def _vlm_scene_cache_path(work_dir):
+    return Path(work_dir) / "vlm_scene_cache.json"
+
+
+def _load_vlm_scene_cache(work_dir):
+    """Per-scene VLM resume cache (scene_key -> analysis). Tolerant: {} if absent/corrupt."""
+    path = _vlm_scene_cache_path(work_dir)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _flush_vlm_scene_cache(work_dir, cache):
+    """Persist the resume cache atomically (temp + rename) so an abort/crash never corrupts it."""
+    path = _vlm_scene_cache_path(work_dir)
+    try:
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        log(f"VLM 场景缓存写入失败（忽略）: {exc}")
+
+
+def _looks_rate_limited(message):
+    """Heuristic: was a scene failure a transient rate-limit (worth a low-concurrency retry) rather
+    than a persistent error (empty response / parse failure) that re-running would not fix?"""
+    m = str(message).lower()
+    return "429" in m or "too many requests" in m or "rate limit" in m or "限流" in m
+
+
+def analyze_scenes(scenes, frames, work_dir, *, resume=True):
     """对每个场景的关键帧调用 VLM 进行视觉分析（并行）"""
     if not scenes:
         analyses = []
@@ -176,34 +210,71 @@ def analyze_scenes(scenes, frames, work_dir):
 
         return i, result
 
-    # 并行调用 VLM
-    analyses = [None] * len(scenes)
-    max_workers = min(len(scenes), CONFIG.get("vlm_workers", 4))
-    log(f"VLM 并行分析 {len(scenes)} 个场景 (workers={max_workers})...")
+    # 断点续传：逐场景持久化分析结果，避免少数场景失败（多为 429 限流）时整批画面理解全部作废。
+    cache = _load_vlm_scene_cache(work_dir) if resume else {}
+    prompt_fp = stable_hash(vlm_prompt)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_analyze_single_scene, i, s): i for i, s in enumerate(scenes)}
+    def _scene_cache_key(i, scene):
+        return "|".join(str(x) for x in (
+            i, round(float(scene["start"]), 3), round(float(scene["end"]), 3),
+            CONFIG.get("vlm_model"), prompt_fp, CONFIG.get("vlm_max_tokens"),
+            CONFIG.get("vlm_seconds_per_frame"), CONFIG.get("vlm_max_frames"),
+            round(float(fps), 3),
+        ))
+
+    analyses = [None] * len(scenes)
+    todo = []
+    for i, s in enumerate(scenes):
+        cached = cache.get(_scene_cache_key(i, s))
+        analyses[i] = cached if isinstance(cached, dict) else None
+        if analyses[i] is None:
+            todo.append(i)
+    if todo and len(todo) < len(scenes):
+        log(f"VLM 复用 {len(scenes) - len(todo)} 个已缓存场景，待分析 {len(todo)} 个")
+
+    def _run_pass(indices, workers):
+        """分析给定场景索引；每完成一个就把结果写入续传缓存（在主线程，无需加锁）。返回 (i, err) 失败列表。"""
+        if not indices:
+            return []
         failures = []
-        for future in as_completed(futures):
-            try:
-                idx, result = future.result()
-                analyses[idx] = result
-            except Exception as e:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+            futures = {executor.submit(_analyze_single_scene, i, scenes[i]): i for i in indices}
+            for future in as_completed(futures):
                 i = futures[future]
-                log(f"VLM 场景 {i+1} 分析失败: {e}")
-                failures.append((i, str(e)))
+                try:
+                    idx, result = future.result()
+                    analyses[idx] = result
+                    cache[_scene_cache_key(idx, scenes[idx])] = result
+                    _flush_vlm_scene_cache(work_dir, cache)  # 持久化进度，崩溃/中止后可续传
+                except Exception as e:  # noqa: BLE001 - 单个场景失败不能拖垮其余已完成的
+                    log(f"VLM 场景 {i+1} 分析失败: {e}")
+                    failures.append((i, str(e)))
+        return failures
+
+    base_workers = min(len(todo) or 1, int(CONFIG.get("vlm_workers", 4) or 4))
+    log(f"VLM 并行分析 {len(todo)} 个场景 (workers={base_workers})...")
+    failures = _run_pass(todo, base_workers)
+    if failures:
+        # 限流(429)多是并发瞬时拥塞，降并发重试一轮（已成功的从缓存跳过）；其它错误（空响应/解析失败）
+        # 重试无益，直接保留为失败，不浪费一轮调用。
+        rate_limited = [i for i, msg in failures if _looks_rate_limited(msg)]
+        persistent = [(i, msg) for i, msg in failures if not _looks_rate_limited(msg)]
+        if rate_limited:
+            retry_workers = max(1, base_workers // 4)
+            log(f"VLM {len(rate_limited)} 个场景疑似限流(429)，降并发到 {retry_workers} 重试...")
+            persistent += _run_pass(rate_limited, retry_workers)
+        failures = persistent
 
     if failures:
         sample = "; ".join(f"场景 {i+1}: {msg}" for i, msg in failures[:3])
         raise RuntimeError(
-            f"VLM 分析失败 {len(failures)}/{len(scenes)} 个场景，已中止以避免缓存不完整画面理解。"
-            f"示例: {sample}"
+            f"VLM 分析失败 {len(failures)}/{len(scenes)} 个场景。其余已缓存到 vlm_scene_cache.json，"
+            f"重跑可断点续传（只重试失败场景）。示例: {sample}"
         )
 
-    # 保存
     vlm_file = work_dir / "vlm_analysis.json"
     vlm_file.write_text(json.dumps(analyses, ensure_ascii=False, indent=2), encoding="utf-8")
-
+    _vlm_scene_cache_path(work_dir).unlink(missing_ok=True)  # 完整理解已生成，续传缓存可清理
     log(f"VLM 分析完成: {len(analyses)} 个场景")
     return analyses
 
