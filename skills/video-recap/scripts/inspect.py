@@ -204,7 +204,14 @@ def _output_to_source(out, clip):
 
 
 def _overlap(a0, a1, b0, b1):
-    """Intersection [lo, hi] of two closed ranges, or None when they do not overlap."""
+    """Intersection [lo, hi] of two closed ranges, or None when they do not overlap.
+
+    A zero-width query (a0 == a1, e.g. --output-start 10 --output-end 10) is treated as a
+    POINT lookup: it returns (a0, a0) when the point lies within [b0, b1], so a point that sits
+    inside a clip is reported instead of silently falling through to "not in any clip".
+    """
+    if a0 == a1:
+        return (a0, a0) if b0 <= a0 <= b1 else None
     lo, hi = max(a0, b0), min(a1, b1)
     return (lo, hi) if hi > lo else None
 

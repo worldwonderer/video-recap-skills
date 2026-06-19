@@ -197,6 +197,20 @@ def test_clip_map_source_to_output_exact_numbers(tmp_path):
     assert seg["output"] == [11.0, 14.0]  # 10 + (51-50)=11 ; 10 + (54-50)=14
 
 
+def test_clip_map_point_query_inside_clip_resolves(tmp_path):
+    """A zero-width query (start == end) is a POINT lookup: a point inside a clip resolves to
+    that clip instead of silently falling through to 'not in any clip'."""
+    _write_plan(tmp_path)
+    result = recap_inspect.cmd_clip_map(
+        tmp_path, output_start=5.0, output_end=5.0,
+        source_start=None, source_end=None, compact=True)
+    q = result["queries"][0]
+    assert q["clips_touched"] == [0]
+    seg = q["segments"][0]
+    assert seg["output"] == [5.0, 5.0]
+    assert seg["source"] == [15.0, 15.0]  # 10 + (5-0) = 15
+
+
 def test_clip_map_output_query_straddling_two_clips_flagged(tmp_path):
     """An OUTPUT window crossing the clip0/clip1 join is flagged cross-clip and yields one
     mapped segment per clip with exact source numbers."""
