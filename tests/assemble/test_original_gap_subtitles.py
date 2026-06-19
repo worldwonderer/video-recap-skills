@@ -93,6 +93,25 @@ def test_original_gap_entries_gated_off(monkeypatch, tmp_path):
     assert assemble._original_gap_subtitle_entries([], tmp_path, 10.0) == []
 
 
+def test_original_gap_entries_use_user_subs_even_without_mask(monkeypatch, tmp_path):
+    """A bring-your-own user_subtitles file populates the gaps even with mask OFF — the clean/foreign
+    source case (no burned subs to double). Without a user file, mask OFF still yields nothing."""
+    monkeypatch.setitem(assemble.CONFIG, "burn_subtitles", True)
+    monkeypatch.setitem(assemble.CONFIG, "mask_source_subtitles", False)   # nothing to mask
+    monkeypatch.setitem(assemble.CONFIG, "subtitle_original_in_gaps", True)
+    segs = [{"actual_place_start": 5.0, "actual_place_end": 8.0, "narration": "解说"}]
+
+    # no user file → mask OFF keeps the gate closed (don't double the source's own visible subs)
+    assert assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0) == []
+
+    # drop in user_subtitles.srt → gaps fill from it despite mask OFF
+    (tmp_path / "user_subtitles.srt").write_text(
+        "1\n00:00:01,000 --> 00:00:04,000\n原声台词\n\n", encoding="utf-8")
+    entries = assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0)
+    assert entries and all(e["text"] for e in entries)
+    assert all(1.0 <= e["start"] and e["end"] <= 4.0 + 1e-6 for e in entries)
+
+
 def test_original_gap_entries_full_mode(monkeypatch, tmp_path):
     _burn_on(monkeypatch)
     (tmp_path / "asr_result.json").write_text(
