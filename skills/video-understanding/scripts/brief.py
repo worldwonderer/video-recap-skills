@@ -179,7 +179,7 @@ def _chunk_asr_for_writing(segments, scenes_analysis=None, min_chars=None, max_c
             "chunk_id": len(chunks),
             "start": round(float(current[0]["start"]), 2),
             "end": round(float(current[-1]["end"]), 2),
-            "scene_ids": sorted(current_scene_ids),
+            "scene_ids": sorted(current_scene_ids, key=lambda sid: (isinstance(sid, str), sid)),
             "char_count": current_units,
             "text": " ".join(piece["text"] for piece in current).strip(),
             "segments": current,
