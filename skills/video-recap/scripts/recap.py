@@ -123,9 +123,10 @@ def _run_narration_review(work_dir, args, *, timeline="source"):
         return False
     try:
         _clear_narration_review_artifacts(work_dir)
-        rargs = ["--work-dir", work_dir]
-        if timeline != "source":
-            rargs += ["--timeline", timeline]
+        # Always pin the grounding timeline explicitly so the orchestrated review never falls
+        # through to review.py's auto-detect (which could flip on stale cut artifacts left in a
+        # reused full-mode work_dir).
+        rargs = ["--work-dir", work_dir, "--timeline", timeline]
         _run("video-script", "review.py", *rargs)
     except SystemExit as exc:
         if strict:

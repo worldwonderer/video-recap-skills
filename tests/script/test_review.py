@@ -132,6 +132,32 @@ def test_auto_timeline_detects_validated_cut(tmp_path):
     assert review._auto_timeline(tmp_path) == "cut_output"
 
 
+def _write_manifest(work_dir, edit_mode):
+    (work_dir / "recap_run_manifest.json").write_text(
+        json.dumps({"settings": {"edit_mode": edit_mode}}, ensure_ascii=False), encoding="utf-8")
+
+
+def test_auto_timeline_legacy_single_pass_stays_source(tmp_path):
+    """The legacy direct video-cut single-pass path writes a SOURCE-time narration.json next to
+    an output-time narration_mapped.json. The cut artifacts are present but narration.json is NOT
+    output time, so auto-detect must stay on source (else it inverts the review)."""
+    (tmp_path / "clip_plan_validated.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "edited_source.mp4").write_bytes(b"")
+    (tmp_path / "narration_mapped.json").write_text("[]", encoding="utf-8")
+    assert review._auto_timeline(tmp_path) == "source"
+
+
+def test_auto_timeline_trusts_manifest_edit_mode(tmp_path):
+    """recap_run_manifest.json is authoritative: full mode stays source even with stale cut
+    artifacts in a reused work_dir, and cut mode selects cut_output."""
+    (tmp_path / "clip_plan_validated.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "edited_source.mp4").write_bytes(b"")
+    _write_manifest(tmp_path, "full")
+    assert review._auto_timeline(tmp_path) == "source"  # stale cut artifacts must not flip it
+    _write_manifest(tmp_path, "cut")
+    assert review._auto_timeline(tmp_path) == "cut_output"
+
+
 def test_cut_output_review_remaps_grounding_to_output_timeline():
     spans = [{"source_start": 10.0, "source_end": 20.0, "output_start": 0.0, "output_end": 10.0}]
     vlm, asr = review.remap_grounding_to_output_timeline(

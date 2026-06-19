@@ -453,12 +453,31 @@ def review_narration(work_dir, *, timeline="source"):
 
 def _auto_timeline(work_dir):
     """Default the grounding timeline so a manual `review.py --work-dir` matches what the
-    orchestrator does: cut_output when this is a validated cut (clip_plan_validated.json +
-    edited_source.mp4 both present), else source. Without this, reviewing a cut narration on
-    the default 'source' timeline compares OUTPUT-time narration against SOURCE-time evidence
-    and floods false-positive 'hallucination' findings."""
+    orchestrator does: cut_output when narration.json is in the cut OUTPUT timeline, else
+    source. Without this, reviewing a cut narration on the default 'source' timeline compares
+    OUTPUT-time narration against SOURCE-time evidence and floods false-positive 'hallucination'
+    findings (and the inverse flood for a legacy source-time narration mis-read as cut_output).
+
+    Detection is authoritative-first: the orchestrator records the run's edit_mode in
+    recap_run_manifest.json. In orchestrated cut mode narration.json is OUTPUT time; in full
+    mode it is SOURCE time. Trusting edit_mode is correct even when stale cut artifacts from a
+    prior run linger in a reused work_dir. Only when no manifest is present (standalone review
+    or a hand-built work_dir) do we fall back to artifact sniffing — and even then the legacy
+    direct video-cut single-pass path writes a SOURCE-time narration.json alongside a separate
+    output-time narration_mapped.json, so its presence pins us back to source."""
     work_dir = Path(work_dir)
-    if (work_dir / "clip_plan_validated.json").exists() and (work_dir / "edited_source.mp4").exists():
+    manifest = work_dir / "recap_run_manifest.json"
+    if manifest.exists():
+        try:
+            mode = json.loads(manifest.read_text(encoding="utf-8")).get("settings", {}).get("edit_mode")
+        except (ValueError, OSError):
+            mode = None
+        if mode == "cut":
+            return "cut_output"
+        if mode:  # "full" or any non-cut mode → narration.json is source time
+            return "source"
+    has_cut = (work_dir / "clip_plan_validated.json").exists() and (work_dir / "edited_source.mp4").exists()
+    if has_cut and not (work_dir / "narration_mapped.json").exists():
         return "cut_output"
     return "source"
 
