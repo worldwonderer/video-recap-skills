@@ -237,27 +237,3 @@ CLI 校验 `clip_plan.json` 后写出，额外包含输出时间轴：
 ```
 
 > `character_details`、`plot_arcs`、`cultural_notes` 为（可选，新增）字段。仅含 `synopsis`、`characters`、`worldbuilding`、`episode_context` 四个原始字段的旧 JSON 仍然有效。
-
-## workflow_state.json
-
-统一步骤状态文件。`.step_*.done` 仍保留用于兼容旧工作目录和手动清理习惯，但新的续跑逻辑会同时写入 `workflow_state.json`，记录视频内容指纹、每步状态、耗时和参数指纹。
-
-```json
-{
-  "schema_version": 1,
-  "input_video": "/path/to/video.mp4",
-  "video_fingerprint": "md5...",
-  "started_at": "2026-06-06T12:00:00Z",
-  "steps": {
-    "extract": {
-      "status": "done",
-      "progress": 100,
-      "started_at": "2026-06-06T12:00:01Z",
-      "completed_at": "2026-06-06T12:00:05Z",
-      "elapsed_s": 4.0,
-      "params": {"fps": 1},
-      "params_fingerprint": "md5..."
-    }
-  }
-}
-```

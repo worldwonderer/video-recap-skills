@@ -10,13 +10,13 @@
 
 ## Demo
 
-<video src="https://github.com/user-attachments/assets/92698ec6-0d23-4f9f-8825-c3684ef57aff" width="640" controls></video>
+<video src="https://github.com/user-attachments/assets/aa96bd1d-ce4b-42bd-a7df-439aeb63dd18" width="640" controls></video>
 
-Beyond the rendered MP4, you can export a **剪映/JianYing draft** to keep editing by hand — original clips, narration, BGM, and subtitles each on their own track:
+Beyond the rendered MP4, you can export a **剪映/JianYing draft** to keep editing by hand, with original clips, narration, BGM, and subtitles each on their own track:
 
 <img alt="Exported 剪映 draft: original clips, narration, BGM, and subtitles each on their own track" src="docs/jianying-export.png" width="70%">
 
-## What is it?
+## What it is
 
 ```mermaid
 flowchart LR
@@ -29,11 +29,11 @@ flowchart LR
     class research,cut opt;
 ```
 
-## Why use it?
+## Why use it
 
 - **One key, runs anywhere.** ASR, VLM, and TTS all go through [Xiaomi MiMo](https://platform.xiaomimimo.com); `ffmpeg` is the only local dependency.
-- **Research when it matters.** When the title/story context is known or the brief says the substrate is thin, put character relationships and plot background in `background_research.json` so the VLM knows who's who; skip it when network/context is unavailable.
-- **Narration in blocks, original in blocks.** Narration plays in connected blocks, each voiced in one pass; in the gaps between, the original audio plays at full volume — roughly 7:3.
+- **Research when it matters.** When the title/story context is known or the brief notes the material is thin, put character relationships and plot background in `background_research.json` so the VLM knows who's who; skip it when network/context is unavailable.
+- **Narration in blocks, original in blocks.** Narration plays in connected blocks, each voiced in one pass; in the gaps, the original audio returns at full volume — roughly 7:3.
 - **Cut first, no drift.** `--edit-mode cut` renders the cut first, then you narrate against that timeline, so picture and voice stay in sync; an LLM pass reviews the draft before TTS.
 - **Keep editing in 剪映.** Optionally export a multi-track 剪映 draft — original, narration, BGM, and subtitles each on a track; the core render needs only `ffmpeg`.
 
@@ -45,7 +45,7 @@ flowchart LR
 Install this plugin: https://github.com/worldwonderer/video-recap-skills
 ```
 
-**② Install ffmpeg** (the pipeline needs no `pip install` — just the standard library and `ffmpeg` on `PATH`, Python 3.10+):
+**② Install ffmpeg** (no `pip install`: pure standard library + `ffmpeg` on `PATH`, Python 3.10+):
 
 ```bash
 brew install ffmpeg                        # macOS
@@ -53,9 +53,9 @@ sudo apt install ffmpeg                     # Debian/Ubuntu
 choco install ffmpeg                        # Windows (or scoop / winget install ffmpeg)
 ```
 
-Subtitles are burned into the picture by default, which needs an ffmpeg built with **libass (the `subtitles` filter)** — the packages above include it in almost all cases. If yours lacks libass, the run fails fast at the start with a clear message (or pass `--no-burn-subtitles` to keep the MP4 unmasked and subtitles as a sidecar `.srt`). Run `python3 scripts/recap.py --doctor` to self-check.
+Subtitles are burned into the picture by default, which needs an ffmpeg built with **libass (the `subtitles` filter)** — the packages above include it in almost all cases. If yours lacks libass, the run fails fast at the start with a clear message (or pass `--no-burn-subtitles` to keep the MP4 unmasked and subtitles as a sidecar `.srt`). Run `python3 skills/video-recap/scripts/recap.py --doctor` to self-check.
 
-**③ Set your MiMo API key** (one key powers ASR / VLM / TTS — keep it in an env var, never in the repo):
+**③ Set your MiMo API key** (one key powers ASR / VLM / TTS — register at [platform.xiaomimimo.com](https://platform.xiaomimimo.com), then keep it in an env var, never in the repo):
 
 ```bash
 export MIMO_API_KEY=your-mimo-key
@@ -63,7 +63,7 @@ export MIMO_API_KEY=your-mimo-key
 export MIMO_TOKEN_PLAN_CLUSTER=cn
 ```
 
-Pay-as-you-go `sk-*` keys default to `https://api.xiaomimimo.com/v1`. Everything else has a default; to change a model, the voice, loudness, subtitles, or set a key/URL per capability, see the
+Pay-as-you-go `sk-*` keys default to `https://api.xiaomimimo.com/v1`. Everything else has a default; to change the model, voice, loudness, or subtitles, or set a key/URL per capability, see the
 [config playbook](skills/video-recap/references/config-playbook.md).
 
 ## Usage
@@ -99,7 +99,7 @@ python3 skills/video-recap/scripts/recap.py --doctor
 
 ## Output
 
-- `recap_<video>.mp4`: the final recap; a stable output alias overwritten in place on every run, so iterating on the narration refreshes the same file. `subtitles.srt` (plus `subtitles.ass`; subtitle burn-in is on by default, `--no-burn-subtitles` to disable)
+- `recap_<name>.mp4`: the final recap; a stable alias overwritten in place on every run. `subtitles.srt` (plus `subtitles.ass`; subtitle burn-in is on by default, `--no-burn-subtitles` to disable)
 - `work_dir/narration.json`: the narration script (`narration_lint.json` timing diagnostics, `narration_review.md` review notes)
 - `work_dir/agent_narration_brief.md`: timing and scene brief for the agent
 - `work_dir/vlm_analysis.json` · `asr_result.json` · `silence_periods.json` · `timeline_fusion.json`: understanding artifacts

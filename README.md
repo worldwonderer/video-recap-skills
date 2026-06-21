@@ -45,7 +45,7 @@ flowchart LR
 安装这个插件：https://github.com/worldwonderer/video-recap-skills
 ```
 
-**② 装 ffmpeg**（流水线本身不用 `pip install`，脚本都是标准库 + `PATH` 上的 `ffmpeg`，Python 3.10+）：
+**② 装 ffmpeg**（不用 `pip install`：纯标准库 + `PATH` 上的 `ffmpeg`，Python 3.10+）：
 
 ```bash
 brew install ffmpeg                        # macOS
@@ -53,9 +53,9 @@ sudo apt install ffmpeg                     # Debian/Ubuntu
 choco install ffmpeg                        # Windows（或 scoop / winget install ffmpeg）
 ```
 
-字幕默认烧进画面，需要带 **libass（`subtitles` 滤镜）** 的 ffmpeg——上面这些包基本都自带。如果你的 ffmpeg 没编 libass，开跑前会立刻报错并提示（也可以加 `--no-burn-subtitles` 输出未遮黑条的 MP4 + `.srt` 外挂字幕）。用 `python3 scripts/recap.py --doctor` 自检。
+字幕默认烧进画面，需要带 **libass（`subtitles` 滤镜）** 的 ffmpeg——上面这些包基本都自带。如果你的 ffmpeg 没编 libass，开跑前会立刻报错并提示（也可以加 `--no-burn-subtitles` 输出未遮黑条的 MP4 + `.srt` 外挂字幕）。用 `python3 skills/video-recap/scripts/recap.py --doctor` 自检。
 
-**③ 配 MiMo API Key**（一个 key 同时驱动 ASR / VLM / TTS）：
+**③ 配 MiMo API Key**（一个 key 同时驱动 ASR / VLM / TTS；先在 [platform.xiaomimimo.com](https://platform.xiaomimimo.com) 注册获取）：
 
 ```bash
 export MIMO_API_KEY=your-mimo-key
@@ -99,7 +99,7 @@ python3 skills/video-recap/scripts/recap.py --doctor
 
 ## 输出
 
-- `recap_<video>.mp4`：成片（固定输出名，每次运行原地覆盖，迭代解说时刷新同一文件）。`subtitles.srt`（默认烧录字幕，同时产出 `subtitles.ass`；`--no-burn-subtitles` 关闭）
+- `recap_<名>.mp4`：成片（固定输出名，每次运行原地覆盖）。`subtitles.srt`（默认烧录字幕，同时产出 `subtitles.ass`；`--no-burn-subtitles` 关闭）
 - `work_dir/narration.json`：解说脚本（`narration_lint.json` 时间诊断、`narration_review.md` 评审意见）
 - `work_dir/agent_narration_brief.md`：给 Agent 的时间和场景 brief
 - `work_dir/vlm_analysis.json` · `asr_result.json` · `silence_periods.json` · `timeline_fusion.json`：理解产物

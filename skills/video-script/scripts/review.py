@@ -11,13 +11,12 @@ Output: narration_review.json (structured) + narration_review.md (readable). Adv
 verdict REVISE means "fix and re-review"; it never blocks (validate.py is the hard gate).
 """
 import argparse
-import hashlib
 import json
 import math
 import re
 from pathlib import Path
 
-from lib import CONFIG, log, api_call
+from lib import CONFIG, log, api_call, stable_hash
 
 CATEGORIES = [
     "hallucination", "weak_hook", "no_throughline", "narrating_picture",
@@ -41,10 +40,6 @@ RUBRIC = """你是中文视频解说稿的严格评审。依据以下规则审�
 {"verdict":"REVISE|OK","summary":"一两句总体判断","findings":[{"segment":<草稿段号(从0起)或null表示整体>,"severity":"error|warning|suggestion","category":"<上面类别之一>","issue":"问题","fix":"具体改法"}]}"""
 
 
-
-def _value_fingerprint(value):
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
 def _load(work_dir, name):
     path = Path(work_dir) / name
@@ -71,7 +66,7 @@ def _load_cut_clip_spans(work_dir):
     if not isinstance(plan, dict):
         return None
     raw_plan = _load(work_dir, "clip_plan.json")
-    if raw_plan is not None and plan.get("raw_plan_fingerprint") != _value_fingerprint(raw_plan):
+    if raw_plan is not None and plan.get("raw_plan_fingerprint") != stable_hash(raw_plan):
         return None
     clips = plan.get("clips")
     if not isinstance(clips, list):
