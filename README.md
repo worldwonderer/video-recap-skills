@@ -20,12 +20,15 @@
 
 ```mermaid
 flowchart LR
-    research["背景调研"] --> understand
-    video(["视频"]) --> understand["理解<br/>场景·ASR·VLM"] --> script["写稿<br/>Agent"] --> voiceover["配音<br/>MiMo TTS"] --> assemble["组装<br/>混音·字幕"] --> output(["Recap"])
-    understand -. 剪辑模式：先剪后配 .-> cut["剪辑<br/>先剪成片"] -.-> script
-    classDef io fill:#eef6ff,stroke:#4f86c6,color:#1f2937;
-    classDef opt fill:#f3f4f6,stroke:#9ca3af,color:#374151;
+    video(["视频"]) --> understand["① 理解<br/>场景 · ASR · VLM"]
+    research["背景调研 · 可选"] -.-> understand
+    understand --> script["② 写稿<br/>Agent"] --> voiceover["③ 配音<br/>MiMo TTS"] --> assemble["④ 组装<br/>混音 · 字幕"] --> output(["Recap"])
+    understand -. 剪辑模式 · 先剪后配 .-> cut["剪辑<br/>先剪成片"] -.-> script
+    classDef io fill:#4f86c6,stroke:#3a6298,color:#fff;
+    classDef stage fill:#eef6ff,stroke:#4f86c6,color:#1f2937;
+    classDef opt fill:#f3f4f6,stroke:#9ca3af,color:#475569;
     class video,output io;
+    class understand,script,voiceover,assemble stage;
     class research,cut opt;
 ```
 

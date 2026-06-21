@@ -6,36 +6,39 @@
 
 [中文](README.md) · English
 
-**Turn any video into a Chinese-narration recap, from one sentence inside Claude Code.** All it needs locally is `ffmpeg` and one Xiaomi MiMo API key — no GPU, no model downloads, on macOS / Linux / Windows.
+**One sentence in Claude Code turns any video into a Chinese-narration recap.** All it needs locally is `ffmpeg` and one Xiaomi MiMo API key — no GPU, no model downloads, runs on macOS / Linux / Windows.
 
 ## Demo
 
 <video src="https://github.com/user-attachments/assets/aa96bd1d-ce4b-42bd-a7df-439aeb63dd18" width="640" controls></video>
 
-Beyond the rendered MP4, you can export a **剪映/JianYing draft** to keep editing by hand, with original clips, narration, BGM, and subtitles each on their own track:
+Beyond the rendered MP4, you can export a **剪映/JianYing draft** to keep editing by hand, with original clips, narration, BGM, and subtitles:
 
-<img alt="Exported 剪映 draft: original clips, narration, BGM, and subtitles each on their own track" src="docs/jianying-export.png" width="70%">
+<img alt="Exported 剪映 draft: original clips, narration, BGM, and subtitles" src="docs/jianying-export.png" width="100%">
 
 ## What it is
 
 ```mermaid
 flowchart LR
-    research["Story research"] --> understand
-    video(["Video"]) --> understand["Understand<br/>scenes·ASR·VLM"] --> script["Script<br/>agent"] --> voiceover["Voiceover<br/>MiMo TTS"] --> assemble["Assemble<br/>mux·subtitles"] --> output(["Recap"])
-    understand -. cut mode: cut first .-> cut["Cut<br/>render first"] -.-> script
-    classDef io fill:#eef6ff,stroke:#4f86c6,color:#1f2937;
-    classDef opt fill:#f3f4f6,stroke:#9ca3af,color:#374151;
+    video(["Video"]) --> understand["① Understand<br/>scenes · ASR · VLM"]
+    research["Story research · optional"] -.-> understand
+    understand --> script["② Script<br/>agent"] --> voiceover["③ Voiceover<br/>MiMo TTS"] --> assemble["④ Assemble<br/>mux · subtitles"] --> output(["Recap"])
+    understand -. cut mode · cut first .-> cut["Cut<br/>render first"] -.-> script
+    classDef io fill:#4f86c6,stroke:#3a6298,color:#fff;
+    classDef stage fill:#eef6ff,stroke:#4f86c6,color:#1f2937;
+    classDef opt fill:#f3f4f6,stroke:#9ca3af,color:#475569;
     class video,output io;
+    class understand,script,voiceover,assemble stage;
     class research,cut opt;
 ```
 
 ## Why use it
 
 - **One key, runs anywhere.** ASR, VLM, and TTS all go through [Xiaomi MiMo](https://platform.xiaomimimo.com); `ffmpeg` is the only local dependency.
-- **Research when it matters.** When the title/story context is known or the brief notes the material is thin, put character relationships and plot background in `background_research.json` so the VLM knows who's who; skip it when network/context is unavailable.
+- **Research when it matters.** When the title/story context is known or the brief notes the material is thin, put character relationships and plot background in `background_research.json` so the VLM knows who's who.
 - **Narration in blocks, original in blocks.** Narration plays in connected blocks, each voiced in one pass; in the gaps, the original audio returns at full volume — roughly 7:3.
-- **Cut first, no drift.** `--edit-mode cut` renders the cut first, then you narrate against that timeline, so picture and voice stay in sync; an LLM pass reviews the draft before TTS.
-- **Keep editing in 剪映.** Optionally export a multi-track 剪映 draft — original, narration, BGM, and subtitles each on a track; the core render needs only `ffmpeg`.
+- **Cut first, frames aligned.** `--edit-mode cut` renders the cut first, then you narrate against that timeline, so picture and voice stay in sync.
+- **Keep editing in 剪映.** Optionally export a multi-track 剪映 draft — original, narration, BGM, and subtitles each on a track.
 
 ## Installation
 
@@ -74,7 +77,7 @@ Point it at a video and give it whatever story context you have:
 Make a recap of /path/to/video.mp4. It's 庆余年 episode 1; the lead is 范闲.
 ```
 
-It analyzes the video, writes the narration against that context, and produces `recap_<name>.mp4` with subtitles. Ask for variations the same way:
+It analyzes the video, writes the narration against that context, and produces `recap_<name>.mp4` with subtitles.
 
 ```text
 Turn /path/to/long.mp4 into a ~10-minute cut-down recap and burn the subtitles in.
