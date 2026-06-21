@@ -104,6 +104,7 @@ def _synthesize_segment(i, seg, narration, tts_dir, engine):
         target_chars = max(5, int(raw_budget * chars_per_sec) - 1)
         truncated = _truncate_at_sentence(text, target_chars)
         if truncated and len(truncated) >= 5 and truncated != text:
+            log(f"  段 {i+1}: 解说超出片段时长，自动截断 {len(text)}→{len(truncated)} 字以适配（建议在解说里改写得更短）")
             text = truncated
             _run_tts_engine(engine, text, output_wav, rate=rate, pitch=pitch, emotion=seg.get("emotion"))
             dur = _get_audio_duration(output_wav)

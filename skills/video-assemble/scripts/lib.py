@@ -192,10 +192,10 @@ CONFIG = {
     "mimo_disable_thinking": env_bool("MIMO_DISABLE_THINKING", True),
     "mimo_disable_thinking_source": "env" if os.environ.get("MIMO_DISABLE_THINKING") else "default",
     "fps": 0,  # 0 = 自动（≤60s→2fps, ≤5min→1.5fps, >5min→1fps）
-    # TTS 语速（字符/秒），由校准得出。MiMo TTS 中文约 3.5 字/秒
+    # TTS 语速（字符/秒）。实测 mimo-tts 冰糖音色中位 ~3.9 字/秒，可用 SPEECH_RATE 覆盖
     # 生成解说时使用 speech_rate * safety_margin 作为约束
-    "speech_rate": 3.5,
-    "speech_safety_margin": 0.85,  # 保守系数：TTS 实际语速有 ±20% 波动
+    "speech_rate": env_float("SPEECH_RATE", 3.9, minimum=0.5),  # 旧值 3.5 系统性偏低 ~10-17%
+    "speech_safety_margin": env_float("SPEECH_SAFETY_MARGIN", 0.85, minimum=0.1),  # 保守系数：TTS 实际语速有 ±20% 波动
     # Block-coverage lint thresholds — promoted from inline .get() literals to real CONFIG keys (tunable; defaults unchanged)
     "narration_coverage_target": 0.7,   # aim ~70% narrated:original (7:3)
     "narration_coverage_min": 0.5,      # below this coverage → under_narrated
