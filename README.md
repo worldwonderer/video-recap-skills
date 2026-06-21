@@ -89,6 +89,22 @@ export MIMO_TOKEN_PLAN_CLUSTER=cn
 python3 skills/video-recap/scripts/recap.py --doctor
 ```
 
+## 英语视频→中文配音 · 保留原音色（实验性）
+
+把英文视频翻译成中文，并用**原说话人的音色**配音（克隆，而非固定音色），画面不变。这与上面的「解说」不同：解说是在原声之上叠加中文评述；配音是把原始台词**替换**成忠实翻译的中文。
+
+```bash
+export MIMO_API_KEY=your-mimo-key
+export MIMO_TOKEN_PLAN_CLUSTER=cn
+python3 skills/video-voiceover/scripts/dub.py --video /path/to/english.mp4 --work-dir /tmp/dub
+```
+
+流程：抽音频 → ASR（英文，按句切分）→ 逐句翻译（按时长控字数）→ 取一段参考音 → `mimo-v2.5-tts-voiceclone` 克隆配音 → 按**原句时间轴**贴合（只在会超出下一句时才压速，绝不整体提速，避免人声比画面提前结束）→ 整轨替换 → 输出 `dub_<名>.mp4`。
+
+**自动质检**：每句合成后用 MiMo ASR 回转文字与译文比对（写入 `dub_qc.json`），相似度过低自动重新合成——确保配音清晰不糊。
+
+> ⚠️ 实验性：v1 仅支持单说话人、整轨替换（不保留背景音乐）、译稿自动生成（无人工校对）；跨语言克隆的音色自然度取决于参考音质量。后续会并入编排器作为 `--edit-mode dub`。
+
 ## 架构
 
 | Skill | 职责 | 输入 → 输出（`work_dir` 契约） |

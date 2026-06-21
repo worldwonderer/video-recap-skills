@@ -89,6 +89,22 @@ Behind the scenes the orchestrator chains the stages, pausing so the agent can w
 python3 skills/video-recap/scripts/recap.py --doctor
 ```
 
+## English video → Chinese dub · original voice (experimental)
+
+Translate an English video into Chinese and voice it in the **original speaker's timbre** (cloned, not a fixed voice), leaving the picture unchanged. Unlike "recap" above (Chinese commentary layered over the original audio), dubbing **replaces** the original speech with a faithful Chinese translation.
+
+```bash
+export MIMO_API_KEY=your-mimo-key
+export MIMO_TOKEN_PLAN_CLUSTER=cn
+python3 skills/video-voiceover/scripts/dub.py --video /path/to/english.mp4 --work-dir /tmp/dub
+```
+
+Pipeline: extract audio → ASR (English, split into sentences) → translate per sentence (length-budgeted) → take one reference clip → clone with `mimo-v2.5-tts-voiceclone` → fit each line to its **source-sentence** timeline (only speed up when it would overrun the next line — never a global speed-up, so the voice never finishes ahead of the picture) → full-track replace → write `dub_<name>.mp4`.
+
+**Built-in QC:** every synthesized line is round-tripped through MiMo ASR and compared to the intended text (written to `dub_qc.json`); low-similarity lines are auto-re-synthesized — so the dub stays clear, not garbled.
+
+> ⚠️ Experimental: v1 is single-speaker, full-track replace (no background-music separation), with auto-generated translations (no human proofread); cross-lingual clone naturalness depends on the reference-audio quality. It will fold into the orchestrator as `--edit-mode dub`.
+
 ## Architecture
 
 | Skill | Does | In → Out (the `work_dir` contract) |
