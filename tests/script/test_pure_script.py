@@ -518,7 +518,7 @@ def test_cut_validate_uses_validated_plan_when_raw_fingerprint_matches(tmp_path)
     validated = tmp_path / "clip_plan_validated.json"
     raw.write_text(json.dumps(raw_payload), encoding="utf-8")
     validated.write_text(json.dumps({
-        "raw_plan_fingerprint": validate._value_fingerprint(raw_payload),
+        "raw_plan_fingerprint": validate.stable_hash(raw_payload),
         "clips": [{"clip_id": 0, "source_start": 40.0, "source_end": 50.0}],
     }), encoding="utf-8")
 

@@ -6,12 +6,11 @@ understanding index produced by video-understanding. Writes narration_lint.json 
 in full mode, rewrites narration.json with quiet-window alignment applied.
 """
 import argparse
-import hashlib
 import json
 import math
 from pathlib import Path
 
-from lib import CONFIG, log
+from lib import CONFIG, log, stable_hash
 from narration import (
     validate_narration_or_raise,
     _validate_narration_budget,
@@ -22,11 +21,6 @@ from narration import (
 def _load(path):
     path = Path(path)
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
-
-
-def _value_fingerprint(value):
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
 
 def _load_cut_clip_plan(work_dir):
@@ -41,7 +35,7 @@ def _load_cut_clip_plan(work_dir):
     validated = _load(validated_plan)
     if (
         isinstance(validated, dict)
-        and validated.get("raw_plan_fingerprint") == _value_fingerprint(raw)
+        and validated.get("raw_plan_fingerprint") == stable_hash(raw)
     ):
         return validated
     # The orchestrator validates before video-cut refreshes clip_plan_validated.json.

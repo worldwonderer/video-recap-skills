@@ -205,7 +205,7 @@ def test_review_narration_cut_output_uses_remapped_grounding(monkeypatch, tmp_pa
     raw_plan = [{"start": 10, "end": 20}]
     (tmp_path / "clip_plan.json").write_text(json.dumps(raw_plan), encoding="utf-8")
     (tmp_path / "clip_plan_validated.json").write_text(json.dumps({
-        "raw_plan_fingerprint": review._value_fingerprint(raw_plan),
+        "raw_plan_fingerprint": review.stable_hash(raw_plan),
         "clips": [{"source_start": 10, "source_end": 20, "output_start": 0, "output_end": 10}],
     }), encoding="utf-8")
     payloads = []
