@@ -113,6 +113,7 @@ def test_doctor_warns_when_subtitle_burn_degraded(monkeypatch):
     assert "subtitle_burn" in _capability_names(report, "warnings/degraded")
     assert "recap_degraded_mode" in _capability_names(report, "warnings/degraded")
     assert "default_recap_pipeline" not in _capability_names(report, "ready")
+    assert _capability_names(report, "optional_upgrades") == {"jianying_export"}
 
 
 def test_doctor_blocks_default_pipeline_when_vlm_or_tts_override_missing(monkeypatch):
@@ -127,6 +128,16 @@ def test_doctor_blocks_default_pipeline_when_vlm_or_tts_override_missing(monkeyp
     assert report["ok"] is True
     assert {"mimo_vlm", "mimo_tts", "default_recap_pipeline"} <= _capability_names(report, "blocked")
     assert "default_recap_pipeline" not in _capability_names(report, "ready")
+
+
+def test_doctor_optional_upgrades_include_burn_only_when_available(monkeypatch):
+    _tools_present(monkeypatch)
+    for k in ("api_key", "mimo_asr_api_key", "mimo_tts_api_key", "mimo_video_api_key"):
+        monkeypatch.setitem(doctor.CONFIG, k, "tp-test-key")
+
+    report = doctor.build_report()
+
+    assert _capability_names(report, "optional_upgrades") == {"jianying_export", "burned_subtitles"}
 
 
 def test_doctor_human_output_prints_capability_menu(monkeypatch, capsys):
