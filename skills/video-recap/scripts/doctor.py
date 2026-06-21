@@ -18,6 +18,7 @@ from lib import CONFIG
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+DEGRADED_GROUP = "warnings/degraded"
 
 
 def _command_path(name: str) -> str | None:
@@ -73,6 +74,186 @@ def _asr_status() -> dict[str, object]:
         "mimo_asr_api_key_source": CONFIG.get("mimo_asr_api_key_source", "MIMO_API_KEY"),
         "note": "ASR uses MiMo (mimo-v2.5-asr); set MIMO_API_KEY, or run with --skip-asr.",
     }
+
+
+def _capability(name: str, summary: str, *, detail: str = "", action: str = "") -> dict[str, str]:
+    item = {"name": name, "summary": summary}
+    if detail:
+        item["detail"] = detail
+    if action:
+        item["action"] = action
+    return item
+
+
+def _build_capability_menu(checks: dict[str, object]) -> dict[str, list[dict[str, str]]]:
+    """Human-ready preflight summary grouped by what can run, what blocks, and what degrades.
+
+    This is intentionally a small rollup over the existing `checks` tree. It does not replace
+    the raw machine checks, install anything, or introduce provider ranking.
+    """
+    system = cast(dict[str, Any], checks["system_tools"])
+    api = cast(dict[str, Any], checks["api_config"])
+    asr = cast(dict[str, Any], checks["asr"])
+    tts = cast(dict[str, Any], checks["tts"])
+
+    menu: dict[str, list[dict[str, str]]] = {
+        "ready": [],
+        "blocked": [],
+        DEGRADED_GROUP: [],
+        "optional_upgrades": [],
+    }
+
+    ffmpeg_ready = bool(system.get("ffmpeg"))
+    ffprobe_ready = bool(system.get("ffprobe"))
+    subtitles_ready = bool(system.get("burn_subtitles_ready"))
+    api_key_set = bool(api.get("api_key_set"))
+    asr_ready = bool(asr.get("available"))
+    tts_ready = bool(tts.get("available"))
+    vlm_ready = bool(api.get("mimo_video_configured"))
+    normal_core_ready = ffmpeg_ready and ffprobe_ready and api_key_set and vlm_ready and tts_ready
+
+    if ffmpeg_ready and ffprobe_ready:
+        menu["ready"].append(
+            _capability(
+                "core_media_tools",
+                "ffmpeg and ffprobe are available",
+                detail="Local probing, cutting, rendering, and duration checks can run.",
+            )
+        )
+    else:
+        if not ffmpeg_ready:
+            menu["blocked"].append(
+                _capability("ffmpeg", "Missing ffmpeg", action="Install ffmpeg before running the recap pipeline.")
+            )
+        if not ffprobe_ready:
+            menu["blocked"].append(
+                _capability("ffprobe", "Missing ffprobe", action="Install ffprobe before running media probing/export.")
+            )
+
+    if api_key_set:
+        menu["ready"].append(
+            _capability(
+                "mimo_credentials",
+                "MiMo API key is configured",
+                detail=f"Source: {api.get('api_key_source')}",
+            )
+        )
+    else:
+        menu["blocked"].append(
+            _capability(
+                "mimo_credentials",
+                "Missing MIMO_API_KEY",
+                action="Set MIMO_API_KEY; the default ASR / VLM / TTS path depends on it.",
+            )
+        )
+
+    if vlm_ready:
+        menu["ready"].append(
+            _capability(
+                "mimo_vlm",
+                "MiMo VLM/video understanding is configured",
+                detail=f"Model: {api.get('vlm_model')}",
+            )
+        )
+    elif api_key_set:
+        menu["blocked"].append(
+            _capability(
+                "mimo_vlm",
+                "MiMo VLM/video understanding is not configured",
+                action="Set MIMO_VIDEO_API_KEY or the shared MIMO_API_KEY before video understanding.",
+            )
+        )
+
+    if tts_ready:
+        menu["ready"].append(
+            _capability(
+                "mimo_tts",
+                "MiMo TTS is configured",
+                detail=f"Voice: {tts.get('mimo_tts_voice')}; model: {tts.get('mimo_tts_model')}",
+            )
+        )
+    elif api_key_set:
+        menu["blocked"].append(
+            _capability(
+                "mimo_tts",
+                "MiMo TTS is not configured",
+                action="Set MIMO_TTS_API_KEY or the shared MIMO_API_KEY before voiceover.",
+            )
+        )
+
+    if asr_ready:
+        menu["ready"].append(
+            _capability(
+                "mimo_asr",
+                "MiMo ASR is configured",
+                detail=f"Language: {asr.get('mimo_asr_language')}; model: {asr.get('mimo_asr_model')}",
+            )
+        )
+    else:
+        menu[DEGRADED_GROUP].append(
+            _capability(
+                "mimo_asr",
+                "ASR is unavailable; run only with --skip-asr",
+                action=str(asr.get("note") or "Set MIMO_ASR_API_KEY or MIMO_API_KEY to enable ASR."),
+            )
+        )
+
+    if subtitles_ready:
+        menu["ready"].append(
+            _capability("subtitle_burn", "Subtitle burn-in is available", detail="ffmpeg has the subtitles/libass filter.")
+        )
+    elif ffmpeg_ready:
+        menu[DEGRADED_GROUP].append(
+            _capability(
+                "subtitle_burn",
+                "Subtitle burn-in is unavailable",
+                action="Use --no-burn-subtitles or install an ffmpeg build with the subtitles/libass filter.",
+            )
+        )
+
+    if not normal_core_ready:
+        menu["blocked"].append(
+            _capability(
+                "default_recap_pipeline",
+                "Default recap run is blocked",
+                detail="Resolve the blocking items above before a normal run.",
+            )
+        )
+    elif asr_ready and subtitles_ready:
+        menu["ready"].append(
+            _capability("default_recap_pipeline", "Default recap run is ready", detail="ASR, VLM, TTS, and media tools are configured.")
+        )
+    else:
+        actions = []
+        if not asr_ready:
+            actions.append("run with --skip-asr")
+        if not subtitles_ready:
+            actions.append("run with --no-burn-subtitles")
+        menu[DEGRADED_GROUP].append(
+            _capability(
+                "recap_degraded_mode",
+                "Recap can run only in an explicit degraded mode",
+                detail="; ".join(actions),
+            )
+        )
+
+    menu["optional_upgrades"].append(
+        _capability(
+            "jianying_export",
+            "Editable JianYing draft export can be requested with --export-jianying",
+            detail="No JianYing install is required to write the draft; ffprobe improves media metadata.",
+        )
+    )
+    if subtitles_ready:
+        menu["optional_upgrades"].append(
+            _capability(
+                "burned_subtitles",
+                "Burned subtitles are available and enabled by default",
+                action="Use --no-burn-subtitles if you prefer external subtitle files.",
+            )
+        )
+
+    return menu
 
 
 def build_report() -> dict[str, object]:
@@ -138,10 +319,12 @@ def build_report() -> dict[str, object]:
         failures.append("MIMO_API_KEY is not set; ASR / VLM / TTS all require a MiMo key")
     if not asr_check.get("available"):
         warnings.append("ASR not configured (MIMO_API_KEY); pipeline can run with --skip-asr")
+    capability_menu = _build_capability_menu(checks)
     return {
         "ok": not failures,
         "repo_root": str(SCRIPT_DIR.parents[2]),
         "checks": checks,
+        "capability_menu": capability_menu,
         "failures": failures,
         "warnings": warnings,
     }
@@ -201,6 +384,22 @@ def _print_human(report: dict[str, object]) -> None:
     print(f"✓ TTS model: {tts.get('mimo_tts_model')} (source: {tts.get('mimo_tts_model_source')})")
     print(f"✓ TTS voice: {tts.get('mimo_tts_voice')} (source: {tts.get('mimo_tts_voice_source')})")
     print(f"✓ TTS API URL: {tts.get('mimo_tts_api_url')} (source: {tts.get('mimo_tts_api_url_source')})")
+
+    menu = cast(dict[str, list[dict[str, str]]], report.get("capability_menu") or {})
+    print("\n[capability menu]")
+    for group in ("ready", "blocked", DEGRADED_GROUP, "optional_upgrades"):
+        print(f"{group}:")
+        items = menu.get(group) or []
+        if not items:
+            print("  - none")
+            continue
+        for item in items:
+            line = f"  - {item.get('name')}: {item.get('summary')}"
+            if item.get("detail"):
+                line += f" ({item['detail']})"
+            print(line)
+            if item.get("action"):
+                print(f"    action: {item['action']}")
 
     warnings = cast(list[str], report.get("warnings") or [])
     failures = cast(list[str], report.get("failures") or [])
