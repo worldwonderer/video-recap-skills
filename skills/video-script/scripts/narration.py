@@ -319,10 +319,19 @@ def _normalise_narration_segment(seg, scenes_analysis=None):
     if scenes_analysis:
         parent = _find_scene_for_midpoint(scenes_analysis, item["start"], item["end"])
         if parent:
-            item["start"] = round(max(parent["start"], item["start"]), 2)
-            item["end"] = round(min(parent["end"], item["end"]), 2)
-            if item["end"] <= item["start"]:
-                return None
+            clamped_start = round(max(parent["start"], item["start"]), 2)
+            clamped_end = round(min(parent["end"], item["end"]), 2)
+            # Only tighten the window to the midpoint scene when the authored text
+            # still fits the clamped span. A multi-sentence BLOCK is meant to span
+            # the cut and play across scenes; shrinking it here would make
+            # _validate_narration_budget/_truncate_at_sentence drop trailing
+            # sentences the author wrote — keep the author's timing in that case.
+            if clamped_end > clamped_start and (
+                _text_char_count(item["narration"])
+                <= _recommended_char_budget(clamped_start, clamped_end, item.get("pause_after_ms")) * 1.25
+            ):
+                item["start"] = clamped_start
+                item["end"] = clamped_end
     return item
 
 
