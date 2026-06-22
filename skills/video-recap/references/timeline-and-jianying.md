@@ -57,6 +57,27 @@ work_dir):
 - video on the main track, narration/BGM as their own audio tracks (higher
   `render_index`), subtitles on a text track.
 
+The exporter is now **schema-driven** rather than a single monolithic JSON
+builder. `export_jianying.py` remains the public facade, while the implementation
+is split into:
+
+- `jianying_schema.py` — draft version metadata, full `materials` skeleton,
+  root/meta skeleton factories, material-category registry, feature capabilities;
+- `jianying_model.py` — a thin internal build context where seconds/gains become
+  JianYing-local microseconds/gains;
+- `jianying_builders.py` — current video/audio/text/speed/KFTypeVolume builders;
+- `jianying_tracks.py` — render-index bands and deterministic overlap-safe
+  allocation for future overlay/text/image lanes;
+- `jianying_writer.py` — collision-safe folder choice, media bundling, path
+  rewrite, and atomic write of the three draft files.
+
+The schema metadata is aligned with the duoec/duo-video reference baseline
+(`version: 360000`, `new_version: 111.0.0`, `app_version: 5.9.5-beta1`) and the
+materials skeleton includes the newer `common_mask` array seen in that baseline.
+This makes the exporter newer-schema-friendly than the old minimal
+`app_version: 5.9.0` implementation, but it is not a promise that every future
+剪映/CapCut release will open drafts without a manual smoke test.
+
 **Media is bundled by default.** The referenced media is copied into the draft's
 `materials/` folder and the paths rewritten to those copies. This is **required on
 macOS**: 剪映 is sandboxed and cannot read files outside its own data dir, so an
@@ -68,15 +89,45 @@ paths (e.g. media already under the drafts root). If the requested draft folder 
 
 **Decoupling guarantees** (the core never depends on 剪映):
 - the exporter is **lazy-imported** only when an export is requested; importing the
-  render path does not import it (enforced by a test);
+  render path does not import it or any `jianying_*` helper module (enforced by a
+  clean-interpreter test);
 - it is **stdlib + ffprobe only** — no `pymediainfo`, no vendored library;
 - any failure is caught and logged; it never breaks the ffmpeg render.
+
+## Material registry and capabilities
+
+The registry deliberately separates **material categories** from **cross-cutting
+features**:
+
+- Supported material categories in milestone 1: `video`, `audio`, `text`,
+  `subtitle`, plus JianYing's auxiliary `speed` material.
+- Reserved categories, inspired by duo-video but not emitted yet:
+  `image`, `sticker`, `sound`, `text_template`, `lut`, `transition`,
+  `video_effect`, `face_effect`, `mask`, `style`.
+- Feature capabilities are tracked separately: `KFTypeVolume` automation, BGM
+  loop splitting, media bundling, bundled-path rewrite, collision-safe writes,
+  and lazy export isolation.
+
+Unsupported material categories produce explicit exporter notes and are skipped
+instead of silently writing malformed draft JSON.
 
 **Limitations** (documented, not bugs): the draft references the *un-burned* source,
 so the source's own hardcoded subtitles show in 剪映 (mask them there if needed);
 ffmpeg remains the canonical mix — the 剪映 mix is an editable approximation.
 
+## Manual smoke checklist
+
+When a desktop 剪映/CapCut install is available, generate a bundled draft and
+verify:
+
+1. the draft appears in the app's draft list;
+2. source clips, narration, BGM, and subtitles are online and editable;
+3. ducking is visible/audible as volume automation;
+4. no macOS permission/offline-media warnings appear for bundled media.
+
 ## Acknowledgements
 
 Draft schema follows [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft)
-and [capcut-mate](https://github.com/Hommy-master/capcut-mate) (both Apache-2.0); no code vendored.
+and [capcut-mate](https://github.com/Hommy-master/capcut-mate) (both Apache-2.0),
+with schema/builder/writer boundaries inspired by duoec/duo-video; no code is
+vendored.

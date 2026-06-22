@@ -38,7 +38,7 @@ flowchart LR
 - **Research when it matters.** When the title/story context is known or the brief notes the material is thin, put character relationships and plot background in `background_research.json` so the VLM knows who's who.
 - **Narration in blocks, original in blocks.** Narration plays in connected blocks, each voiced in one pass; in the gaps, the original audio returns at full volume — roughly 7:3.
 - **Cut first, frames aligned.** `--edit-mode cut` renders the cut first, then you narrate against that timeline, so picture and voice stay in sync.
-- **Keep editing in 剪映.** Optionally export a multi-track 剪映 draft — original, narration, BGM, and subtitles each on a track.
+- **Keep editing in 剪映.** Optionally export a schema-driven multi-track 剪映 draft — original, narration, BGM, and subtitles each on a track; ffmpeg remains the canonical render.
 
 ## Installation
 
@@ -138,6 +138,7 @@ Priority: **your file › the agent-proofread `original_subtitles.json` › ASR 
 
 - [linux.do](https://linux.do)
 - The 剪映 draft export follows the schema of [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft) and [capcut-mate](https://github.com/Hommy-master/capcut-mate) (both Apache-2.0).
+- The schema / builder / writer split for 剪映 export is inspired by [duoec/duo-video](https://github.com/duoec/duo-video).
 
 ## License
 

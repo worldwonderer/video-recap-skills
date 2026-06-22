@@ -2,7 +2,15 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-assemble' / 'scripts'))
 import json  # noqa: E402
+import pytest  # noqa: E402
 from export_jianying import build_draft, export_timeline_to_jianying, _us  # noqa: E402
+from jianying_schema import (  # noqa: E402
+    MATERIAL_KEYS,
+    feature_capabilities,
+    material_category_registry,
+    validate_material_category,
+)
+from jianying_tracks import TRACK_LAYOUT_BANDS, TrackAllocator  # noqa: E402
 from timeline import build_timeline  # noqa: E402
 
 
@@ -79,6 +87,22 @@ def test_us_is_integer_microseconds():
     assert isinstance(_us(3.1), int)
 
 
+def test_draft_root_schema_material_keys_and_meta_shape():
+    content, meta, _notes = build_draft(_sample_timeline(), new_id=_counter_ids(), probe=_fake_probe)
+
+    required_root_keys = {
+        "canvas_config", "config", "duration", "fps", "keyframes", "materials",
+        "tracks", "version", "new_version", "platform", "last_modified_platform",
+    }
+    assert required_root_keys <= set(content)
+    assert set(MATERIAL_KEYS) <= set(content["materials"])
+    assert all(isinstance(content["materials"][key], list) for key in MATERIAL_KEYS)
+
+    assert {"draft_id", "draft_name", "draft_fold_path", "tm_duration", "draft_materials"} <= set(meta)
+    assert meta["tm_duration"] == content["duration"]
+    assert isinstance(meta["draft_materials"], list) and meta["draft_materials"]
+
+
 def test_build_draft_structure_and_tracks():
     content, meta, _notes = build_draft(_sample_timeline(), new_id=_counter_ids(), probe=_fake_probe)
     assert content["version"] == 360000
@@ -134,6 +158,85 @@ def test_export_writes_three_files(tmp_path):
     assert content == info                              # dual-file compatibility
     meta = json.loads((Path(draft_dir) / "draft_meta_info.json").read_text(encoding="utf-8"))
     assert meta["draft_name"] == "recap_demo" and meta["tm_duration"] == 15_000_000
+
+
+def test_export_rejects_draft_names_that_escape_output_parent(tmp_path):
+    out = tmp_path / "out"
+    unsafe_names = ["", "   ", ".", "..", "../escape", "nested/name", r"nested\name", str(tmp_path / "escape")]
+
+    for draft_name in unsafe_names:
+        with pytest.raises(ValueError):
+            export_timeline_to_jianying(
+                _sample_timeline(), str(out), draft_name=draft_name,
+                new_id=_counter_ids(), probe=_fake_probe)
+
+    assert not out.exists()
+
+
+def test_representative_parity_export_with_bundle_collision_loop_and_keyframes(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    vid = src / "orig.mp4"
+    narr = src / "n0.wav"
+    bgm = src / "bgm.mp3"
+    vid.write_bytes(b"video")
+    narr.write_bytes(b"narration")
+    bgm.write_bytes(b"bgm")
+
+    tl = _sample_timeline()
+    for track in tl["tracks"]:
+        if track.get("kind") == "video":
+            for clip in track["clips"]:
+                clip["source_path"] = str(vid)
+        elif track.get("role") == "narration":
+            track["segments"][0]["source_path"] = str(narr)
+        elif track.get("role") == "bgm":
+            track["segments"][0]["source_path"] = str(bgm)
+
+    out = tmp_path / "out"
+    existing = out / "recap_demo"
+    existing.mkdir(parents=True)
+    (existing / "draft_content.json").write_text("manual edit", encoding="utf-8")
+
+    def short_bgm_probe(path):
+        if str(path).endswith("bgm.mp3"):
+            return 5_000_000, 0, 0
+        return 600_000_000, 1920, 1080
+
+    draft_dir, notes = export_timeline_to_jianying(
+        tl, str(out), draft_name="recap_demo", new_id=_counter_ids(),
+        probe=short_bgm_probe, bundle_media=True)
+
+    assert Path(draft_dir).name == "recap_demo_2"
+    assert (existing / "draft_content.json").read_text(encoding="utf-8") == "manual edit"
+    assert any("避免覆盖" in note for note in notes)
+
+    draft_path = Path(draft_dir)
+    content = json.loads((draft_path / "draft_content.json").read_text(encoding="utf-8"))
+    info = json.loads((draft_path / "draft_info.json").read_text(encoding="utf-8"))
+    meta = json.loads((draft_path / "draft_meta_info.json").read_text(encoding="utf-8"))
+    assert content == info
+    assert meta["draft_name"] == "recap_demo_2"
+    assert meta["draft_fold_path"] == str(draft_path)
+
+    materials = content["materials"]
+    assert len(materials["videos"]) == 2
+    assert len(materials["audios"]) == 2
+    assert len(materials["texts"]) == 1
+    assert len(materials["speeds"]) == 6  # 2 video + narration + 3 looped BGM pieces
+
+    tracks = content["tracks"]
+    assert [(t["type"], t["name"]) for t in tracks] == [
+        ("video", "video"), ("audio", "narration"), ("audio", "bgm"), ("text", "subtitle")
+    ]
+    assert tracks[0]["segments"][0]["render_index"] == 0
+    assert tracks[-1]["segments"][0]["render_index"] == 15000
+    assert len(next(t for t in tracks if t["name"] == "bgm")["segments"]) == 3
+
+    assert tracks[0]["segments"][0]["common_keyframes"][0]["property_type"] == "KFTypeVolume"
+    assert next(t for t in tracks if t["name"] == "bgm")["segments"][0]["common_keyframes"][0]["property_type"] == "KFTypeVolume"
+    for material in materials["videos"] + materials["audios"]:
+        assert material["path"].startswith(str(draft_path / "materials"))
 
 
 def test_export_uses_collision_safe_draft_folder(tmp_path):
@@ -200,9 +303,65 @@ def test_core_assemble_does_not_import_exporter():
     import subprocess
     scripts = str(Path(__file__).resolve().parents[2] / 'skills' / 'video-assemble' / 'scripts')
     code = (f"import sys; sys.path.insert(0, {scripts!r}); import assemble; "
-            "assert 'export_jianying' not in sys.modules, 'core imported the 剪映 exporter'")
+            "assert 'export_jianying' not in sys.modules, 'core imported the 剪映 exporter'; "
+            "assert not any(name.startswith('jianying') for name in sys.modules), "
+            "'core imported JianYing helper modules'")
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+def test_material_category_registry_is_separate_from_feature_capabilities():
+    categories = material_category_registry()
+    assert categories["video"]["status"] == "supported"
+    assert categories["audio"]["status"] == "supported"
+    assert categories["text"]["status"] == "supported"
+    assert categories["subtitle"]["status"] == "supported"
+    assert categories["speed"]["status"] == "supported_auxiliary"
+    for reserved in (
+        "image", "sticker", "sound", "text_template", "lut", "transition",
+        "video_effect", "face_effect", "mask", "style",
+    ):
+        assert categories[reserved]["status"] == "reserved"
+
+    capabilities = feature_capabilities()
+    assert capabilities["volume_automation"]["property_type"] == "KFTypeVolume"
+    assert "media_bundling" in capabilities
+    assert "path_rewrite" in capabilities
+    assert "collision_safe_write" in capabilities
+    assert "lazy_export_isolation" in capabilities
+
+    assert "KFTypeVolume" not in categories
+    assert "media_bundling" not in categories
+    unsupported = validate_material_category("image")
+    assert unsupported["supported"] is False
+    assert unsupported["status"] == "reserved"
+
+
+def test_unsupported_material_category_produces_note_without_malformed_output():
+    tl = {"schema_version": 1, "canvas": {"width": 100, "height": 100, "fps": 30},
+          "duration": 2.0, "tracks": [
+              {"kind": "image", "name": "overlay", "segments": [
+                  {"source_path": "/overlay.png", "timeline_start": 0.0, "timeline_end": 2.0}
+              ]}]}
+
+    content, _meta, notes = build_draft(tl, new_id=_counter_ids(), probe=_fake_probe)
+
+    assert content["tracks"] == []
+    assert content["materials"]["images"] == []
+    assert any("暂不支持" in note and "image" in note for note in notes)
+
+
+def test_track_allocator_uses_layout_bands_and_suffixes_overlaps():
+    assert TRACK_LAYOUT_BANDS["video"].render_index == 0
+    assert TRACK_LAYOUT_BANDS["subtitle"].render_index == 15000
+    assert {"audio", "sound", "video", "image", "mask", "sticker", "subtitle", "text_template"} <= set(TRACK_LAYOUT_BANDS)
+
+    allocator = TrackAllocator()
+    assert allocator.allocate("subtitle", "subtitle", 0, 5_000_000).name == "subtitle"
+    assert allocator.allocate("subtitle", "subtitle", 5_000_000, 1_000_000).name == "subtitle"
+    assert allocator.allocate("subtitle", "subtitle", 4_500_000, 2_000_000).name == "subtitle-1"
+    assert allocator.allocate("subtitle", "subtitle", 4_500_000, 2_000_000).name == "subtitle-2"
+    assert allocator.allocate("image", "overlay", 4_500_000, 2_000_000).name == "overlay"
 
 
 
