@@ -3,6 +3,27 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+
+## [0.3.2] - 2026-06-22
+
+让剪映草稿导出跟上新版工程结构，方便在剪映专业版里继续精修。
+
+### 新增
+
+- **新版剪映 schema-driven 草稿导出。** 剪映导出从单文件 JSON 拼装拆成 schema / model / builder / track / writer 分层，草稿基线升级到 `version: 360000`、`new_version: 111.0.0`、`app_version: 5.9.5-beta1`，并补齐包含 `common_mask` 在内的新版 `materials` skeleton。
+- **素材类型注册表与能力清单。** 明确区分已支持的 `video` / `audio` / `text` / `subtitle` / `speed`，以及预留但暂不写出的 image/sticker/effect/mask 等类别；未知或暂不支持类别会输出 note 并跳过，避免生成畸形草稿。
+
+### 改进
+
+- **剪映导出仍保持可选、懒加载、stdlib-only。** `export_jianying.py` 现在只是薄 facade，核心 ffmpeg 渲染路径不会导入任何 `jianying_*` 模块；`timeline.json` 仍是后端无关的 canonical input，ffmpeg 仍是最终成片判定标准。
+- **草稿写入更安全。** 写入器继续保留非空目录避让、媒体打包、路径重写、临时目录原子替换；并新增 `draft_name` 校验，拒绝空名、绝对路径、`..`、以及路径分隔符，防止错误名称逃逸草稿父目录。
+- **BGM 循环与音量自动化覆盖更完整。** 循环 BGM 会拆成多段铺满时间线，并把窗口内 `KFTypeVolume` 音量关键帧放到对应片段。
+
+### 验证
+
+- `ruff` / `py_compile` / `mypy --ignore-missing-imports` 覆盖剪映导出模块；相关 assemble/timeline 测试 84 passed，全项目 `scripts/test.py` 全部 skill groups passed。
+- 本机剪映专业版 `10.8.7` 实测：生成并打开 schema E2E 草稿；又把历史 `longvacation_2min_work/timeline.json` 转成 `recap_tmp_convert_longvacation_2min_20260623_003900`，剪映已登记并可打开。
+
 ## [0.3.0] - 2026-06-20
 
 长视频更稳、跨语言更干净、剪辑更顺眼，并新增解说导航与成片压缩工具。

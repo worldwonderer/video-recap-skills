@@ -38,7 +38,7 @@ flowchart LR
 - **该查资料时先查。** 片名/剧情明确或 brief 提示素材偏薄时，把人物关系、剧情背景存进 `background_research.json`，VLM 才更容易认出谁是谁。
 - **解说成块，原声也成块。** 解说一段段连着讲、整块一次配音，段间留白把精彩原声整段放回满音量——大致七三开。
 - **先剪后配，画面对齐。** `--edit-mode cut` 先把长视频剪成成片，再对着成片写解说，时间轴天然对齐。
-- **能接着在剪映里改。** 可选导出多轨剪映草稿，原片、解说、BGM、字幕各占一轨。
+- **能接着在剪映里改。** 可选导出 schema-driven 的多轨剪映草稿，原片、解说、BGM、字幕各占一轨；ffmpeg 仍是最终成片的判定标准。
 
 ## 安装
 
@@ -138,6 +138,7 @@ python3 skills/video-recap/scripts/recap.py --doctor
 
 - [linux.do](https://linux.do)
 - 剪映草稿导出参考了 [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft)、[capcut-mate](https://github.com/Hommy-master/capcut-mate)（均 Apache-2.0）的草稿结构。
+- 剪映导出的 schema / builder / writer 分层参考了 [duoec/duo-video](https://github.com/duoec/duo-video) 的设计思路。
 
 ## 许可
 
