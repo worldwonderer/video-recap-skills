@@ -66,6 +66,27 @@ python3 scripts/recap.py <video> --work-dir <work_dir>          # [--edit-mode c
 This validates the narration, (cut: builds `edited_source.mp4`), synthesizes the voiceover, and
 assembles `recap_<name>.mp4`.
 
+### Dub mode — English→Chinese, original voice (`--edit-mode dub`)
+
+Translates an English video into Chinese and **replaces** the speech with the ORIGINAL
+speaker's cloned voice (`mimo-v2.5-tts-voiceclone`, same MiMo key) — distinct from recap/解说,
+which overlays Chinese commentary on ducked audio. Same one-pause shape:
+
+```bash
+python3 scripts/recap.py <video> --edit-mode dub --work-dir <work_dir>     # prepare → pauses
+```
+
+Prepare transcribes the English audio in timed windows and pulls one reference clip, then writes
+`dub_brief.md` + `dub_transcript.json`. The agent does all the judgment (like recap's narration):
+**write `work_dir/dub_script.json`** = `[{"start": s, "end": s, "zh": "译文"}, …]` (ascending by
+`start`) — translate **every** utterance faithfully on the source timeline and give each its source
+`[start, end]` so the dub tracks the original's rhythm (don't drop a hook, merge, or condense; if
+the original repeats, the dub repeats in sync). Keep each line speakable within its span (~5
+chars/s). Rerun the same command to render `dub_<name>.mp4` — each line is cloned in the original
+voice and time-fit to its `[start, end]` (placed at its start; only sped up if it would overrun the
+next line, never globally — so the voice tracks the picture). v1: single speaker, full-track
+replace (no background-music separation).
+
 ### Self-check
 
 ```bash
@@ -78,7 +99,7 @@ python3 scripts/recap.py --doctor
 - `work_dir/` — all intermediate artifacts (the inter-skill contract; see `references/data-schema.md`)
 
 ## Options (passed through to the stage skills)
-`--context`, `--scene-threshold`, `--style`, `--edit-mode {full,cut}`, `--target-duration`,
+`--context`, `--scene-threshold`, `--style`, `--edit-mode {full,cut,dub}`, `--target-duration`,
 `--skip-asr`, `--mimo-video-overview`, `--consolidate`, `--consolidate-asr`, `--mimo-tts-voice`,
 `--no-burn-subtitles` (burn is on by default), `--output-dir`.
 

@@ -370,7 +370,7 @@ def main():
     ap.add_argument("--context", default="")
     ap.add_argument("--scene-threshold", type=float, default=None)
     ap.add_argument("--style", default="纪录片")
-    ap.add_argument("--edit-mode", default=os.environ.get("EDIT_MODE", "full"), choices=["full", "cut"])
+    ap.add_argument("--edit-mode", default=os.environ.get("EDIT_MODE", "full"), choices=["full", "cut", "dub"])
     ap.add_argument("--target-duration", default=os.environ.get("TARGET_DURATION") or None)
     ap.add_argument("--allow-sparse-cut", action="store_true",
                     help="cut mode: accept a sparse/heavily-dropped narration mapping instead of failing the cut preflight")
@@ -461,6 +461,28 @@ def main():
                 "work_dir 与当前 recap 输入不匹配，拒绝复用既有 narration/clip_plan；"
                 "请使用新的 --work-dir，或删除旧产物后重新运行 Phase A。\n"
                 f"  - {details}")
+
+    if args.edit_mode == "dub":
+        # Dub mode: EN→ZH translation-dub in the original cloned voice (replaces speech, not
+        # overlay). One pause: prepare (ASR + sentence-seg + reference) -> agent writes the
+        # Chinese translation (dub_script.json) -> render (clone TTS + full-replace mux).
+        dub_script = work_dir / "dub_script.json"
+        if not dub_script.exists():
+            _run("video-voiceover", "dub.py", "--stage", "prepare",
+                 "--video", str(video), "--work-dir", str(work_dir))
+            _write_run_manifest(work_dir, video, args)
+            cont = _continuation_command(video, work_dir, args)
+            print("=" * 50)
+            print(f"[video-recap] ⏸  阅读 {work_dir / 'dub_brief.md'}，把英文原声转写切分并翻译成中文，写入 {dub_script}")
+            print('[video-recap]    格式 [{"start": 起秒, "end": 止秒, "zh": "译文"}]（按 start 升序）；逐句忠实、跟原声节奏一致、保留原音色')
+            print(f"[video-recap]    写完后重跑继续: {cont}")
+            print("=" * 50)
+            return
+        _reject_stale_manifest()
+        _run("video-voiceover", "dub.py", "--stage", "render",
+             "--video", str(video), "--work-dir", str(work_dir))
+        print(f"[video-recap] ✅ 配音完成: {work_dir / ('dub_' + video.stem + '.mp4')}")
+        return
 
     if not cut:
         # Full mode: a single pause (understand -> agent writes narration.json -> produce).
