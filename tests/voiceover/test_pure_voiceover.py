@@ -481,3 +481,44 @@ def test_voiceover_cli_accepts_allow_partial_tts(monkeypatch, tmp_path):
     meta = __import__("json").loads((tmp_path / "tts_meta.json").read_text(encoding="utf-8"))
     assert len(meta["segments"]) == 1
     assert CONFIG["allow_partial_tts"] is True
+
+
+def test_partial_tts_meta_records_failed_segment_details(monkeypatch, tmp_path):
+    """Partial TTS output must be self-describing: every missing line is locatable."""
+    import json
+
+    narration = [
+        {"start": 0.0, "end": 1.0, "narration": "第一段。"},
+        {"start": 1.0, "end": 2.0, "narration": "第二段。"},
+    ]
+    (tmp_path / "narration.json").write_text(json.dumps(narration), encoding="utf-8")
+
+    def fake_synthesize_segment(i, seg, narration_data, tts_dir, engine):
+        if i == 1:
+            raise RuntimeError("network timeout")
+        return {
+            "index": i,
+            "start": seg["start"],
+            "end": seg["end"],
+            "narration": seg["narration"],
+            "audio_path": str(tts_dir / f"narr_{i:03d}.wav"),
+            "audio_duration": 0.5,
+        }
+
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "tp-test")
+    monkeypatch.setitem(CONFIG, "allow_partial_tts", False)
+    monkeypatch.setattr("voiceover._synthesize_segment", fake_synthesize_segment)
+    monkeypatch.setattr(sys, "argv", ["voiceover.py", "--work-dir", str(tmp_path), "--allow-partial-tts"])
+
+    voiceover.main()
+
+    meta = json.loads((tmp_path / "tts_meta.json").read_text(encoding="utf-8"))
+    assert meta["partial"] is True
+    assert meta["failures"] == [{
+        "index": 1,
+        "start": 1.0,
+        "end": 2.0,
+        "text": "第二段。",
+        "error": "network timeout",
+    }]
+    assert [seg["index"] for seg in meta["segments"]] == [0]

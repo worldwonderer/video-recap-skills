@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import re
 import time
@@ -131,8 +132,32 @@ def _build_tts_segment_result(index, seg, text, output_wav, duration, rate_offse
     return result
 
 
+def _tts_failure_record(index, seg, error):
+    """Build a user-visible failure record for partial TTS output."""
+    return {
+        "index": int(index),
+        "start": seg.get("start"),
+        "end": seg.get("end"),
+        "text": _clean_narration_text(str(seg.get("narration", ""))),
+        "error": str(error),
+    }
+
+
+def _build_tts_meta(segments, engine, narration_name, failures=None):
+    """Stable tts_meta.json payload, including partial-failure visibility."""
+    failures = list(failures or [])
+    return {
+        "segments": segments,
+        "engine": engine,
+        "narration": narration_name,
+        "partial": bool(failures),
+        "failures": failures,
+    }
+
+
 def synthesize_tts(narration, work_dir):
     """合成解说音频（并行）"""
+    synthesize_tts.last_failures = []
     tts_dir = work_dir / "tts_segments"
     tts_dir.mkdir(exist_ok=True)
 
@@ -159,6 +184,7 @@ def synthesize_tts(narration, work_dir):
     if not needs_fresh:
         cached_segments.sort(key=lambda x: x["index"])
         log(f"TTS 引擎: {cache_engine} (cache)")
+        synthesize_tts.last_failures = []
         return cached_segments, cache_engine
 
     engine = resolve_tts_engine()
@@ -182,7 +208,7 @@ def synthesize_tts(narration, work_dir):
                 result = future.result()
             except Exception as e:
                 i = futures[future]
-                failures.append((i, str(e)))
+                failures.append(_tts_failure_record(i, narration[i], e))
                 log(f"  TTS 段 {i+1} 失败: {e}")
                 continue
             if result:
@@ -191,13 +217,19 @@ def synthesize_tts(narration, work_dir):
 
     segments.sort(key=lambda x: x["index"])
     if failures and not CONFIG.get("allow_partial_tts", False):
-        sample = "; ".join(f"段 {i+1}: {msg}" for i, msg in failures[:3])
+        sample = "; ".join(f"段 {f['index']+1}: {f['error']}" for f in failures[:3])
         raise RuntimeError(
             f"TTS 失败 {len(failures)}/{len(narration)} 段，已中止以避免生成缺解说的视频。"
             f"示例: {sample}。如确需继续，可设置 ALLOW_PARTIAL_TTS=1 或 --allow-partial-tts。"
         )
+    synthesize_tts.last_failures = failures
     if failures:
-        log(f"警告: TTS 部分失败 {len(failures)}/{len(narration)} 段，继续生成部分解说")
+        missing = ", ".join(str(f["index"] + 1) for f in failures[:8])
+        more = "…" if len(failures) > 8 else ""
+        log(
+            f"警告: TTS 部分失败 {len(failures)}/{len(narration)} 段（段 {missing}{more}），"
+            "成片可预览但不建议直接发布；详见 tts_meta.json failures"
+        )
     if not segments:
         raise RuntimeError("TTS 没有生成任何有效解说音频，已中止以避免生成无解说视频")
     return segments, engine
@@ -431,7 +463,6 @@ def _get_audio_duration(audio_path):
 
 def main():
     import argparse
-    import json
     from pathlib import Path
     ap = argparse.ArgumentParser(
         description="video-voiceover: synthesize narration audio segments from narration.json.")
@@ -456,11 +487,15 @@ def main():
         narration_path = work_dir / "narration.json"
     narration = json.loads(narration_path.read_text(encoding="utf-8"))
     tts_segments, engine_used = synthesize_tts(narration, work_dir)
+    failures = getattr(synthesize_tts, "last_failures", [])
+    meta = _build_tts_meta(tts_segments, engine_used, narration_path.name, failures)
     (work_dir / "tts_meta.json").write_text(
-        json.dumps({"segments": tts_segments, "engine": engine_used, "narration": narration_path.name},
-                   ensure_ascii=False, indent=2), encoding="utf-8")
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    if failures:
+        log(f"配音完成但缺 {len(failures)} 段：成片可预览但不建议直接发布")
     log(f"配音完成: {len(tts_segments)} 段, 引擎 {engine_used}")
     print(json.dumps({"status": "voiced", "segments": len(tts_segments), "engine": engine_used,
+                      "partial": bool(failures), "failures": len(failures),
                       "tts_meta": str(work_dir / "tts_meta.json")}, ensure_ascii=False))
 
 
