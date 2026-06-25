@@ -39,6 +39,197 @@ CLONE_SR = 24000  # mimo voiceclone returns 24kHz mono PCM16 wav
 ASR_MIME = "audio/wav"
 ATEMPO_CAP = 2.0  # max compression before we trim instead (atempo>2 also sounds rushed)
 
+DUB_SCHEMA_VERSION = 1
+# Tolerate ~1-frame rounding in agent-estimated timings so the gate blocks only GENUINE
+# errors, not rounding noise (the old render clamped such cases via min(slot_end, nxt)).
+DUB_TIMING_EPS = 0.05
+DUB_LINT_SCHEMA = {
+    "schema_version": DUB_SCHEMA_VERSION,
+    "artifact": "dub_lint.json",
+    "fields": {
+        "verdict": "PASS|FAIL",
+        "issues": "[{severity, code, line, message, start, end}]",
+        "summary": "{lines, errors, warnings, max_chars_per_second, trim_risk_lines}",
+    },
+}
+DUB_REVIEW_SCHEMA = {
+    "schema_version": DUB_SCHEMA_VERSION,
+    "artifact": "dub_review.json",
+    "fields": {
+        "verdict": "PASS|REVISE|FAIL",
+        "checks": "{faithful_to_source, spoken_chinese, speaker_tone, timing_fit, platform_fit}",
+        "highest_return_edits": "[{line, start, issue, suggestion}]",
+        "notes": "human/agent review notes; script-level output is deterministic pre-review guidance",
+    },
+}
+DUB_ARTIFACT_SCHEMAS = {
+    "dub_transcript.json": {
+        "schema_version": DUB_SCHEMA_VERSION,
+        "shape": {"video": "path", "duration": "seconds", "windows": [{"start": 0.0, "end": 6.0, "text": "English ASR"}]},
+    },
+    "dub_script.json": {
+        "schema_version": DUB_SCHEMA_VERSION,
+        "shape": [{"start": 0.0, "end": 2.4, "zh": "中文台词"}],
+    },
+    "dub_manifest.json": {
+        "schema_version": DUB_SCHEMA_VERSION,
+        "shape": {"video": "path", "duration": "seconds", "lines": [{"start": 0.0, "end": 2.4, "zh": "中文台词", "fitted_wav": "path", "fitted_dur": 1.8, "room": 2.4}]},
+    },
+    "dub_lint.json": DUB_LINT_SCHEMA,
+    "dub_review.json": DUB_REVIEW_SCHEMA,
+}
+
+
+def _chars_per_second(text, room):
+    room = max(float(room or 0.0), 0.001)
+    return len(str(text or "")) / room
+
+
+def _issue(severity, code, line, message, start=None, end=None):
+    item = {"severity": severity, "code": code, "line": line, "message": message}
+    if start is not None:
+        item["start"] = round(float(start), 3)
+    if end is not None:
+        item["end"] = round(float(end), 3)
+    return item
+
+
+def _normalize_dub_script(script):
+    if not isinstance(script, list):
+        raise ValueError("dub_script.json must be a list")
+    lines = []
+    for i, item in enumerate(script):
+        if not isinstance(item, dict):
+            lines.append({"_input_index": i, "start": None, "end": None, "zh": ""})
+            continue
+        start = item.get("start")
+        end = item.get("end")
+        try:
+            start = float(start)
+        except (TypeError, ValueError):
+            start = None
+        try:
+            end = float(end) if end is not None else None
+        except (TypeError, ValueError):
+            end = None
+        lines.append({"_input_index": i, "start": start, "end": end,
+                      "zh": str(item.get("zh", "")).strip()})
+    return sorted(lines, key=lambda x: (float("inf") if x["start"] is None else x["start"], x["_input_index"]))
+
+
+def lint_dub_script(script, duration, work_dir=None):
+    """Deterministic hard gate for dub_script.json before expensive voiceclone render."""
+    duration = float(duration)
+    issues = []
+    if not isinstance(script, list):
+        # A malformed (non-list) script is a hard FAIL, not a crash: keep the "fail fast,
+        # see dub_lint.json" promise so the agent gets a clean message instead of a traceback.
+        bad = _issue("error", "script_not_a_list", None, "dub_script.json must be a JSON array of {start,end,zh}")
+        report = {
+            "schema_version": DUB_SCHEMA_VERSION,
+            "verdict": "FAIL",
+            "blocking": True,
+            "errors": [bad],
+            "issues": [bad],
+            "summary": {"lines": 0, "errors": 1, "warnings": 0, "max_chars_per_second": 0.0, "trim_risk_lines": []},
+        }
+        if work_dir is not None:
+            _write_json(Path(work_dir) / "dub_lint.json", report)
+        return report
+    lines = _normalize_dub_script(script)
+    max_cps = 0.0
+    trim_risk = []
+    for i, ln in enumerate(lines):
+        start, end, zh = ln["start"], ln["end"], ln["zh"]
+        line_no = ln["_input_index"]
+        nxt = lines[i + 1]["start"] if i + 1 < len(lines) else duration
+        if start is None:
+            issues.append(_issue("error", "missing_start", line_no, "line start must be a number"))
+            continue
+        out_of_range = start < -DUB_TIMING_EPS or start > duration + DUB_TIMING_EPS
+        if end is not None and (end <= start or end > duration + DUB_TIMING_EPS):
+            out_of_range = True
+        timing_valid = not out_of_range
+        if out_of_range:
+            issues.append(_issue("error", "time_out_of_range", line_no, "line timing must be within video duration and end must be > start", start, end))
+        if not zh:
+            issues.append(_issue("error", "empty_translation", line_no, "zh must not be empty", start, end))
+        if (i + 1 < len(lines) and end is not None and lines[i + 1]["start"] is not None
+                and end > lines[i + 1]["start"] + DUB_TIMING_EPS):
+            issues.append(_issue("error", "overlap", line_no, "line end overlaps the next line start", start, end))
+        slot_end = end if end is not None else nxt
+        if timing_valid and start is not None and slot_end is not None:
+            room = max(0.0, min(slot_end, nxt if nxt is not None else slot_end) - start)
+            cps = _chars_per_second(zh, room)
+            max_cps = max(max_cps, cps)
+            if room < 0.4:
+                issues.append(_issue("error", "room_too_short", line_no, "line has less than 0.4s room for speech", start, end))
+            elif zh and cps > 8.0:
+                issues.append(_issue("warning", "fast_speech", line_no, f"translation is dense ({cps:.1f} chars/s)", start, end))
+            if zh and cps > 12.0:
+                trim_risk.append(line_no)
+                issues.append(_issue("warning", "trim_risk", line_no, "likely to be compressed hard or trimmed by render", start, end))
+    error_items = [x for x in issues if x["severity"] == "error"]
+    priority = {"empty_translation": 0, "overlap": 1, "time_out_of_range": 2}
+    error_items = sorted(error_items, key=lambda x: (priority.get(x["code"], 99), x.get("line", 0)))
+    warnings = sum(1 for x in issues if x["severity"] == "warning")
+    report = {
+        "schema_version": DUB_SCHEMA_VERSION,
+        "verdict": "FAIL" if error_items else "PASS",
+        "blocking": bool(error_items),
+        "errors": error_items,
+        "issues": issues,
+        "summary": {
+            "lines": len(lines),
+            "errors": len(error_items),
+            "warnings": warnings,
+            "max_chars_per_second": round(max_cps, 2),
+            "trim_risk_lines": trim_risk,
+        },
+    }
+    if work_dir is not None:
+        _write_json(Path(work_dir) / "dub_lint.json", report)
+    return report
+
+
+def build_dub_review(script, transcript, lint=None):
+    """Script-level review scaffold: deterministic timing/naturalness signals for agent review."""
+    duration = float(transcript.get("duration", 0.0))
+    lint = lint or lint_dub_script(script, duration)
+    try:
+        lines = _normalize_dub_script(script)
+    except ValueError:
+        lines = []  # non-list script already FAILs lint; review is just a scaffold here
+    edits = []
+    for issue in lint.get("issues", []):
+        if issue["severity"] in {"error", "warning"}:
+            edits.append({
+                "line": issue.get("line"),
+                "start": issue.get("start"),
+                "issue": f"{issue['code']}: {issue['message']}",
+                "suggestion": "缩短译文、调整 start/end，或回到 transcript 核对原句边界。",
+            })
+    verdict = "FAIL" if lint.get("verdict") == "FAIL" else ("REVISE" if edits else "PASS")
+    return {
+        "schema_version": DUB_SCHEMA_VERSION,
+        "verdict": verdict,
+        "checks": {
+            "faithful_to_source": "needs_agent_review",
+            "spoken_chinese": "REVISE" if any(i.get("code") == "fast_speech" for i in lint.get("issues", [])) else "PASS",
+            "speaker_tone": "needs_agent_review",
+            "timing_fit": "FAIL" if lint.get("verdict") == "FAIL" else ("REVISE" if edits else "PASS"),
+            "platform_fit": "needs_agent_review",
+        },
+        "highest_return_edits": edits[:8],
+        "notes": "Deterministic script-level review; an agent/human should fill semantic fidelity and tone judgments against dub_transcript.json.",
+        "coverage": {"transcript_windows": len(transcript.get("windows", [])), "script_lines": len(lines)},
+    }
+
+
+def _write_json(path, payload):
+    Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
 
 # ── ffmpeg / wav helpers ─────────────────────────────────────────────
 
@@ -235,11 +426,16 @@ def stage_render(video, work, ref_start, ref_dur):
     transcript = json.loads((work / "dub_transcript.json").read_text(encoding="utf-8"))
     duration = transcript["duration"]
     script = json.loads((work / "dub_script.json").read_text(encoding="utf-8"))
-    lines = sorted(({"start": float(d["start"]),
-                     "end": float(d["end"]) if d.get("end") is not None else None,
-                     "zh": str(d.get("zh", "")).strip()}
-                    for d in script if str(d.get("zh", "")).strip()),
-                   key=lambda x: x["start"])
+    # Mechanical hard gate BEFORE any voiceclone spend: empty/overlapping/out-of-range lines
+    # cannot produce a publishable dub, so fail fast instead of paying for a broken render.
+    lint = lint_dub_script(script, duration)
+    _write_json(work / "dub_lint.json", lint)
+    review = build_dub_review(script, transcript, lint)
+    _write_json(work / "dub_review.json", review)
+    if lint["verdict"] != "PASS":
+        raise SystemExit(f"[dub] dub_script.json failed lint; see {work / 'dub_lint.json'}")
+    lines = [{"start": ln["start"], "end": ln["end"], "zh": ln["zh"]}
+             for ln in _normalize_dub_script(script) if ln["zh"]]
     if not lines:
         raise SystemExit("[dub] dub_script.json has no lines")
 
@@ -270,25 +466,72 @@ def stage_render(video, work, ref_start, ref_dur):
     out_video = work / f"dub_{Path(video).stem}.mp4"
     _mux(video, dub_wav, out_video)
     (work / "dub_manifest.json").write_text(
-        json.dumps({"video": str(video), "duration": duration, "lines": lines},
+        json.dumps({"schema_version": DUB_SCHEMA_VERSION, "video": str(video), "duration": duration, "lines": lines},
                    ensure_ascii=False, indent=2), encoding="utf-8")
     log(f"[dub:render] done → {out_video}")
     print(json.dumps({"status": "dubbed", "output": str(out_video), "lines": len(lines)},
                      ensure_ascii=False))
 
 
+def stage_lint(work):
+    transcript = json.loads((work / "dub_transcript.json").read_text(encoding="utf-8"))
+    script = json.loads((work / "dub_script.json").read_text(encoding="utf-8"))
+    lint = lint_dub_script(script, transcript["duration"])
+    path = _write_json(work / "dub_lint.json", lint)
+    print(json.dumps({"status": "dub_linted", "verdict": lint["verdict"], "issues": len(lint["issues"]), "dub_lint": str(path)}, ensure_ascii=False))
+    return lint
+
+
+def stage_review(work):
+    transcript = json.loads((work / "dub_transcript.json").read_text(encoding="utf-8"))
+    script = json.loads((work / "dub_script.json").read_text(encoding="utf-8"))
+    lint = lint_dub_script(script, transcript["duration"])
+    _write_json(work / "dub_lint.json", lint)
+    review = build_dub_review(script, transcript, lint)
+    path = _write_json(work / "dub_review.json", review)
+    print(json.dumps({"status": "dub_reviewed", "verdict": review["verdict"], "edits": len(review["highest_return_edits"]), "dub_review": str(path)}, ensure_ascii=False))
+    return review
+
+
+def print_schemas():
+    print(json.dumps(DUB_ARTIFACT_SCHEMAS, ensure_ascii=False, indent=2))
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--stage", choices=["prepare", "render"], required=True)
-    ap.add_argument("--video", required=True)
-    ap.add_argument("--work-dir", required=True)
+    ap = argparse.ArgumentParser(
+        description=(
+            "English→Chinese dub workflow. Artifacts: dub_transcript.json, "
+            "agent-authored dub_script.json, dub_lint.json, dub_review.json, dub_manifest.json. "
+            "Uses MiMo ASR plus mimo-v2.5-tts-voiceclone; ordinary narration TTS config is separate."
+        )
+    )
+    ap.add_argument("--stage", choices=["prepare", "lint", "review", "render"], required=False,
+                    help="prepare ASR brief; lint/review dub_script.json; render writes lint/review before voiceclone")
+    ap.add_argument("--video", required=False, help="source video (required for prepare/render)")
+    ap.add_argument("--work-dir", required=False, help="work directory containing dub artifacts")
     ap.add_argument("--asr-window", type=float, default=6.0)
     ap.add_argument("--ref-start", type=float, default=2.0)
     ap.add_argument("--ref-dur", type=float, default=10.0)
+    ap.add_argument("--print-schema", action="store_true",
+                    help="print JSON schemas for dub_transcript/script/lint/review/manifest and exit")
     args = ap.parse_args()
-    video, work = Path(args.video), Path(args.work_dir)
+    if args.print_schema:
+        print_schemas()
+        return
+    if not args.stage:
+        ap.error("--stage is required unless --print-schema is used")
+    if not args.work_dir:
+        ap.error("--work-dir is required")
+    work = Path(args.work_dir)
+    if args.stage in {"prepare", "render"} and not args.video:
+        ap.error("--video is required for prepare/render")
+    video = Path(args.video) if args.video else None
     if args.stage == "prepare":
         stage_prepare(video, work, args.asr_window, args.ref_start, args.ref_dur)
+    elif args.stage == "lint":
+        stage_lint(work)
+    elif args.stage == "review":
+        stage_review(work)
     else:
         stage_render(video, work, args.ref_start, args.ref_dur)
 
