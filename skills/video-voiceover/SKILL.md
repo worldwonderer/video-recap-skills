@@ -45,10 +45,16 @@ the video-recap orchestrator always passes `narration.json`.
 - `tts_segments/*.wav` — one synthesized clip per narration segment.
 - `tts_meta.json` — `{segments: [...], engine, narration}` where each segment carries its
   `audio_path`, timing, `pause_after_ms`, and placement fields consumed by **video-assemble**.
+  When `--allow-partial-tts` lets a run continue past failed segments it also carries
+  `partial: true` and `failures: [{index,start,end,text,error}]` so missing lines stay visible
+  (a clean run carries `partial: false` and `failures: []`).
 
 ## Notes
 - Re-runs safely reuse only matching per-segment audio; edited narration or TTS settings regenerate the affected WAVs.
 - `TTS_WORKERS`, `TTS_TIMEOUT`, `TTS_RETRIES`, `ALLOW_PARTIAL_TTS` tune throughput/robustness.
+- Dub mode has its own deterministic gate: `dub_lint.json` blocks empty/overlapping/out-of-range
+  translation lines BEFORE voiceclone spend, and `dub_review.json` scaffolds fidelity/tone/timing/
+  platform-fit review. `dub.py --stage lint|review` and `dub.py --print-schema` expose them directly.
 
 ## What this skill does NOT do
 - Does NOT write or edit narration text.

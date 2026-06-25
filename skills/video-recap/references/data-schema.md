@@ -237,3 +237,73 @@ CLI 校验 `clip_plan.json` 后写出，额外包含输出时间轴：
 ```
 
 > `character_details`、`plot_arcs`、`cultural_notes` 为（可选，新增）字段。仅含 `synopsis`、`characters`、`worldbuilding`、`episode_context` 四个原始字段的旧 JSON 仍然有效。
+
+## narration_review.json
+
+`video-script/scripts/review.py` 输出的 LLM-as-judge 评审。旧字段 `verdict/summary/findings` 仍然有效；新增一份 **advisory** 的内容效果 scorecard 与改稿清单。**scorecard 不改变 verdict、也不作硬门禁**——硬门禁仍是 `findings` 里的 error（事实矛盾/残句）经 `--require-narration-review` 严格模式拦截。`verdict` 词表为 `PASS|REVISE|FAIL`，`OK` 作为旧值的兼容别名。
+
+```json
+{
+  "verdict": "PASS|REVISE|FAIL|OK",
+  "summary": "总体判断",
+  "scorecard": {
+    "promise_match": 4, "hook_3s": 4, "first_15s_delivery": 4, "spine_clarity": 4,
+    "stakes_escalation": 4, "information_gain": 4, "spoken_language": 4, "sentence_brevity": 4,
+    "tts_pacing": 4, "grounding": 4, "original_audio_use": 4, "subtitle_readability": 4
+  },
+  "hook_candidates_review": [{"candidate": "首句", "type": "suspense", "score": 4, "keep": true}],
+  "retention_risk_points": [{"time": "00:28", "risk": "信息重复可能掉人", "fix": "删掉复述画面的句子"}],
+  "highest_return_edits": ["最值得先改的一件事"],
+  "information_gain_notes": [{"segment": 0, "label": "motive|...|visual_restatement", "note": "证据/改法"}],
+  "spoken_language_rewrites": [{"segment": 0, "original": "原句", "rewrite": "口语改写", "why": "为什么更适合听"}],
+  "grounding_assertions": [{"segment": 0, "assertion": "人物/关系/因果断言", "source": "visual|asr|research|user_context|unsupported", "risk": "谨慎说明"}],
+  "findings": [{"segment": 0, "severity": "warning", "category": "weak_hook", "issue": "问题", "fix": "改法"}]
+}
+```
+
+> 若 `work_dir` 提供了 `packaging_plan.json` / `recap_story_plan.json` / `visual_audio_board.json`（可选、Agent 撰写），review 会把它们并入评估上下文；缺失时 review 仅基于解说与画面/对白证据评分，行为不受影响。
+
+## tts_meta.json（partial 失败可见性）
+
+`video-voiceover` 正常输出 `{segments, engine, narration}`。当显式允许 partial TTS（`--allow-partial-tts` / `ALLOW_PARTIAL_TTS=1`）让运行在部分段失败后继续时，失败段不会只埋在日志里，而会写入 `partial` 与 `failures[]`：
+
+```json
+{
+  "segments": [{"index": 0, "start": 0.0, "end": 1.0, "narration": "第一段。", "audio_path": "tts_segments/narr_000.wav"}],
+  "engine": "mimo-tts",
+  "narration": "narration.json",
+  "partial": true,
+  "failures": [{"index": 1, "start": 1.0, "end": 2.5, "text": "第二段。", "error": "network timeout"}]
+}
+```
+
+> 正常（无失败）运行也会带 `"partial": false, "failures": []`。partial 成片只适合预览，不建议直接发布。
+
+## dub_lint.json / dub_review.json
+
+Dub 模式下，`dub_script.json` 在 voiceclone **之前**先经过 deterministic lint，把明显不可发布的脚本挡在昂贵的克隆 TTS 之前。空译文、相邻行重叠、时间越界、`room < 0.4s` 等 **error** 会 `verdict=FAIL` 并阻断 render；`fast_speech`、`trim_risk` 等是 warning，不阻断。
+
+```json
+{
+  "schema_version": 1,
+  "verdict": "PASS|FAIL",
+  "blocking": false,
+  "errors": [],
+  "issues": [{"severity": "warning", "code": "fast_speech", "line": 2, "message": "translation is dense (8.4 chars/s)", "start": 1.0, "end": 2.0}],
+  "summary": {"lines": 12, "errors": 0, "warnings": 1, "max_chars_per_second": 8.4, "trim_risk_lines": []}
+}
+```
+
+`dub_review.json` 是脚本级 review scaffold（确定性派生自 lint，语义忠实/语气仍需 agent/人工判断）：
+
+```json
+{
+  "schema_version": 1,
+  "verdict": "PASS|REVISE|FAIL",
+  "checks": {"faithful_to_source": "needs_agent_review", "spoken_chinese": "PASS", "speaker_tone": "needs_agent_review", "timing_fit": "PASS", "platform_fit": "needs_agent_review"},
+  "highest_return_edits": [],
+  "coverage": {"transcript_windows": 8, "script_lines": 12}
+}
+```
+
+> CLI：`dub.py --stage lint|review`（无需 video）、`dub.py --print-schema` 打印以上全部 dub artifact 契约；`--stage render` 会在克隆前自动写 `dub_lint.json` / `dub_review.json`，lint 非 PASS 即中止。
