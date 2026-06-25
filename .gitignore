@@ -7,3 +7,19 @@ __pycache__/
 .omx/
 prd.json
 progress.txt
+
+# Local run artifacts & generated media — never commit real footage/audio/subtitles.
+# Targeted patterns (not bare *.mp4) so the tracked demo/demo.mp4 fixture is unaffected.
+work_dir*/
+outputs*/
+output*/
+tts_segments/
+mimo_cache/
+mimo_video_overview_cache/
+recap_*.mp4
+dub_*.mp4
+final_*.mp4
+edited_source.mp4
+edited_source.mp4.meta.json
+*.srt
+*.ass
