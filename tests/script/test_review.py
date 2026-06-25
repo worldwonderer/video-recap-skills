@@ -220,3 +220,53 @@ def test_review_narration_cut_output_uses_remapped_grounding(monkeypatch, tmp_pa
     content = payloads[0]["messages"][0]["content"]
     assert "[3-5s] 输出三到五秒对白" in content
     assert "[场景1 2-6s] 保留片段" in content
+
+
+def test_parse_review_scorecard_is_advisory_and_keeps_verdict():
+    payload = {
+        "verdict": "PASS",
+        "summary": "ok",
+        "scorecard": {"promise_match": 5, "hook_3s": 4, "first_15s_delivery": 4, "spine_clarity": 4, "information_gain": 5},
+        "hook_candidates_review": [{"candidate": "他以为赢了，其实刚入局", "type": "contrast", "score": 5, "keep": True}],
+        "retention_risk_points": [{"time": "00:28", "risk": "解释太久", "fix": "插入反问"}],
+        "highest_return_edits": ["露出00:31原声"],
+        "information_gain_notes": [{"segment": 0, "label": "motive", "note": "补动机"}],
+        "spoken_language_rewrites": [{"segment": 0, "original": "因此", "rewrite": "所以", "why": "更口语"}],
+        "grounding_assertions": [{"segment": 0, "assertion": "二人是盟友", "source": "ASR", "risk": "low"}],
+        "findings": [],
+    }
+    r = review.parse_review_response(json.dumps(payload, ensure_ascii=False))
+    assert r["verdict"] == "PASS"
+    assert r["scorecard"]["hook_3s"] == 4
+    md = review.format_review_md(r)
+    assert "Scorecard" in md and "Highest-return edits" in md and "Grounding assertions" in md
+
+
+def test_parse_review_scorecard_does_not_downgrade_weak_pass():
+    """De-fanged: weak scores never override the judge's PASS verdict (advisory only)."""
+    payload = {
+        "verdict": "PASS",
+        "summary": "weak but judge passed",
+        "scorecard": {"promise_match": 1, "hook_3s": 1, "first_15s_delivery": 1, "spine_clarity": 1},
+        "findings": [],
+    }
+    r = review.parse_review_response(json.dumps(payload, ensure_ascii=False))
+    assert r["verdict"] == "PASS"
+
+
+def test_build_review_messages_includes_planning_artifacts_when_present(tmp_path):
+    (tmp_path / "packaging_plan.json").write_text(json.dumps({"viewer_promise": "看到反转"}, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "recap_story_plan.json").write_text(json.dumps({"spine": "他如何翻盘"}, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "visual_audio_board.json").write_text(json.dumps({"items": [{"beat_id": "b01"}]}, ensure_ascii=False), encoding="utf-8")
+    content = review.build_review_messages([{"start": 0, "end": 3, "narration": "测试。"}], [], [], work_dir=tmp_path)[0]["content"]
+    assert "看到反转" in content and "他如何翻盘" in content and "visual_audio_board.json" in content
+
+
+def test_parse_review_scorecard_marks_unscored_dimensions():
+    """Dimensions the judge omits stay None (rendered 未评分), not a fabricated 3."""
+    payload = {"verdict": "PASS", "summary": "s", "scorecard": {"hook_3s": 5}, "findings": []}
+    r = review.parse_review_response(json.dumps(payload, ensure_ascii=False))
+    assert r["scorecard"]["hook_3s"] == 5
+    assert r["scorecard"]["tts_pacing"] is None
+    md = review.format_review_md(r)
+    assert "未评分" in md and "hook_3s: 5/5" in md
