@@ -860,3 +860,21 @@ def test_continuation_command_preserves_require_narration_review():
     command = recap._continuation_command("/tmp/in.mp4", "/tmp/work", args)
 
     assert "--require-narration-review" in command
+
+
+def test_review_status_does_not_gate_on_bare_model_verdict(tmp_path):
+    """Strict gate must key off parse_error / factual error findings ONLY — never the model's
+    holistic verdict. A subjective FAIL (or REVISE) with no error finding must not block TTS."""
+    def _write(payload):
+        (tmp_path / "narration_review.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    _write({"verdict": "FAIL", "findings": []})
+    assert recap._review_result_status(tmp_path)["ok"] is True
+
+    _write({"verdict": "REVISE", "findings": [{"severity": "warning", "category": "weak_hook", "issue": "x"}]})
+    assert recap._review_result_status(tmp_path)["ok"] is True
+
+    # A factual defect still gates — but via the error finding, not the verdict.
+    _write({"verdict": "PASS", "findings": [{"severity": "error", "category": "hallucination", "issue": "x"}]})
+    status = recap._review_result_status(tmp_path)
+    assert status["ok"] is False and status["errors"] == 1

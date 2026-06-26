@@ -86,14 +86,14 @@ def _review_result_status(work_dir):
         return {"ok": False, "reason": "missing or invalid narration_review.json"}
     findings = [f for f in (data.get("findings") or []) if isinstance(f, dict)]
     n_err = sum(1 for f in findings if f.get("severity") == "error")
-    verdict = str(data.get("verdict", "")).upper()
     if data.get("parse_error"):
         return {"ok": False, "reason": "parse_error", "review": data, "errors": n_err}
-    if verdict == "FAIL":
-        return {"ok": False, "reason": "verdict FAIL", "review": data, "errors": n_err}
     if n_err:
         return {"ok": False, "reason": f"error {n_err}", "review": data, "errors": n_err}
-    # REVISE without error findings stays advisory (never blocks; validate.py is the hard gate).
+    # Strict mode gates ONLY on parse_error or factual `error` findings — never on the model's
+    # holistic verdict. review.py deliberately clamps craft-class severities to `warning`, so a
+    # bare REVISE/FAIL with no error finding would otherwise smuggle subjective judgment back
+    # through the gate. The verdict stays an advisory signal in narration_review.*.
     return {"ok": True, "reason": "ok", "review": data, "errors": n_err}
 
 
