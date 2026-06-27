@@ -125,31 +125,204 @@ def _load_edited_source_meta(output_path):
     return data if isinstance(data, dict) else None
 
 
-def _write_edited_source_meta(output_path, validated_plan, input_video):
+def _source_fingerprints_for_plan(validated_plan, input_video=None):
+    """Fingerprint every media file that can affect edited_source.mp4 bytes."""
+    paths = []
+    for clip in (validated_plan.get("clips", []) if isinstance(validated_plan, dict) else []):
+        if clip.get("source_path"):
+            paths.append(str(clip["source_path"]))
+    if not paths and input_video is not None:
+        paths.append(str(input_video))
+    fingerprints = {}
+    for path in sorted(set(paths)):
+        fingerprints[str(Path(path))] = file_fingerprint(path)
+    return fingerprints
+
+
+def _write_edited_source_meta(output_path, validated_plan, input_video=None):
     meta_path = _edited_source_meta_path(output_path)
-    meta_path.write_text(json.dumps({
-        "schema_version": 1,
+    source_fingerprints = _source_fingerprints_for_plan(validated_plan, input_video)
+    has_plan_sources = any(
+        clip.get("source_path")
+        for clip in (validated_plan.get("clips", []) if isinstance(validated_plan, dict) else [])
+    )
+    legacy_source_fp = (
+        file_fingerprint(input_video)
+        if input_video is not None and not has_plan_sources and len(source_fingerprints) == 1
+        else None
+    )
+    meta = {
+        "schema_version": 2,
         "clip_plan_fingerprint": cut_plan_fingerprint(validated_plan),
-        "source_video_fingerprint": file_fingerprint(input_video),
+        "source_fingerprints": source_fingerprints,
         "edited_source_fingerprint": file_fingerprint(output_path),
         "total_duration": validated_plan.get("total_duration"),
         "clip_count": len(validated_plan.get("clips", [])),
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    }
+    # Preserve the legacy key for existing single-source callers/tests/metadata readers.
+    if legacy_source_fp is not None:
+        meta["source_video_fingerprint"] = legacy_source_fp
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def should_reuse_edited_source(output_path, validated_plan, input_video):
+def should_reuse_edited_source(output_path, validated_plan, input_video=None):
     """Return True only when edited_source.mp4 matches source media and cut params."""
     output_path = Path(output_path)
     if not output_path.exists():
         return False
     meta = _load_edited_source_meta(output_path)
+    if not meta or meta.get("clip_plan_fingerprint") != cut_plan_fingerprint(validated_plan):
+        return False
+    expected_sources = _source_fingerprints_for_plan(validated_plan, input_video)
+    meta_sources = meta.get("source_fingerprints")
+    if meta_sources is None and input_video is not None:
+        meta_sources = {str(Path(input_video)): meta.get("source_video_fingerprint")}
     return bool(
-        meta
-        and meta.get("clip_plan_fingerprint") == cut_plan_fingerprint(validated_plan)
-        and meta.get("source_video_fingerprint") == file_fingerprint(input_video)
+        meta_sources == expected_sources
         and meta.get("edited_source_fingerprint") == file_fingerprint(output_path)
     )
 
+
+
+def _manifest_source_entries(sources_manifest):
+    """Return source rows from common multi-source manifest shapes."""
+    if isinstance(sources_manifest, dict):
+        if isinstance(sources_manifest.get("sources"), list):
+            return sources_manifest["sources"]
+        rows = []
+        for source_id, value in sources_manifest.items():
+            if source_id in {"schema_version", "version"}:
+                continue
+            if isinstance(value, dict):
+                row = dict(value)
+                row.setdefault("source_id", source_id)
+                rows.append(row)
+        if rows:
+            return rows
+    elif isinstance(sources_manifest, list):
+        return sources_manifest
+    raise ValueError("sources manifest must be a list, a {sources:[...]} object, or a source_id map")
+
+
+def normalize_sources_manifest(sources_manifest):
+    """Normalize source manifest rows to {source_id: {source_path, duration}}."""
+    sources = {}
+    for idx, raw in enumerate(_manifest_source_entries(sources_manifest)):
+        if not isinstance(raw, dict):
+            raise ValueError(f"source #{idx + 1} must be an object")
+        source_id = raw.get("source_id", raw.get("id", raw.get("name")))
+        if source_id in (None, ""):
+            raise ValueError(f"source #{idx + 1} is missing source_id")
+        source_id = str(source_id)
+        source_path = raw.get("source_path", raw.get("path", raw.get("video_path", raw.get("video", raw.get("file")))))
+        if not source_path:
+            raise ValueError(f"source {source_id} is missing source_path/path")
+        duration = raw.get("duration", raw.get("duration_seconds", raw.get("source_duration")))
+        if duration in (None, ""):
+            duration = get_video_duration(source_path)
+        try:
+            duration = max(0.0, float(duration or 0.0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"source {source_id} has invalid duration") from exc
+        sources[source_id] = {"source_id": source_id, "source_path": str(source_path), "duration": duration}
+    if not sources:
+        raise ValueError("sources manifest has no sources")
+    return sources
+
+
+def normalize_multi_source_clip_plan(raw_plan, sources_manifest, target_duration=None, clip_padding=0.0, min_clip_duration=0.3, allow_overlap=False):
+    """Validate a multi-source clip plan and map source_id clips to source paths/durations.
+
+    Clip order follows the raw plan; overlap validation is isolated per source_id.
+    """
+    sources = normalize_sources_manifest(sources_manifest)
+    if isinstance(raw_plan, dict):
+        raw_clips = raw_plan.get("clips", [])
+        plan_target = raw_plan.get("target_duration") or raw_plan.get("target_duration_seconds")
+        if target_duration is None and plan_target not in (None, ""):
+            target_duration = parse_duration_seconds(plan_target)
+    elif isinstance(raw_plan, list):
+        raw_clips = raw_plan
+    else:
+        raise ValueError("clip_plan.json must be a JSON array or an object with a clips array")
+
+    if not isinstance(raw_clips, list):
+        raise ValueError("clip_plan.json field `clips` must be an array")
+
+    padding = max(0.0, float(clip_padding or 0.0))
+    min_duration = max(0.05, float(min_clip_duration or 0.05))
+    clips = []
+    source_ranges = {}
+    cursor = 0.0
+
+    for idx, raw in enumerate(raw_clips):
+        if not isinstance(raw, dict):
+            log(f"  跳过无效 clip #{idx + 1}: not an object")
+            continue
+        source_id = raw.get("source_id", raw.get("id"))
+        if source_id in (None, ""):
+            raise ValueError(f"clip #{idx + 1} is missing source_id")
+        source_id = str(source_id)
+        source = sources.get(source_id)
+        if not source:
+            raise ValueError(f"clip #{idx + 1} references unknown source_id: {source_id}")
+        try:
+            raw_start = float(_clip_value(raw, "start", "source_start", "in"))
+            raw_end = float(_clip_value(raw, "end", "source_end", "out"))
+        except (TypeError, ValueError):
+            log(f"  跳过无效 clip #{idx + 1}: missing numeric start/end")
+            continue
+        if raw_end - raw_start < min_duration:
+            log(f"  跳过过短 clip #{idx + 1}: {raw_start:.1f}-{raw_end:.1f}s")
+            continue
+        source_duration = source["duration"]
+        start = round(max(0.0, min(raw_start - padding, source_duration)), 3)
+        end = round(max(0.0, min(raw_end + padding, source_duration)), 3)
+        if end - start < min_duration:
+            log(f"  跳过过短 clip #{idx + 1}: {start:.1f}-{end:.1f}s")
+            continue
+        ranges = source_ranges.setdefault(source_id, [])
+        overlaps = [r for r in ranges if start < r[1] and end > r[0]]
+        if overlaps and not allow_overlap:
+            raise ValueError(
+                f"clip #{idx + 1} overlaps an earlier source range for source_id {source_id}; "
+                "split or remove duplicate source footage before mapping narration"
+            )
+        ranges.append((start, end))
+
+        duration = round(end - start, 3)
+        clip = {
+            "clip_id": len(clips),
+            "source_id": source_id,
+            "source_path": source["source_path"],
+            "source_start": start,
+            "source_end": end,
+            "output_start": round(cursor, 3),
+            "output_end": round(cursor + duration, 3),
+            "duration": duration,
+            "reason": str(raw.get("reason", raw.get("note", ""))).strip(),
+        }
+        clips.append(clip)
+        cursor += duration
+
+    if not clips:
+        raise ValueError("clip_plan.json has no valid clips")
+
+    total_duration = round(sum(c["duration"] for c in clips), 3)
+    plan = {
+        "clips": clips,
+        "total_duration": total_duration,
+        "target_duration": round(float(target_duration), 3) if target_duration else None,
+        "sources": {sid: {"source_path": s["source_path"], "duration": round(s["duration"], 3)} for sid, s in sources.items()},
+        "allow_overlap": bool(allow_overlap),
+    }
+    if target_duration and total_duration > target_duration * 1.15:
+        plan["warning"] = (
+            f"validated clips total {total_duration:.1f}s exceeds target "
+            f"{float(target_duration):.1f}s by more than 15%"
+        )
+        log(f"警告: {plan['warning']}")
+    return plan
 
 def normalize_clip_plan(raw_plan, video_duration, target_duration=None, clip_padding=0.0, min_clip_duration=0.3, allow_overlap=False):
     """Validate and enrich an agent-authored clip plan.
@@ -557,31 +730,40 @@ def build_edited_source_video(input_video, validated_plan, work_dir, output_path
     if not clips:
         raise ValueError("validated clip plan has no clips")
 
-    has_audio = _has_audio_stream(input_video)
+    source_paths = []
+    for clip in clips:
+        source_path = str(clip.get("source_path") or input_video)
+        if source_path not in source_paths:
+            source_paths.append(source_path)
+    source_index = {path: idx for idx, path in enumerate(source_paths)}
+    audio_by_input = {path: _has_audio_stream(path) for path in source_paths}
+    has_audio = all(audio_by_input.values())
+
     parts = []
     concat_inputs = []
     for clip in clips:
         idx = clip["clip_id"]
+        input_idx = source_index[str(clip.get("source_path") or input_video)]
         start = clip["source_start"]
         end = clip["source_end"]
         parts.append(
-            f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS[v{idx}]"
+            f"[{input_idx}:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS[v{idx}]"
         )
         concat_inputs.append(f"[v{idx}]")
         if has_audio:
             parts.append(
-                f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[a{idx}]"
+                f"[{input_idx}:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[a{idx}]"
             )
             concat_inputs.append(f"[a{idx}]")
 
+    extra_inputs = []
     if has_audio:
         parts.append("".join(concat_inputs) + f"concat=n={len(clips)}:v=1:a=1[v][a]")
         maps = ["-map", "[v]", "-map", "[a]"]
-        extra_inputs = []
     else:
         total = validated_plan.get("total_duration") or sum(c["duration"] for c in clips)
         parts.append("".join(concat_inputs) + f"concat=n={len(clips)}:v=1:a=0[v]")
-        maps = ["-map", "[v]", "-map", "1:a", "-shortest"]
+        maps = ["-map", "[v]", "-map", f"{len(source_paths)}:a", "-shortest"]
         extra_inputs = ["-f", "lavfi", "-t", f"{float(total):.3f}", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
 
     filter_complex = ";".join(parts)
@@ -591,7 +773,10 @@ def build_edited_source_video(input_video, validated_plan, work_dir, output_path
     else:
         filter_args = ["-filter_complex", filter_complex]
 
-    cmd = ["ffmpeg", "-y", "-i", str(input_video), *extra_inputs, *filter_args, *maps,
+    input_args = []
+    for source_path in source_paths:
+        input_args.extend(["-i", str(source_path)])
+    cmd = ["ffmpeg", "-y", *input_args, *extra_inputs, *filter_args, *maps,
            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "192k", str(output_path)]
     result = run_cmd(cmd)
     if result.returncode != 0:
@@ -610,6 +795,8 @@ def main():
     parser.add_argument("video", help="source video path")
     parser.add_argument("--work-dir", required=True, help="dir holding clip_plan.json (and optionally narration.json)")
     parser.add_argument("--clip-plan", default=None, help="clip plan json (default: <work-dir>/clip_plan.json)")
+    parser.add_argument("--sources-manifest", default=None,
+                        help="multi-source manifest json mapping source_id values to source media")
     parser.add_argument("--narration", default=None, help="narration json to map (default: <work-dir>/narration.json)")
     parser.add_argument("--target-duration", default=None, help="target output duration, e.g. 10m / 600 / 00:10:00")
     parser.add_argument("--clip-padding", type=float, default=0.0, help="seconds to pad each clip on both ends")
@@ -630,16 +817,27 @@ def main():
     raw_plan = load_clip_plan(clip_plan_path)
 
     target_seconds = parse_duration_seconds(args.target_duration) if args.target_duration else None
-    video_duration = get_video_duration(args.video)
-    validated_plan = normalize_clip_plan(
-        raw_plan,
-        video_duration,
-        target_duration=target_seconds,
-        clip_padding=args.clip_padding,
-        allow_overlap=args.allow_overlap,
-    )
+    sources_manifest = json.loads(Path(args.sources_manifest).read_text(encoding="utf-8")) if args.sources_manifest else None
+    if sources_manifest is not None:
+        validated_plan = normalize_multi_source_clip_plan(
+            raw_plan,
+            sources_manifest,
+            target_duration=target_seconds,
+            clip_padding=args.clip_padding,
+            allow_overlap=args.allow_overlap,
+        )
+        video_duration = None
+    else:
+        video_duration = get_video_duration(args.video)
+        validated_plan = normalize_clip_plan(
+            raw_plan,
+            video_duration,
+            target_duration=target_seconds,
+            clip_padding=args.clip_padding,
+            allow_overlap=args.allow_overlap,
+        )
 
-    if CONFIG.get("snap_clip_line_end", True):
+    if sources_manifest is None and CONFIG.get("snap_clip_line_end", True):
         silence_path = work_dir / "silence_periods.json"
         silence_periods = []
         if silence_path.exists():
@@ -659,7 +857,7 @@ def main():
     # Keep boundaries off the original footage's hard cuts (avoids 闪烁 at the edit point).
     # Runs after the line-snap so it refines the final source ranges; video-clean wins on the rare
     # boundary that is both in a quiet window and beside a shot-change.
-    if CONFIG.get("scene_cut_snap", True):
+    if sources_manifest is None and CONFIG.get("scene_cut_snap", True):
         validated_plan = snap_clips_off_shot_changes(
             validated_plan,
             args.video,

@@ -546,3 +546,78 @@ def test_detect_shot_changes_offsets_by_seek_and_filters_window(monkeypatch):
                         types.SimpleNamespace(run=lambda *a, **k: CompletedProcess(a, 0, "", stderr)))
     out = cut._detect_shot_changes("v.mkv", 55.0, 68.0, 0.4)  # seek=54.75
     assert out == [56.512, 60.616]  # 54.8 (54.75+0.05) is < win_start → filtered
+
+
+def test_normalize_multi_source_clip_plan_maps_sources_and_validates_per_source_overlap(tmp_path):
+    manifest = {
+        "sources": [
+            {"source_id": "a", "source_path": str(tmp_path / "a.mp4"), "duration": 10.0},
+            {"source_id": "b", "source_path": str(tmp_path / "b.mp4"), "duration": 5.0},
+        ]
+    }
+    plan = cut.normalize_multi_source_clip_plan([
+        {"source_id": "a", "start": 1.0, "end": 4.0, "reason": "A"},
+        {"source_id": "b", "start": 4.0, "end": 8.0, "reason": "B"},
+        {"source_id": "b", "start": 0.0, "end": 1.0, "reason": "B2"},
+    ], manifest, clip_padding=0.5)
+
+    assert plan["total_duration"] == 7.0
+    assert [c["source_id"] for c in plan["clips"]] == ["a", "b", "b"]
+    assert plan["clips"][0]["source_path"].endswith("a.mp4")
+    assert plan["clips"][0]["source_start"] == 0.5
+    assert plan["clips"][1]["source_end"] == 5.0  # clamped to source b duration
+    assert plan["clips"][2]["output_start"] == 5.5
+
+    with pytest.raises(ValueError, match="source_id a"):
+        cut.normalize_multi_source_clip_plan([
+            {"source_id": "a", "start": 1.0, "end": 4.0},
+            {"source_id": "a", "start": 3.5, "end": 5.0},
+        ], manifest)
+    with pytest.raises(ValueError, match="missing source_id"):
+        cut.normalize_multi_source_clip_plan([
+            {"start": 1.0, "end": 2.0},
+        ], manifest)
+    with pytest.raises(ValueError, match="unknown source_id"):
+        cut.normalize_multi_source_clip_plan([
+            {"source_id": "missing", "start": 1.0, "end": 2.0},
+        ], manifest)
+
+
+def test_build_edited_source_video_multi_source_uses_multiple_inputs_and_cache_meta(monkeypatch, tmp_path):
+    a = tmp_path / "a.mp4"
+    b = tmp_path / "b.mp4"
+    a.write_bytes(b"aaa")
+    b.write_bytes(b"bbb")
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    plan = cut.normalize_multi_source_clip_plan([
+        {"source_id": "a", "start": 0, "end": 1},
+        {"source_id": "b", "start": 2, "end": 3},
+        {"source_id": "a", "start": 4, "end": 5},
+    ], {"sources": [
+        {"source_id": "a", "source_path": str(a), "duration": 10},
+        {"source_id": "b", "source_path": str(b), "duration": 10},
+    ]})
+    commands = []
+
+    def fake_run_cmd(cmd):
+        commands.append(cmd)
+        if cmd[0] == "ffprobe":
+            return CompletedProcess(cmd, 0, stdout="", stderr="")
+        Path(cmd[-1]).write_bytes(b"edited")
+        return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("cut.run_cmd", fake_run_cmd)
+    monkeypatch.setattr("cut.get_video_duration", lambda path: 3.0)
+
+    out = cut.build_edited_source_video("ignored.mp4", plan, work_dir)
+
+    ffmpeg_cmd = [cmd for cmd in commands if cmd[0] == "ffmpeg"][0]
+    assert ffmpeg_cmd.count("-i") == 3  # two media inputs + generated silent audio
+    joined = " ".join(ffmpeg_cmd)
+    assert f"-i {a}" in joined and f"-i {b}" in joined
+    assert "[0:v]trim=start=0.000:end=1.000" in joined
+    assert "[1:v]trim=start=2.000:end=3.000" in joined
+    assert "[0:v]trim=start=4.000:end=5.000" in joined
+    assert "concat=n=3" in joined
+    assert cut.should_reuse_edited_source(out, plan, "ignored.mp4") is True

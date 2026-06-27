@@ -56,6 +56,14 @@ def _source_video_identity():
     return str(path.resolve()), _artifact_fingerprint(path)
 
 
+def _timeline_provenance_status(work_dir):
+    data = _load_work_json(work_dir, "timeline.json")
+    if not isinstance(data, dict):
+        return None
+    provenance = data.get("provenance")
+    return provenance if isinstance(provenance, dict) else None
+
+
 def _assembly_manifest_payload(input_video, tts_segments, work_dir, output_path,
                                tts_meta_path=None, final_output=None):
     """Slim render record. The orchestrator reads `final_output` to report the result;
@@ -76,6 +84,9 @@ def _assembly_manifest_payload(input_video, tts_segments, work_dir, output_path,
     }
     if final_output is not None:
         payload["final_output"] = str(Path(final_output).resolve())
+    provenance = _timeline_provenance_status(work_dir)
+    if provenance:
+        payload["timeline_provenance"] = provenance
     return payload
 
 
@@ -142,19 +153,28 @@ def _has_audio_stream(video_path):
 def _build_video_clips(input_video, work_dir, duration_s):
     """Video-track clips for the timeline.
 
-    In cut mode (a clip_plan.json + a known original source) each plan entry
-    becomes a clip referencing the ORIGINAL source range, so an editor sees the
-    real cuts. Otherwise (or full mode) the rendered input is a single clip.
+    In cut mode each plan entry becomes a clip referencing the ORIGINAL source
+    range. Multi-source validated plans carry per-clip source_path and do not
+    require an explicit ambient --source-video.
     """
-    source_video = _explicit_source_video()
-    if source_video and os.path.exists(source_video):
-        try:
-            plan = _load_cut_timeline_plan(work_dir)
-            if plan is None:
-                raise ValueError("missing clip_plan.json")
+    explicit_source_video = _explicit_source_video()
+    try:
+        plan = _load_cut_timeline_plan(work_dir)
+        if plan is not None:
             entries = plan.get("clips", plan) if isinstance(plan, dict) else plan
             clips, cursor = [], 0.0
             for c in entries:
+                per_clip_source = str(c.get("source_path") or "").strip()
+                source_path = per_clip_source or explicit_source_video
+                if not source_path or not os.path.exists(source_path):
+                    if per_clip_source:
+                        log(f"  时间线: source_path 不存在，回退为剪后成片单片段: {source_path}")
+                        return [{"source_path": str(input_video), "source_start": 0.0,
+                                 "source_end": float(duration_s), "timeline_start": 0.0,
+                                 "timeline_end": float(duration_s),
+                                 "provenance_degraded": True,
+                                 "provenance_reason": f"missing_source_path:{source_path}"}]
+                    continue
                 ss = float(c.get("source_start", c.get("start")))
                 se = float(c.get("source_end", c.get("end")))
                 timeline_start = c.get("output_start")
@@ -170,13 +190,13 @@ def _build_video_clips(input_video, work_dir, duration_s):
                     timeline_start = float(timeline_start)
                     timeline_end = float(timeline_end)
                     cursor = max(cursor, timeline_end)
-                clips.append({"source_path": source_video, "source_start": ss,
+                clips.append({"source_path": source_path, "source_start": ss,
                               "source_end": se, "timeline_start": timeline_start,
                               "timeline_end": timeline_end})
             if clips:
                 return clips
-        except (TypeError, ValueError, KeyError, OSError) as exc:
-            log(f"  时间线: clip_plan 解析失败，回退单片 ({exc})")
+    except (TypeError, ValueError, KeyError, OSError) as exc:
+        log(f"  时间线: clip_plan 解析失败，回退单片 ({exc})")
     return [{"source_path": str(input_video), "source_start": 0.0,
              "source_end": float(duration_s), "timeline_start": 0.0,
              "timeline_end": float(duration_s)}]
@@ -237,6 +257,19 @@ def _emit_timeline(input_video, tts_segments, work_dir, duration_s, has_bgm):
     timeline = build_timeline(canvas, duration_s, video_clips,
                               narration_segments, bgm=bgm, ducking=ducking,
                               subtitle_segments=subtitle_segments)
+    degraded = [
+        {
+            "source_path": clip.get("source_path"),
+            "reason": clip.get("provenance_reason") or "unknown",
+        }
+        for clip in video_clips
+        if clip.get("provenance_degraded")
+    ]
+    if degraded:
+        timeline["provenance"] = {"degraded": True, "degraded_clips": degraded}
+        log(f"  ⚠️ 时间线 provenance 降级: {degraded[0]['reason']} ({len(degraded)} clip)")
+    else:
+        timeline["provenance"] = {"degraded": False}
     out = Path(work_dir) / "timeline.json"
     save_timeline(timeline, out)
     log(f"时间线模型: {out} ({len(timeline['tracks'])} 轨)")

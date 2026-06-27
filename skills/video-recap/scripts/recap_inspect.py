@@ -33,6 +33,7 @@ _UNDERSTANDING_ARTIFACTS = [
     "agent_narration_brief.md",
 ]
 _CUT_ARTIFACTS = [
+    "multi_source_manifest.json",
     "clip_plan.json",
     "clip_plan_validated.json",
     "edited_source.mp4",
@@ -126,6 +127,25 @@ def _discover_source(work_dir):
     return {"path": None, "fingerprint": None, "origin": "unknown"}
 
 
+def _discover_multi_source(work_dir):
+    data, _ = _load_json(Path(work_dir) / "multi_source_manifest.json")
+    if not isinstance(data, dict) or not isinstance(data.get("sources"), list):
+        return None
+    sources = []
+    for raw in data.get("sources") or []:
+        if not isinstance(raw, dict):
+            continue
+        sources.append({
+            "source_id": raw.get("source_id"),
+            "source_path": raw.get("source_path"),
+            "source_name": raw.get("source_name"),
+            "source_video_fingerprint": raw.get("source_video_fingerprint"),
+            "source_work_dir": raw.get("source_work_dir"),
+            "material_id": raw.get("material_id"),
+        })
+    return {"schema_version": data.get("schema_version", 1), "sources": sources}
+
+
 # --- clip plan loading + forward affine map ----------------------------------
 def _clip_entries(plan):
     """Normalize a clip plan (dict-with-clips or bare list) to the list of clip dicts."""
@@ -170,6 +190,8 @@ def _normalize_clips(entries):
                 cursor = max(cursor, out_e)
         clips.append({
             "clip_id": c.get("clip_id", idx),
+            "source_id": c.get("source_id"),
+            "source_path": c.get("source_path"),
             "source_start": ss,
             "source_end": se,
             "output_start": out_s,
@@ -281,6 +303,7 @@ def cmd_state(work_dir, compact):
         "mode": mode,
         "forward_state_files": forward,
         "source_video": source,
+        "multi_source": _discover_multi_source(work_dir),
         "next_pause": (
             {"artifact": pause[0], "hint": pause[1]} if pause else None
         ),
@@ -302,6 +325,15 @@ def _render_state_md(state, compact):
     fp = src["fingerprint"]
     fp_short = (fp[:12] + "…") if isinstance(fp, str) and len(fp) > 12 else (fp or "unknown")
     lines.append(f"源视频: {_truncate(path, compact)}  (fp {fp_short}, 来源 {src['origin']})")
+    if state.get("multi_source"):
+        lines.append("多源素材:")
+        for s in state["multi_source"].get("sources", []):
+            fp = s.get("source_video_fingerprint")
+            short = (fp[:12] + "…") if isinstance(fp, str) and len(fp) > 12 else (fp or "unknown")
+            lines.append(
+                f"  - {s.get('source_id')}: {_truncate(s.get('source_path'), compact)} "
+                f"(fp {short}, work_dir {s.get('source_work_dir')}, material {s.get('material_id')})"
+            )
     lines.append("")
 
     if state["next_pause"]:
@@ -386,6 +418,8 @@ def _map_output_window(out_start, out_end, clips, compact):
             continue
         segments.append({
             "clip_id": clip["clip_id"],
+            "source_id": clip.get("source_id"),
+            "source_path": clip.get("source_path"),
             "output": [round(ov[0], 3), round(ov[1], 3)],
             "source": [_output_to_source(ov[0], clip), _output_to_source(ov[1], clip)],
             "reason": _truncate(clip.get("reason"), compact),
@@ -416,6 +450,8 @@ def _map_source_window(src_start, src_end, clips, compact):
         covered.append(ov)
         segments.append({
             "clip_id": clip["clip_id"],
+            "source_id": clip.get("source_id"),
+            "source_path": clip.get("source_path"),
             "source": [round(ov[0], 3), round(ov[1], 3)],
             "output": [_source_to_output(ov[0], clip), _source_to_output(ov[1], clip)],
             "reason": _truncate(clip.get("reason"), compact),
@@ -459,7 +495,9 @@ def _render_clip_map_md(result, compact):
             src = f"{_fmt_seconds(s['source'][0])}–{_fmt_seconds(s['source'][1])}"
             out = f"{_fmt_seconds(s['output'][0])}–{_fmt_seconds(s['output'][1])}"
             reason = f"  〔{s['reason']}〕" if s.get("reason") else ""
-            lines.append(f"  clip {s['clip_id']}: 源 {src}  ↔  输出 {out}{reason}")
+            sid = f" {s.get('source_id')}" if s.get("source_id") else ""
+            spath = f" `{_truncate(s.get('source_path'), compact)}`" if s.get("source_path") else ""
+            lines.append(f"  clip {s['clip_id']}{sid}{spath}: 源 {src}  ↔  输出 {out}{reason}")
         if q["cut_out_source_gaps"]:
             lines.append("  ✂️ 被剪掉的源区间（不在成片里）:")
             for g in q["cut_out_source_gaps"]:

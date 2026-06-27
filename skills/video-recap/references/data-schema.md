@@ -135,6 +135,26 @@ Agent 撰写的解说词。full 模式下使用原视频时间；**orchestrated 
 
 常见 code：`invalid_time`、`empty_narration`、`time_overlap`、`outside_clip_plan`、`over_budget`、`incomplete_sentence`、`slot_too_short`、`under_narrated`、`over_narrated`、`fragmented_beats`、`no_original_blocks`。
 
+## multi_source_manifest.json（多视频 cut）
+
+多视频剪辑模式下，项目级 `work_dir/multi_source_manifest.json` 是 `recap.py` / `cut.py` / `assemble.py` 的来源契约。`source_id` 默认由源文件 SHA-256 派生为 `src_<fingerprint[:12]>`；同一项目里重复 fingerprint 的不同路径会追加短 path hash 后缀。
+
+```json
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "source_id": "src_0123456789ab",
+      "source_path": "/abs/episode1.mp4",
+      "source_name": "episode1.mp4",
+      "source_video_fingerprint": "0123456789abcdef...",
+      "source_work_dir": "sources/src_0123456789ab",
+      "material_id": "episode1-0123456789ab"
+    }
+  ]
+}
+```
+
 ## clip_plan.json
 
 cut 模式下 Agent 选择要保留的原片片段，数组或 `{ "clips": [...] }` 都可接受。默认片段不能重叠，避免同一原片时间映射到多个输出位置：
@@ -153,6 +173,18 @@ cut 模式下 Agent 选择要保留的原片片段，数组或 `{ "clips": [...]
 | `start` | float | 原视频片段开始秒数 |
 | `end` | float | 原视频片段结束秒数 |
 | `reason` | string | 选择该片段的剧情/信息原因 |
+
+多视频 cut 的 `clip_plan.json` 必须给每个片段加 `source_id`；重叠检测按 `source_id` 分开计算，不同源视频的相同时间范围不互相冲突：
+
+```json
+{
+  "target_duration": "10m",
+  "clips": [
+    {"source_id": "src_0123456789ab", "start": 12.0, "end": 38.0, "reason": "episode 1 hook"},
+    {"source_id": "src_fedcba987654", "start": 4.0, "end": 22.0, "reason": "episode 2 payoff"}
+  ]
+}
+```
 
 ## clip_plan_validated.json
 
@@ -175,6 +207,44 @@ CLI 校验 `clip_plan.json` 后写出，额外包含输出时间轴：
   "target_duration": 600.0
 }
 ```
+
+多视频 validated clip 会额外保留来源字段，供 pass2 brief、timeline 和剪映导出追溯原素材：
+
+```json
+{
+  "clips": [
+    {
+      "clip_id": 0,
+      "source_id": "src_0123456789ab",
+      "source_path": "/abs/episode1.mp4",
+      "source_start": 12.0,
+      "source_end": 38.0,
+      "output_start": 0.0,
+      "output_end": 26.0,
+      "duration": 26.0,
+      "reason": "episode 1 hook"
+    }
+  ]
+}
+```
+
+## material library（可选，grep 复用）
+
+`--material-library-dir <dir> --save-materials` 会把每个源视频的已分析小文件复制到 `<dir>/materials/<material_id>/`，不复制原始媒体。`--use-materials` 会在 fingerprint 和 settings fingerprint 匹配时把这些 JSON/MD 产物恢复到当前 per-source `work_dir`。
+
+```text
+.video-materials/
+  materials_index.jsonl          # 追加式 grep journal；旧行可保留为历史
+  materials/<material_id>/
+    material.json                # 当前权威 metadata
+    material.md                  # grep 友好摘要
+    artifacts/scenes.json
+    artifacts/asr_result.json
+    artifacts/vlm_analysis.json
+    artifacts/understanding_index.json
+```
+
+`materials_index.jsonl` 每次保存追加一行，字段包括 `schema_version`, `event`, `material_id`, `source_name`, `source_path`, `source_video_fingerprint`, `settings_fingerprint`, `summary`, `tags`, `material_dir`, `updated_at`。当前权威状态始终以 `materials/<material_id>/material.json` 为准。MVP 只承诺 `grep -R "关键词" <library>` 这类文件检索；没有 DB、embedding 或语义搜索。
 
 ## narration_mapped.json
 

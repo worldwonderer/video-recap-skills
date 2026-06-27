@@ -5,6 +5,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .omx/
+.env
+.env.*
+!.env.example
 prd.json
 progress.txt
 

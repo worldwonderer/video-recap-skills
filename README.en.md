@@ -49,7 +49,11 @@ flowchart LR
 /plugin install video-recap-skills@video-recap
 ```
 
-(Or just tell Claude Code: "Install this plugin: https://github.com/worldwonderer/video-recap-skills".)
+> Or skip the commands and tell Claude Code:
+>
+> ```text
+> Install this plugin: https://github.com/worldwonderer/video-recap-skills
+> ```
 
 **② Install ffmpeg** (no `pip install`: pure standard library + `ffmpeg` on `PATH`, Python 3.10+):
 
@@ -119,6 +123,28 @@ Turn /path/to/long.mp4 into a ~10-minute cut-down recap and burn the subtitles i
 
 Behind the scenes the orchestrator chains the stages, pausing so the agent can write the narration (cut mode pauses twice: first write `clip_plan.json` to pick the footage, then — once the cut is rendered — write `narration.json` against that output). Before the first run, check your setup:
 
+Multi-video recap is an MVP for cut mode only:
+
+```bash
+python3 skills/video-recap/scripts/recap.py ep1.mp4 ep2.mp4 --edit-mode cut --target-duration 10m --work-dir work_dir_multi_story
+```
+
+Each source is analyzed under `work_dir_multi_story/sources/<source_id>/`; the project-level `multi_source_manifest.json` records `source_id → source_path`, and each `clip_plan.json` clip must include `source_id`.
+
+The optional material library is filesystem-only and grep-friendly:
+
+```bash
+python3 skills/video-recap/scripts/recap.py ep1.mp4 --edit-mode cut \
+  --material-library-dir .video-materials --save-materials
+
+grep -R "hero" .video-materials
+
+python3 skills/video-recap/scripts/recap.py ep1.mp4 ep2.mp4 --edit-mode cut \
+  --material-library-dir .video-materials --use-materials
+```
+
+It stores small JSON/MD artifacts plus an append-only `materials_index.jsonl`; it does not copy raw media, create a DB, or use embeddings/semantic search.
+
 ```bash
 python3 skills/video-recap/scripts/recap.py --doctor
 ```
@@ -151,6 +177,8 @@ It runs English ASR, splits into complete sentences, pulls one reference clip, t
 - `work_dir/agent_narration_brief.md`: timing and scene brief for the agent
 - `work_dir/vlm_analysis.json` · `asr_result.json` · `silence_periods.json` · `timeline_fusion.json`: understanding artifacts
 - `work_dir/clip_plan.json` · `edited_source.mp4` · `recap_phase.json`: cut-mode artifacts (narration is written on the output timeline; `recap_phase.json` records cut/narrate progress for deterministic resume)
+- `work_dir/multi_source_manifest.json` · `work_dir/sources/<source_id>/`: multi-video cut source manifest and per-source analysis artifacts
+- `<material-library-dir>/materials/<material_id>/material.json|material.md` · `materials_index.jsonl`: optional grep-friendly material library for reusing analyzed sources
 - `work_dir/timeline.json` · `work_dir/assembly_manifest.json` · `tts_segments/` · `tts_meta.json`: multi-track timeline, slim render record, and TTS audio
 
 ## Bring your own original-dialogue subtitles (optional, more accurate)
