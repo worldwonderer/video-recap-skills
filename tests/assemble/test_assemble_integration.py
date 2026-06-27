@@ -110,3 +110,64 @@ def test_assemble_video_runs_when_source_has_no_audio_stream(tmp_path, monkeypat
 
     assert out.exists() and out.stat().st_size > 0
     assert "audio" in _stream_types(out)
+
+
+def _make_422_source_video(path, seconds=2):
+    """A 4:2:2 source: plays on desktop but fails on WeChat/mobile if passed through as-is."""
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", f"color=c=green:s=320x240:d={seconds}:r=25",
+        "-f", "lavfi", "-i", f"sine=frequency=220:duration={seconds}",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv422p",
+        "-c:a", "aac", "-shortest", str(path),
+    ], check=True, capture_output=True)
+
+
+def _pix_fmt(path):
+    return subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=pix_fmt", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def _top_level_atoms(path):
+    """Ordered list of top-level mp4 box types — enough to verify moov precedes mdat."""
+    atoms = []
+    data = Path(path).read_bytes()
+    i, n = 0, len(data)
+    while i + 8 <= n:
+        size = int.from_bytes(data[i:i + 4], "big")
+        atoms.append(data[i + 4:i + 8].decode("latin-1", "replace"))
+        if size == 1:  # 64-bit largesize
+            if i + 16 > n:
+                break
+            size = int.from_bytes(data[i + 8:i + 16], "big")
+        if size == 0:  # box extends to EOF
+            break
+        if size < 8:
+            break
+        i += size
+    return atoms
+
+
+def test_output_is_yuv420p_and_faststart_on_reencode(tmp_path, monkeypatch):
+    """Re-encoded recaps must be 8-bit 4:2:0 (universally decodable) with a front-loaded
+    moov atom (progressive web/social playback). Regression guard for the output encode."""
+    monkeypatch.setitem(CONFIG, "final_loudnorm", False)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)
+    monkeypatch.setitem(CONFIG, "burn_subtitles", False)
+    monkeypatch.setitem(CONFIG, "force_video_reencode", True)  # drives the bare libx264 branch
+    work = tmp_path / "w_pf"
+    work.mkdir()
+    src = tmp_path / "src422.mp4"
+    _make_422_source_video(src, seconds=2)
+    assert _pix_fmt(src) == "yuv422p"  # precondition: a non-420 source
+    out = work / "recap.mp4"
+    segs = _segment(work, 0.3, 1.5, overlaps=True, dur=1.0)
+    assemble_video(src, segs, work, out)
+    assert out.exists() and out.stat().st_size > 0
+    assert _pix_fmt(out) == "yuv420p", "re-encode must force 8-bit 4:2:0"
+    atoms = _top_level_atoms(out)
+    assert "moov" in atoms and "mdat" in atoms
+    assert atoms.index("moov") < atoms.index("mdat"), f"moov not front-loaded: {atoms}"
