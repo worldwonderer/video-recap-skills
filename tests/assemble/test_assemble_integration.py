@@ -151,6 +151,36 @@ def _top_level_atoms(path):
     return atoms
 
 
+def _make_portrait_source_video(path, seconds=2):
+    """A 9:16 (270x480) source — exercises the canvas-matched subtitle PlayRes path."""
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", f"color=c=navy:s=270x480:d={seconds}:r=25",
+        "-f", "lavfi", "-i", f"sine=frequency=220:duration={seconds}",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-shortest", str(path),
+    ], check=True, capture_output=True)
+
+
+def test_portrait_source_burns_canvas_matched_subtitles(tmp_path, monkeypatch):
+    """A 9:16 source must burn subtitles against a frame-matching PlayRes (not the old
+    hardcoded 1280x720 16:9 box that horizontally stretched portrait glyphs)."""
+    monkeypatch.setitem(CONFIG, "final_loudnorm", False)
+    monkeypatch.setitem(CONFIG, "burn_subtitles", True)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)
+    work = tmp_path / "w_portrait"
+    work.mkdir()
+    src = tmp_path / "src_portrait.mp4"
+    _make_portrait_source_video(src, seconds=2)
+    out = work / "recap_portrait.mp4"
+    segs = _segment(work, 0.3, 1.5, overlaps=True, dur=1.0)
+    assemble_video(src, segs, work, out)
+    assert out.exists() and out.stat().st_size > 0
+    assert "video" in _stream_types(out)
+    ass = (work / "subtitles.ass").read_text(encoding="utf-8")
+    assert "PlayResX: 270" in ass and "PlayResY: 480" in ass
+
+
 def test_output_is_yuv420p_and_faststart_on_reencode(tmp_path, monkeypatch):
     """Re-encoded recaps must be 8-bit 4:2:0 (universally decodable) with a front-loaded
     moov atom (progressive web/social playback). Regression guard for the output encode."""
