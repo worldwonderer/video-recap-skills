@@ -38,6 +38,7 @@ flowchart LR
 - **Research when it matters.** When the title/story context is known or the brief notes the material is thin, put character relationships and plot background in `background_research.json` so the VLM knows who's who.
 - **Narration in blocks, original in blocks.** Narration plays in connected blocks, each voiced in one pass; in the gaps, the original audio returns at full volume — roughly 7:3.
 - **Cut first, frames aligned.** `--edit-mode cut` renders the cut first, then you narrate against that timeline, so picture and voice stay in sync.
+- **Multi-video cut, reusable analysis.** Feed several videos at once, pick ranges by `source_id`, and render one recap; each video's analysis is saved to a filesystem material library you can `grep` and reuse next time.
 - **Keep editing in 剪映.** Optionally export a schema-driven multi-track 剪映 draft — original, narration, BGM, and subtitles each on a track; ffmpeg remains the canonical render.
 
 ## Installation

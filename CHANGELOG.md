@@ -4,6 +4,36 @@ All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
 
+## [0.3.3] - 2026-06-28
+
+多源视频剪辑解说 + 文件系统素材库复用为主线，并合入跨 harness 支持、成片兼容性与竖屏字幕修复、解说评审硬闸等改进。
+
+### 新增
+
+- **多视频剪辑解说（cut 模式）。** 一次传入多个源视频，按 `source_id` 选取片段，剪成一个成片；项目级 `multi_source_manifest.json` 作为 recap / cut / assemble 的来源契约，`clip_plan.json` 每个片段带 `source_id`，重叠检测按源隔离。多视频 MVP 仅开放 `--edit-mode cut`。
+- **文件系统素材库复用。** `--material-library-dir` 搭配 `--save-materials` / `--use-materials`，把每个源视频的分析产物沉淀为 grep 友好的 `material.json` / `material.md` / 追加式 `materials_index.jsonl`，不复制原始媒体；按源指纹 + 设置指纹门控恢复，复用前清理旧 work dir 的残留产物。无 DB / embedding / 语义检索，纯文件系统 + `grep`。
+- **多源 provenance 透出。** `video-assemble` / `recap_inspect` 在时间线与剪映草稿中保留 `source_id` / `source_path`；个别源缺失时按片段降级并显式标记，保留其余在场源的来源，而非丢弃整条时间线。
+- **`video-understanding --brief-only`。** 从已恢复 / 缓存的分析产物重建 OUTPUT 时间轴 brief，不重跑抽帧 / ASR / VLM / 外部 API。
+- **跨 harness 支持 + Claude Code marketplace。** Codex 与 OpenClaw 直接读取 `.claude-plugin` 包，无需每 harness 文件；marketplace 命名为 `video-recap`。(#50)
+- **解说评审 scorecard + dub-lint 硬闸 + partial-TTS 可见性。** (#49)
+
+### 改进
+
+- **单视频 full / cut / dub 行为保持兼容。** 多视频仅在 cut 模式开放；单源剪辑滤镜图保持不变（字节级一致）。
+
+### 修复
+
+- **异源 concat 几何归一化。** 多源片段先归一到统一画布（scale / pad / setsar / fps / yuv420p）再 concat，分辨率 / SAR / 帧率不同的源视频不再让 ffmpeg 报错；不同分辨率的多视频可正常合成一个成片。
+- **多源音轨按源处理。** 个别无声源不再导致整段成片静音；每个片段都有音频（原声或合成静音）。
+- **密钥脱敏更精确。** 只脱敏凭证形态（`tp-` / `sk-` / `gh*_` / `AKIA` / JWT 与 `KEY=VALUE`）与凭证命名的 JSON key，不再误伤 transcript / summary 里的 `secret` / `token` 等普通词，也不再把多个 key 合并丢值。
+- **出片强制 `yuv420p` + faststart。** 微信 / 手机可播、边下边播。(#51)
+- **字幕样式按探测画布缩放。** 修复竖屏 (9:16) 字幕被拉伸。(#53)
+
+### 验证
+
+- 全套 `python3 scripts/test.py` 全部 skill groups passed（551 tests），`ruff` / `compileall` clean。
+- 新增真实 ffmpeg 多分辨率 + 混合音频渲染测试（验证异源 concat 与音轨归一化）；密钥脱敏保留正常词 / 不合并 key / 凭证形态测试；assemble 按片段降级（保留在场源 provenance）测试。
+
 ## [0.3.2] - 2026-06-22
 
 让剪映草稿导出跟上新版工程结构，方便在剪映专业版里继续精修。
