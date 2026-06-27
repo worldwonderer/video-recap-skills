@@ -46,7 +46,7 @@ flowchart LR
 
 ```text
 /plugin marketplace add worldwonderer/video-recap-skills
-/plugin install video-recap-skills@video-recap-skills
+/plugin install video-recap-skills@video-recap
 ```
 
 （也可以直接对 claude code 说「安装这个插件：https://github.com/worldwonderer/video-recap-skills」。）
@@ -80,15 +80,15 @@ export MIMO_TOKEN_PLAN_CLUSTER=cn
 
   ```bash
   codex plugin marketplace add worldwonderer/video-recap-skills
-  codex plugin add video-recap-skills@video-recap-skills
+  codex plugin add video-recap-skills@video-recap
   ```
 
   （仓库 push 后可用 `owner/repo` 形式；本地可用 `codex plugin marketplace add ./video-recap-skills`。）
 
-- **OpenClaw**（已验证）——直接导入 Claude 插件包：
+- **OpenClaw**（已验证）——直接导入 Claude 插件包。克隆本仓库后，把参数指向克隆出的目录运行：
 
   ```bash
-  openclaw plugins install ./video-recap-skills   # 或克隆后指向该目录
+  openclaw plugins install ./video-recap-skills
   ```
 
   6 个 skill 会成为原生、可自动触发的技能（`openclaw skills list` 可见）。
@@ -96,8 +96,8 @@ export MIMO_TOKEN_PLAN_CLUSTER=cn
 - **opencode**（按其文档，未在本机实测）——opencode 自动发现 `.claude/skills` / `.agents/skills` / `.opencode/skills` 下的 skill。克隆本仓库后，把 `skills/` 暴露到其中之一即可：
 
   ```bash
-  ln -s ../skills .claude/skills      # macOS / Linux
-  # Windows：把 skills\* 复制到 .claude\skills\
+  mkdir -p .claude && ln -s ../skills .claude/skills   # macOS / Linux
+  # Windows：先建 .claude\skills 目录，再把 skills\* 复制进去
   ```
 
 > 各 Agent 跑脚本的工作目录不一定是 skill 目录；每个 `SKILL.md` 顶部的「Running the scripts」说明了如何用绝对路径调起（脚本用 `__file__` 自定位）。

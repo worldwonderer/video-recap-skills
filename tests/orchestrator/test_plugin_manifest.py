@@ -1,7 +1,8 @@
 """Plugin packaging guards (no-move variant): plugin.json has exactly the 4 Anthropic keys,
 the 4 pure-tool stage skills are hidden (user-invocable: false) so video-recap is the router,
 and marketplace.json is the single Claude-compatible marketplace catalog (also imported by
-OpenClaw's `plugins install`); the plugin version stays single-sourced in plugin.json."""
+OpenClaw's `plugins install`); the plugin version stays single-sourced in plugin.json (bump it
+on each shipped change so installed users receive the update)."""
 import json
 from pathlib import Path
 
@@ -16,13 +17,17 @@ def test_plugin_manifest_has_exactly_four_keys():
 
 def test_marketplace_json_present_and_valid():
     mp = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
-    assert mp["name"] == "video-recap-skills"
+    plugin = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    assert mp["name"] == "video-recap"
     assert mp["owner"]["name"]
     plugins = mp["plugins"]
     assert len(plugins) == 1
     entry = plugins[0]
-    assert entry["name"] == "video-recap-skills"
+    # the marketplace entry name must match the plugin manifest name
+    assert entry["name"] == plugin["name"] == "video-recap-skills"
     assert entry["source"] == "./"
+    # source "./" must point at the dir that actually holds the plugin manifest
+    assert (ROOT / ".claude-plugin" / "plugin.json").exists()
     # version stays single-sourced in plugin.json; do not pin it in the marketplace entry
     assert "version" not in entry
 

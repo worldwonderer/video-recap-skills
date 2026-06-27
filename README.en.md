@@ -46,7 +46,7 @@ flowchart LR
 
 ```text
 /plugin marketplace add worldwonderer/video-recap-skills
-/plugin install video-recap-skills@video-recap-skills
+/plugin install video-recap-skills@video-recap
 ```
 
 (Or just tell Claude Code: "Install this plugin: https://github.com/worldwonderer/video-recap-skills".)
@@ -80,15 +80,15 @@ The engine is plain Python + ffmpeg + one MiMo key — harness-agnostic — so i
 
   ```bash
   codex plugin marketplace add worldwonderer/video-recap-skills
-  codex plugin add video-recap-skills@video-recap-skills
+  codex plugin add video-recap-skills@video-recap
   ```
 
   (The `owner/repo` form works once the repo is published; locally use `codex plugin marketplace add ./video-recap-skills`.)
 
-- **OpenClaw** (verified) — it imports the Claude plugin bundle directly:
+- **OpenClaw** (verified) — it imports the Claude plugin bundle directly. After cloning, point the argument at the cloned directory:
 
   ```bash
-  openclaw plugins install ./video-recap-skills   # or clone, then point at the dir
+  openclaw plugins install ./video-recap-skills
   ```
 
   All 6 skills become native, auto-triggering skills (`openclaw skills list`).
@@ -96,8 +96,8 @@ The engine is plain Python + ffmpeg + one MiMo key — harness-agnostic — so i
 - **opencode** (per its docs; not run-verified here) — opencode auto-discovers skills under `.claude/skills` / `.agents/skills` / `.opencode/skills`. After cloning, expose `skills/` under one of them:
 
   ```bash
-  ln -s ../skills .claude/skills      # macOS / Linux
-  # Windows: copy skills\* into .claude\skills\
+  mkdir -p .claude && ln -s ../skills .claude/skills   # macOS / Linux
+  # Windows: create .claude\skills first, then copy skills\* into it
   ```
 
 > Harnesses don't always run commands from the skill's directory; the "Running the scripts" note at the top of each `SKILL.md` shows how to invoke them by absolute path (the scripts self-locate via `__file__`).

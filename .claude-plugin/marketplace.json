@@ -1,7 +1,7 @@
 {
-  "name": "video-recap-skills",
+  "name": "video-recap",
   "owner": {
-    "name": "worldwonderer"
+    "name": "PiteChen"
   },
   "description": "Turn any video into a Chinese-narration recap on ffmpeg + one Xiaomi MiMo API key.",
   "plugins": [
