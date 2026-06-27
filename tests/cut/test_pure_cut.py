@@ -672,3 +672,71 @@ def test_build_edited_source_video_multi_resolution_mixed_audio_real_render(tmp_
     dur = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
                                 "-of", "csv=p=0", str(out)], capture_output=True, text=True).stdout.strip())
     assert dur > 2.0, f"expected ~3s of concatenated clips, got {dur}s"
+
+
+def test_snap_multi_source_clips_line_snaps_each_clip_against_its_own_source(tmp_path):
+    """FF-D: each clip's end snaps to ITS OWN source's next pause (a clip in source B never
+    snaps to source A's silence), then the global output timeline is recomputed in plan order."""
+    import json as _json
+    work = tmp_path / "work"
+    (work / "sources" / "a").mkdir(parents=True)
+    (work / "sources" / "b").mkdir(parents=True)
+    (work / "sources" / "a" / "silence_periods.json").write_text(_json.dumps([{"start": 4.2, "end": 5.0}]), encoding="utf-8")
+    (work / "sources" / "b" / "silence_periods.json").write_text(_json.dumps([{"start": 9.0, "end": 9.5}]), encoding="utf-8")
+    plan = {
+        "allow_overlap": False,
+        "clips": [
+            {"clip_id": 0, "source_id": "a", "source_path": "/a.mp4", "source_start": 1.0, "source_end": 4.0,
+             "output_start": 0.0, "output_end": 3.0, "duration": 3.0},
+            {"clip_id": 1, "source_id": "b", "source_path": "/b.mp4", "source_start": 2.0, "source_end": 8.5,
+             "output_start": 3.0, "output_end": 9.5, "duration": 6.5},
+        ],
+        "total_duration": 9.5,
+    }
+    sources = {"a": {"source_path": "/a.mp4", "duration": 10.0}, "b": {"source_path": "/b.mp4", "duration": 12.0}}
+
+    out = cut.snap_multi_source_clips(plan, sources, work, line_max_extend=2.0,
+                                      scene_margin=0.5, scene_threshold=0.4, do_scene_snap=False)
+
+    assert out["clips"][0]["source_end"] == 4.2          # source a's pause
+    assert out["clips"][1]["source_end"] == 9.0          # source b's pause, NOT a's 4.2
+    assert out["clips"][0]["output_start"] == 0.0 and out["clips"][0]["output_end"] == 3.2
+    assert out["clips"][1]["output_start"] == 3.2 and out["clips"][1]["duration"] == 7.0
+    assert out["total_duration"] == 10.2
+
+
+def test_snap_multi_source_clips_routes_shot_detection_to_each_clips_source(monkeypatch, tmp_path):
+    """FF-D: shot-change detection runs against each clip's OWN source video, not one ambient file."""
+    seen = []
+    monkeypatch.setattr(cut, "_detect_shot_changes", lambda video, *a, **k: (seen.append(str(video)), [])[1])
+    plan = {
+        "allow_overlap": False,
+        "clips": [
+            {"clip_id": 0, "source_id": "a", "source_path": "/a.mp4", "source_start": 0.0, "source_end": 3.0,
+             "output_start": 0.0, "output_end": 3.0, "duration": 3.0},
+            {"clip_id": 1, "source_id": "b", "source_path": "/b.mp4", "source_start": 0.0, "source_end": 3.0,
+             "output_start": 3.0, "output_end": 6.0, "duration": 3.0},
+        ],
+        "total_duration": 6.0,
+    }
+    sources = {"a": {"source_path": "/a.mp4", "duration": 10.0}, "b": {"source_path": "/b.mp4", "duration": 10.0}}
+
+    cut.snap_multi_source_clips(plan, sources, tmp_path, line_max_extend=2.0,
+                                scene_margin=0.5, scene_threshold=0.4, do_line_snap=False)
+
+    assert "/a.mp4" in seen and "/b.mp4" in seen
+
+
+def test_snap_multi_source_clips_noops_without_silence_or_flags(tmp_path):
+    """No per-source silence data and scene-snap off -> boundaries unchanged (advisory degrade)."""
+    plan = {
+        "allow_overlap": False,
+        "clips": [{"clip_id": 0, "source_id": "a", "source_path": "/a.mp4", "source_start": 1.0,
+                   "source_end": 4.0, "output_start": 0.0, "output_end": 3.0, "duration": 3.0}],
+        "total_duration": 3.0,
+    }
+    out = cut.snap_multi_source_clips(plan, {"a": {"source_path": "/a.mp4", "duration": 10.0}}, tmp_path,
+                                      line_max_extend=2.0, scene_margin=0.5, scene_threshold=0.4,
+                                      do_scene_snap=False)
+    assert out["clips"][0]["source_end"] == 4.0
+    assert out["total_duration"] == 3.0

@@ -4,6 +4,14 @@ The library is intentionally grep-friendly: JSON/MD/JSONL files on disk, no DB,
 no embeddings, no raw-media copies. Current metadata lives in each material
 folder; the root ``materials_index.jsonl`` is an append-only journal for grep and
 history.
+
+Secret handling is BEST-EFFORT defense-in-depth, NOT a guarantee. ``_redact_text``
+masks common credential value shapes (``tp-``/``sk-``/``gh*_``/``AKIA``/JWT and
+``KEY=VALUE`` assignments) and ``_redact_json`` drops the value of exact
+credential-named keys, but a secret in an unrecognized format can still slip
+through. Keep secrets (API keys, tokens) out of the analysis artifacts in the
+first place — the key is read from the environment/``.env`` and never needs to be
+written into scenes/ASR/VLM/summary JSON.
 """
 from __future__ import annotations
 
@@ -259,8 +267,15 @@ def save_material(
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     now = now or utc_now_iso()
 
+    sources = allowed_artifact_paths(work_dir)
+    fresh_names = {src.name for src in sources}
+    # Reconcile: drop allowed artifacts left from a previous (larger) save so the on-disk
+    # artifacts/ dir always matches material.json — a stale orphan must not surface in greps.
+    for stale in artifacts_dir.iterdir() if artifacts_dir.exists() else []:
+        if stale.is_file() and stale.name in ALLOWED_ARTIFACTS and stale.name not in fresh_names:
+            stale.unlink()
     copied = []
-    for src in allowed_artifact_paths(work_dir):
+    for src in sources:
         dst = artifacts_dir / src.name
         copy_artifact_redacted(src, dst)
         copied.append({"name": src.name, "path": f"artifacts/{src.name}", "sha256": file_fingerprint(dst)})
@@ -383,7 +398,13 @@ def restore_material(
 
         pruned = []
         if prune_stale_allowed:
+            staged_set = set(staged)
             for name in sorted(ALLOWED_ARTIFACTS):
+                # Never prune an artifact we are about to restore: the restore loop below
+                # honors `overwrite`, so pruning a staged name would (with overwrite=False)
+                # delete it and then skip the copy, losing the file.
+                if name in staged_set:
+                    continue
                 out = dest / name
                 if out.exists():
                     out.unlink()

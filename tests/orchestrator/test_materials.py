@@ -198,3 +198,47 @@ def test_redact_text_leaves_plain_words_but_strips_token_shapes():
         "the secret garden hides a golden token"
     assert "tp-" not in materials._redact_text("key is tp-abcdef12345678 ok")
     assert "ghp_" not in materials._redact_text("token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345")
+
+
+def test_restore_overwrite_false_does_not_prune_then_lose_staged_file(tmp_path):
+    """FF-B: prune_stale_allowed + overwrite=False must NOT prune a staged file and then skip
+    restoring it. The staged file is preserved; only true (non-staged) stale orphans are pruned."""
+    lib = tmp_path / "library"
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "scenes.json").write_text(json.dumps([{"start": 0, "end": 1}]), encoding="utf-8")
+    meta = materials.save_material(lib, seed, tmp_path / "ep.mp4", "g" * 64, "settings")
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "scenes.json").write_text(json.dumps([{"keep": "existing"}]), encoding="utf-8")  # staged name, present
+    (dest / "vlm_analysis.json").write_text(json.dumps({"stale": 1}), encoding="utf-8")        # non-staged orphan
+
+    res = materials.restore_material(lib, dest, source_fingerprint="g" * 64, settings_fp="settings",
+                                     material_id=meta["material_id"], overwrite=False)
+
+    assert (dest / "scenes.json").exists(), "staged file must survive (not pruned-then-skipped)"
+    assert json.loads((dest / "scenes.json").read_text(encoding="utf-8")) == [{"keep": "existing"}]
+    assert not (dest / "vlm_analysis.json").exists(), "true stale orphan is pruned"
+    assert "vlm_analysis.json" in res["pruned_artifacts"]
+    assert "scenes.json" not in res["pruned_artifacts"]
+
+
+def test_save_material_reconciles_orphan_artifacts_on_resave(tmp_path):
+    """FF-C: re-saving with fewer artifacts removes the orphan from artifacts/ so the on-disk
+    set matches material.json (no stale blob lingering for greps)."""
+    lib = tmp_path / "library"
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "scenes.json").write_text("[]", encoding="utf-8")
+    (work / "asr_result.json").write_text(json.dumps([{"text": "hi"}]), encoding="utf-8")
+    meta = materials.save_material(lib, work, tmp_path / "ep.mp4", "h" * 64, "s")
+    adir = lib / "materials" / meta["material_id"] / "artifacts"
+    assert (adir / "asr_result.json").exists()
+
+    (work / "asr_result.json").unlink()  # a smaller / partial re-analysis
+    meta2 = materials.save_material(lib, work, tmp_path / "ep.mp4", "h" * 64, "s")
+
+    assert not (adir / "asr_result.json").exists(), "orphan artifact removed on re-save"
+    assert (adir / "scenes.json").exists()
+    assert {a["name"] for a in meta2["artifacts"]} == {"scenes.json"}

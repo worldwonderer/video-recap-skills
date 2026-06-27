@@ -569,6 +569,64 @@ def snap_clips_off_shot_changes(plan, video, video_duration, margin, threshold, 
     return result
 
 
+def _load_silence_for_source(work_dir, source_id, source_work_dir=None):
+    """Read a source's silence_periods.json from the multi-source work layout (best-effort)."""
+    candidates = []
+    if source_work_dir:
+        candidates.append(Path(work_dir) / source_work_dir / "silence_periods.json")
+    candidates.append(Path(work_dir) / "sources" / str(source_id) / "silence_periods.json")
+    for path in candidates:
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return []
+            return data if isinstance(data, list) else []
+    return []
+
+
+def snap_multi_source_clips(plan, sources, work_dir, *, line_max_extend, scene_margin,
+                            scene_threshold, do_line_snap=True, do_scene_snap=True):
+    """Per-source line/shot snapping for a multi-source validated plan.
+
+    Each clip is snapped using ITS OWN source's silence windows / shot changes and duration
+    (a clip in source B never constrains a clip in source A), then the global OUTPUT timeline
+    is recomputed once in plan order. Advisory: missing silence data or ffmpeg trouble leaves a
+    boundary unchanged. Mirrors the single-source snap_clip_ends_to_lines + snap_clips_off_shot_changes.
+    """
+    clips = plan.get("clips") or []
+    if not clips or not (do_line_snap or do_scene_snap):
+        return plan
+    allow_overlap = bool(plan.get("allow_overlap", False))
+    groups = {}
+    for clip in clips:
+        groups.setdefault(str(clip.get("source_id")), []).append(clip)
+    for sid, group in groups.items():
+        source = sources.get(sid, {}) if isinstance(sources, dict) else {}
+        duration = float(source.get("duration") or 0.0) or max(
+            (float(c["source_end"]) for c in group), default=0.0)
+        mini = {"clips": [dict(c) for c in group], "allow_overlap": allow_overlap}
+        if do_line_snap:
+            silence = _load_silence_for_source(work_dir, sid, source.get("source_work_dir"))
+            mini = snap_clip_ends_to_lines(mini, silence, duration, line_max_extend)
+        if do_scene_snap and source.get("source_path"):
+            mini = snap_clips_off_shot_changes(mini, source["source_path"], duration,
+                                               scene_margin, scene_threshold)
+        for original, snapped in zip(group, mini["clips"]):
+            original["source_start"] = snapped["source_start"]
+            original["source_end"] = snapped["source_end"]
+    # Recompute the global output timeline cursor-based, in plan order (not group order).
+    cursor = 0.0
+    for clip in clips:
+        duration = round(float(clip["source_end"]) - float(clip["source_start"]), 3)
+        clip["duration"] = duration
+        clip["output_start"] = round(cursor, 3)
+        clip["output_end"] = round(cursor + duration, 3)
+        cursor += duration
+    plan["total_duration"] = round(sum(c["duration"] for c in clips), 3)
+    return plan
+
+
 def source_time_to_output_time(source_time, clips):
     """Map a source timestamp into the post-concat output timeline."""
     ts = float(source_time)
@@ -937,6 +995,22 @@ def main():
             video_duration,
             CONFIG.get("scene_cut_snap_margin", 0.5),
             CONFIG.get("scene_cut_detect_threshold", 0.4),
+        )
+
+    # Multi-source: snap each clip against ITS OWN source's pauses/shot-changes (single-source
+    # snaps above can't, since silence_periods.json and args.video are per-project, not per-source).
+    if sources_manifest is not None and (
+        CONFIG.get("snap_clip_line_end", True) or CONFIG.get("scene_cut_snap", True)
+    ):
+        validated_plan = snap_multi_source_clips(
+            validated_plan,
+            validated_plan.get("sources", {}),
+            work_dir,
+            line_max_extend=CONFIG.get("clip_snap_max_extend", 2.0),
+            scene_margin=CONFIG.get("scene_cut_snap_margin", 0.5),
+            scene_threshold=CONFIG.get("scene_cut_detect_threshold", 0.4),
+            do_line_snap=CONFIG.get("snap_clip_line_end", True),
+            do_scene_snap=CONFIG.get("scene_cut_snap", True),
         )
 
     if isinstance(validated_plan, dict):
