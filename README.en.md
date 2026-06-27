@@ -72,6 +72,37 @@ export MIMO_TOKEN_PLAN_CLUSTER=cn
 Pay-as-you-go `sk-*` keys default to `https://api.xiaomimimo.com/v1`. Everything else has a default; to change the model, voice, loudness, or subtitles, or set a key/URL per capability, see the
 [config playbook](skills/video-recap/references/config-playbook.md).
 
+## Use it in other agent harnesses (opencode / Codex / OpenClaw)
+
+The engine is plain Python + ffmpeg + one MiMo key — harness-agnostic — so it also runs under other agent CLIs. Get the shared prerequisites first: **ffmpeg** on `PATH`, **`MIMO_API_KEY`** set, **Python 3.10+** (as above).
+
+- **Codex CLI** (verified) — it reads this repo's `.claude-plugin/marketplace.json` directly:
+
+  ```bash
+  codex plugin marketplace add worldwonderer/video-recap-skills
+  codex plugin add video-recap-skills@video-recap-skills
+  ```
+
+  (The `owner/repo` form works once the repo is published; locally use `codex plugin marketplace add ./video-recap-skills`.)
+
+- **OpenClaw** (verified) — it imports the Claude plugin bundle directly:
+
+  ```bash
+  openclaw plugins install ./video-recap-skills   # or clone, then point at the dir
+  ```
+
+  All 6 skills become native, auto-triggering skills (`openclaw skills list`).
+
+- **opencode** (per its docs; not run-verified here) — opencode auto-discovers skills under `.claude/skills` / `.agents/skills` / `.opencode/skills`. After cloning, expose `skills/` under one of them:
+
+  ```bash
+  ln -s ../skills .claude/skills      # macOS / Linux
+  # Windows: copy skills\* into .claude\skills\
+  ```
+
+> Harnesses don't always run commands from the skill's directory; the "Running the scripts" note at the top of each `SKILL.md` shows how to invoke them by absolute path (the scripts self-locate via `__file__`).
+> **Don't double-register**: registering the same skills through more than one discovery path (the repo's `skills/`, a copy under `~/.agents/skills`, a harness install cache) can cause name clashes or double auto-triggering — enable just one.
+
 ## Usage
 
 Point it at a video and give it whatever story context you have:
