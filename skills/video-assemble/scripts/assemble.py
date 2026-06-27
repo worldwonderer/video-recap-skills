@@ -162,19 +162,15 @@ def _build_video_clips(input_video, work_dir, duration_s):
         plan = _load_cut_timeline_plan(work_dir)
         if plan is not None:
             entries = plan.get("clips", plan) if isinstance(plan, dict) else plan
+            # A plan is "multi-source" once any clip carries its own source_path; such
+            # clips must never be silently dropped — a missing one is degraded in place.
+            multi_source = any(
+                isinstance(c, dict) and str(c.get("source_path") or "").strip() for c in entries
+            )
             clips, cursor = [], 0.0
             for c in entries:
                 per_clip_source = str(c.get("source_path") or "").strip()
                 source_path = per_clip_source or explicit_source_video
-                if not source_path or not os.path.exists(source_path):
-                    if per_clip_source:
-                        log(f"  时间线: source_path 不存在，回退为剪后成片单片段: {source_path}")
-                        return [{"source_path": str(input_video), "source_start": 0.0,
-                                 "source_end": float(duration_s), "timeline_start": 0.0,
-                                 "timeline_end": float(duration_s),
-                                 "provenance_degraded": True,
-                                 "provenance_reason": f"missing_source_path:{source_path}"}]
-                    continue
                 ss = float(c.get("source_start", c.get("start")))
                 se = float(c.get("source_end", c.get("end")))
                 timeline_start = c.get("output_start")
@@ -190,7 +186,24 @@ def _build_video_clips(input_video, work_dir, duration_s):
                     timeline_start = float(timeline_start)
                     timeline_end = float(timeline_end)
                     cursor = max(cursor, timeline_end)
-                clips.append({"source_path": source_path, "source_start": ss,
+                if not source_path or not os.path.exists(source_path):
+                    if per_clip_source or multi_source:
+                        # Degrade ONLY this clip — point it at the rendered cut for its own
+                        # output window — and keep real provenance for every present source,
+                        # instead of collapsing the whole multi-source timeline.
+                        seg = max(0.0, float(timeline_end) - float(timeline_start))
+                        log(f"  时间线: source_path 不存在，该片段降级为剪后成片片段: {source_path or '(unset)'}")
+                        clips.append({"source_id": c.get("source_id"),
+                                      "source_path": str(input_video),
+                                      "source_start": float(timeline_start),
+                                      "source_end": float(timeline_start) + seg,
+                                      "timeline_start": float(timeline_start),
+                                      "timeline_end": float(timeline_end),
+                                      "provenance_degraded": True,
+                                      "provenance_reason": f"missing_source_path:{source_path or 'unset'}"})
+                    continue
+                clips.append({"source_id": c.get("source_id"),
+                              "source_path": source_path, "source_start": ss,
                               "source_end": se, "timeline_start": timeline_start,
                               "timeline_end": timeline_end})
             if clips:

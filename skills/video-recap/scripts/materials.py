@@ -28,9 +28,26 @@ ALLOWED_ARTIFACTS = {
     "reference_match_report.json",
     "recap_run_manifest.json",
 }
-SECRET_PATTERNS = ("tp-", "MIMO_API_KEY", "api_key", "mimo_api_key")
-SECRET_TOKEN_RE = re.compile(r"tp-[A-Za-z0-9_-]{3,}")
-SECRET_WORD_RE = re.compile(r"(?i)MIMO_API_KEY|mimo_api_key|api_key|secret|token")
+# Redaction targets credential VALUE shapes, not English/Chinese dictionary words — the
+# library must stay a faithful copy of the analysis. Bare words like "secret"/"token"
+# legitimately appear in transcripts/summaries and must NOT be touched.
+SECRET_VALUE_RES = (
+    re.compile(r"\btp-[A-Za-z0-9_-]{8,}\b"),     # MiMo Token Plan keys
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),    # OpenAI-style keys
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),  # GitHub tokens
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),         # AWS access key id
+    re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b"),  # JWT
+)
+# `KEY=VALUE` / `"key": "value"` assignments whose key denotes a credential -> mask the VALUE.
+SECRET_ASSIGN_RE = re.compile(
+    r"(?i)(\b(?:mimo(?:_\w+)?_api_key|api_key|secret_key|access_token|refresh_token|"
+    r"authorization|password|passwd|bearer)\b\s*[:=]\s*)(\"?)([^\s\"',;]+)(\"?)"
+)
+# Exact JSON/dict key names whose VALUE is a credential and must be dropped (key name kept).
+SECRET_KEY_NAMES = frozenset({
+    "api_key", "mimo_api_key", "mimo_asr_api_key", "mimo_tts_api_key", "mimo_video_api_key",
+    "secret_key", "access_token", "refresh_token", "authorization", "password", "passwd",
+})
 
 
 def utc_now_iso() -> str:
@@ -118,8 +135,11 @@ def _safe_text(value, limit: int = 600) -> str:
 
 
 def _redact_text(text: str) -> str:
-    text = SECRET_TOKEN_RE.sub("[redacted-token]", str(text or ""))
-    return SECRET_WORD_RE.sub("[redacted-key]", text)
+    """Redact credential value shapes only; leave ordinary words (secret/token/…) intact."""
+    text = str(text or "")
+    for rx in SECRET_VALUE_RES:
+        text = rx.sub("[redacted-token]", text)
+    return SECRET_ASSIGN_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted-key]{m.group(4)}", text)
 
 
 def _redact_json(value):
@@ -127,8 +147,10 @@ def _redact_json(value):
         out = {}
         for key, item in value.items():
             key_text = str(key)
-            if SECRET_WORD_RE.search(key_text):
-                out["redacted_key"] = "[redacted]"
+            # Drop only the value of an exact credential-named key; keep the key name and
+            # never coalesce distinct keys (so benign fields like token_economy survive).
+            if key_text.strip().lower() in SECRET_KEY_NAMES:
+                out[key_text] = "[redacted]"
             else:
                 out[key_text] = _redact_json(item)
         return out

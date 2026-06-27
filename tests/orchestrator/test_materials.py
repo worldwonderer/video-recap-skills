@@ -132,26 +132,69 @@ def test_material_files_do_not_include_api_key_string(tmp_path):
     assert "MIMO_API_KEY" not in all_text
 
 
-def test_allowed_artifacts_are_redacted_before_copy_and_restore(tmp_path):
+def test_allowed_artifacts_redact_secret_values_but_keep_legitimate_words(tmp_path):
+    """Redaction must remove credential VALUES while leaving ordinary analysis words
+    (secret/token/api_key as plain text, benign field names) intact — the library is a
+    faithful, reusable copy of the analysis, not a word-censored one."""
     lib = tmp_path / "library"
     work = tmp_path / "work"
     work.mkdir()
     (work / "understanding_index.json").write_text(
-        json.dumps({"summary": "token tp-secret-value", "api_key": "tp-real-looking"}),
+        json.dumps({
+            "summary": "主角发现了一个秘密 secret，一枚 token 在黑市流通",   # legit words -> must survive
+            "api_key": "tp-abcdef12345678",                                  # credential key -> value dropped
+            "token_economy": "影片解释 token 的发行机制",                     # benign name containing 'token' -> kept
+            "notes": "调试时漏了 key: sk-ABCDEFGHIJKLMNOP1234 和 tp-zzzzzzzz9999",  # value shapes -> redacted
+        }, ensure_ascii=False),
         encoding="utf-8",
     )
-    (work / "agent_narration_brief.md").write_text("MIMO_API_KEY=tp-another-secret", encoding="utf-8")
+    (work / "agent_narration_brief.md").write_text(
+        "MIMO_API_KEY=tp-another-secret-value\n剧情梗概：一个关于 secret 和 token 的故事", encoding="utf-8")
     meta = materials.save_material(lib, work, tmp_path / "ep.mp4", "d" * 64, "settings")
 
     persisted = "\n".join(p.read_text(encoding="utf-8") for p in (lib / "materials").rglob("*") if p.is_file())
-    assert "tp-secret-value" not in persisted
-    assert "tp-real-looking" not in persisted
-    assert "MIMO_API_KEY" not in persisted
-    assert "api_key" not in persisted.lower()
+    # secret VALUES are gone
+    for secret in ("tp-abcdef12345678", "sk-ABCDEFGHIJKLMNOP1234", "tp-zzzzzzzz9999", "tp-another-secret-value"):
+        assert secret not in persisted, secret
+    # legitimate words and benign field names PRESERVED (the over-redaction fix)
+    assert "主角发现了一个秘密" in persisted
+    assert "secret" in persisted and "token" in persisted
+    assert "token_economy" in persisted
+
+    idx = json.loads((lib / "materials" / meta["material_id"] / "artifacts" / "understanding_index.json")
+                     .read_text(encoding="utf-8"))
+    assert idx["api_key"] == "[redacted]"                 # value dropped, key name kept, not coalesced
+    assert "secret" in idx["summary"] and "token" in idx["summary"]
+    assert idx["token_economy"] == "影片解释 token 的发行机制"
 
     dest = tmp_path / "dest"
     materials.restore_material(lib, dest, source_fingerprint="d" * 64, settings_fp="settings",
                                material_id=meta["material_id"])
     restored = (dest / "understanding_index.json").read_text(encoding="utf-8")
-    assert "tp-secret-value" not in restored
-    assert "redacted" in restored
+    assert "tp-abcdef12345678" not in restored
+    assert "secret" in restored and "token" in restored
+
+
+def test_redact_json_keeps_distinct_secret_named_keys_without_coalescing(tmp_path):
+    """A dict with multiple credential-named keys must keep every key (each value dropped),
+    never collapse them into one 'redacted_key', and must not touch benign look-alike names."""
+    out = materials._redact_json({
+        "api_key": "tp-realvalue123456",
+        "access_token": "sk-ABCDEFGHIJKLMNOP1234",
+        "tokenized_scenes": ["镜头1", "镜头2"],   # benign name with 'token' substring -> untouched
+        "secrets_revealed": "结局揭晓的秘密",       # benign name with 'secret' substring -> untouched
+        "title": "ok",
+    })
+    assert out["api_key"] == "[redacted]"
+    assert out["access_token"] == "[redacted]"
+    assert "redacted_key" not in out                 # no coalescing
+    assert out["tokenized_scenes"] == ["镜头1", "镜头2"]
+    assert out["secrets_revealed"] == "结局揭晓的秘密"
+    assert out["title"] == "ok"
+
+
+def test_redact_text_leaves_plain_words_but_strips_token_shapes():
+    assert materials._redact_text("the secret garden hides a golden token") == \
+        "the secret garden hides a golden token"
+    assert "tp-" not in materials._redact_text("key is tp-abcdef12345678 ok")
+    assert "ghp_" not in materials._redact_text("token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345")

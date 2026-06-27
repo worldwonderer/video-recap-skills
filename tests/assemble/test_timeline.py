@@ -230,20 +230,24 @@ def test_build_video_clips_prefers_per_clip_source_path_without_explicit_source_
     assert clips[1]["timeline_start"] == 1.0
 
 
-def test_build_video_clips_missing_multi_source_path_falls_back_to_rendered_clip(monkeypatch, tmp_path):
+def test_build_video_clips_degrades_only_missing_clip_keeps_present_provenance(monkeypatch, tmp_path):
+    """One stale source must degrade ONLY its own clip; clips whose source is present keep
+    their real source_id/source_path provenance (no whole-timeline collapse)."""
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-assemble' / 'scripts'))
     import assemble
 
     rendered = tmp_path / "edited_source.mp4"
     rendered.write_bytes(b"e")
+    present = tmp_path / "present.mp4"
+    present.write_bytes(b"p")
     work = tmp_path / "work"
     work.mkdir()
     (work / "clip_plan_validated.json").write_text(json.dumps({
         "clips": [
-            {"source_path": str(tmp_path / "missing.mp4"), "source_start": 1.0, "source_end": 2.0,
-             "output_start": 0.0, "output_end": 1.0},
-            {"source_path": str(rendered), "source_start": 3.0, "source_end": 5.0,
-             "output_start": 1.0, "output_end": 3.0},
+            {"source_id": "src_miss", "source_path": str(tmp_path / "missing.mp4"),
+             "source_start": 1.0, "source_end": 2.0, "output_start": 0.0, "output_end": 1.0},
+            {"source_id": "src_ok", "source_path": str(present),
+             "source_start": 3.0, "source_end": 5.0, "output_start": 1.0, "output_end": 3.0},
         ]
     }), encoding="utf-8")
     monkeypatch.setitem(assemble.CONFIG, "source_video_explicit", False)
@@ -251,10 +255,16 @@ def test_build_video_clips_missing_multi_source_path_falls_back_to_rendered_clip
 
     clips = assemble._build_video_clips(rendered, work, 3.0)
 
-    assert clips == [{"source_path": str(rendered), "source_start": 0.0,
-                      "source_end": 3.0, "timeline_start": 0.0, "timeline_end": 3.0,
-                      "provenance_degraded": True,
-                      "provenance_reason": f"missing_source_path:{tmp_path / 'missing.mp4'}"}]
+    assert len(clips) == 2
+    ok = clips[1]
+    assert ok["source_path"] == str(present) and ok["source_id"] == "src_ok"
+    assert ok["source_start"] == 3.0 and ok["source_end"] == 5.0
+    assert not ok.get("provenance_degraded")
+    bad = clips[0]
+    assert bad["provenance_degraded"] is True and bad["source_id"] == "src_miss"
+    assert bad["source_path"] == str(rendered)
+    assert bad["timeline_start"] == 0.0 and bad["timeline_end"] == 1.0
+    assert bad["provenance_reason"].startswith("missing_source_path:")
 
 
 def test_emit_timeline_marks_degraded_multi_source_fallback(monkeypatch, tmp_path):

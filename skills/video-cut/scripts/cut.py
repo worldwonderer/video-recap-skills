@@ -716,6 +716,45 @@ def _has_audio_stream(video_path):
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+def _probe_video_geometry(video_path):
+    """Best-effort (width, height, fps) for a source; falls back to a safe even-sized canvas.
+
+    Used to normalize heterogeneous multi-source segments to one geometry before concat
+    (ffmpeg's concat filter rejects mismatched width/height/SAR/pixel-format/fps).
+    """
+    width = height = 0
+    fps = 0.0
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,r_frame_rate",
+        "-of", "csv=p=0:s=,", str(video_path),
+    ]
+    try:
+        result = run_cmd(cmd)
+    except Exception:  # noqa: BLE001 - probing is best-effort; fall back to defaults
+        result = None
+    if result is not None and getattr(result, "returncode", 1) == 0 and (result.stdout or "").strip():
+        parts = result.stdout.strip().splitlines()[0].split(",")
+        try:
+            width, height = int(float(parts[0])), int(float(parts[1]))
+        except (IndexError, ValueError):
+            width = height = 0
+        if len(parts) >= 3 and "/" in parts[2]:
+            num, _, den = parts[2].partition("/")
+            try:
+                num_f, den_f = float(num), float(den)
+                fps = num_f / den_f if den_f > 0 else 0.0
+            except ValueError:
+                fps = 0.0
+    if width <= 0 or height <= 0:
+        width, height = 1280, 720
+    width -= width % 2          # libx264/yuv420p require even dimensions
+    height -= height % 2
+    if not 0 < fps <= 120:
+        fps = 30.0
+    return width, height, round(fps, 3)
+
+
 def _write_filter_script(filter_complex, work_dir):
     script_path = Path(work_dir) / "edit_filter_complex.txt"
     script_path.write_text(filter_complex, encoding="utf-8")
@@ -737,34 +776,68 @@ def build_edited_source_video(input_video, validated_plan, work_dir, output_path
             source_paths.append(source_path)
     source_index = {path: idx for idx, path in enumerate(source_paths)}
     audio_by_input = {path: _has_audio_stream(path) for path in source_paths}
-    has_audio = all(audio_by_input.values())
 
     parts = []
     concat_inputs = []
-    for clip in clips:
-        idx = clip["clip_id"]
-        input_idx = source_index[str(clip.get("source_path") or input_video)]
-        start = clip["source_start"]
-        end = clip["source_end"]
-        parts.append(
-            f"[{input_idx}:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS[v{idx}]"
-        )
-        concat_inputs.append(f"[v{idx}]")
-        if has_audio:
-            parts.append(
-                f"[{input_idx}:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[a{idx}]"
-            )
-            concat_inputs.append(f"[a{idx}]")
-
     extra_inputs = []
-    if has_audio:
+    if len(source_paths) > 1:
+        # Distinct sources almost always differ in resolution/SAR/fps/pixel-format (and
+        # some may lack audio), which the bare concat filter rejects. Normalize every video
+        # segment to one canvas and give every clip an audio segment (real or synthesized
+        # silence) so concat always succeeds with a continuous track and no source's audio
+        # is dropped just because a sibling source is silent.
+        canvas_w, canvas_h, canvas_fps = _probe_video_geometry(source_paths[0])
+        vnorm = (f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease,"
+                 f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+                 f"fps={canvas_fps},format=yuv420p")
+        for clip in clips:
+            idx = clip["clip_id"]
+            clip_source = str(clip.get("source_path") or input_video)
+            input_idx = source_index[clip_source]
+            start = clip["source_start"]
+            end = clip["source_end"]
+            dur = max(0.0, float(end) - float(start))
+            parts.append(
+                f"[{input_idx}:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS,{vnorm}[v{idx}]"
+            )
+            if audio_by_input.get(clip_source):
+                parts.append(
+                    f"[{input_idx}:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS,"
+                    f"aresample=48000,aformat=sample_rates=48000:channel_layouts=stereo[a{idx}]"
+                )
+            else:
+                parts.append(
+                    f"anullsrc=r=48000:cl=stereo,atrim=duration={dur:.3f},asetpts=PTS-STARTPTS,"
+                    f"aformat=sample_rates=48000:channel_layouts=stereo[a{idx}]"
+                )
+            concat_inputs.append(f"[v{idx}][a{idx}]")
         parts.append("".join(concat_inputs) + f"concat=n={len(clips)}:v=1:a=1[v][a]")
         maps = ["-map", "[v]", "-map", "[a]"]
     else:
-        total = validated_plan.get("total_duration") or sum(c["duration"] for c in clips)
-        parts.append("".join(concat_inputs) + f"concat=n={len(clips)}:v=1:a=0[v]")
-        maps = ["-map", "[v]", "-map", f"{len(source_paths)}:a", "-shortest"]
-        extra_inputs = ["-f", "lavfi", "-t", f"{float(total):.3f}", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+        has_audio = all(audio_by_input.values())
+        for clip in clips:
+            idx = clip["clip_id"]
+            input_idx = source_index[str(clip.get("source_path") or input_video)]
+            start = clip["source_start"]
+            end = clip["source_end"]
+            parts.append(
+                f"[{input_idx}:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS[v{idx}]"
+            )
+            concat_inputs.append(f"[v{idx}]")
+            if has_audio:
+                parts.append(
+                    f"[{input_idx}:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[a{idx}]"
+                )
+                concat_inputs.append(f"[a{idx}]")
+
+        if has_audio:
+            parts.append("".join(concat_inputs) + f"concat=n={len(clips)}:v=1:a=1[v][a]")
+            maps = ["-map", "[v]", "-map", "[a]"]
+        else:
+            total = validated_plan.get("total_duration") or sum(c["duration"] for c in clips)
+            parts.append("".join(concat_inputs) + f"concat=n={len(clips)}:v=1:a=0[v]")
+            maps = ["-map", "[v]", "-map", f"{len(source_paths)}:a", "-shortest"]
+            extra_inputs = ["-f", "lavfi", "-t", f"{float(total):.3f}", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
 
     filter_complex = ";".join(parts)
     if len(filter_complex.encode("utf-8")) > 7000:
