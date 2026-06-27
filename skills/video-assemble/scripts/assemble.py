@@ -9,8 +9,13 @@ from lib import CONFIG
 from lib import log, run_cmd, get_video_duration
 from timeline import build_timeline, save_timeline
 
-SUBTITLE_RENDER_VERSION = 4  # bumped: BYO user_subtitles now fill gaps even with mask off
+SUBTITLE_RENDER_VERSION = 5  # bumped: subtitle style now scales to the probed canvas (fixes 竖屏 distortion)
 ASSEMBLY_MANIFEST = "assembly_manifest.json"
+# The default subtitle metrics (font/margins/PlayRes) were tuned in this reference space.
+# For any other canvas we scale them to it so glyphs are never stretched (PlayRes aspect ==
+# frame aspect) and stay proportional; a 16:9 source reproduces the legacy look exactly.
+SUBTITLE_STYLE_REF_W = 1280
+SUBTITLE_STYLE_REF_H = 720
 _SUBTITLE_TERMINAL_PUNCTUATION = "。！？!?…."
 _SUBTITLE_CLOSING_QUOTES = "」』”’）)]】》〉\"'"
 
@@ -259,9 +264,17 @@ def _seconds_to_ass_time(seconds):
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-def _subtitle_style_config():
-    """Return the internal default burn-in subtitle style."""
-    return {
+def _subtitle_style_config(canvas=None):
+    """Return the internal default burn-in subtitle style.
+
+    When ``canvas`` ({"width","height"}) is given AND the user has not pinned PlayRes via
+    SUBTITLE_PLAY_RES_X/Y, the style is scaled to that canvas: PlayRes is set to the frame
+    dimensions (so libass never stretches glyphs — the old hardcoded 1280x720 squished
+    portrait text), horizontal metrics scale with width, vertical metrics with height, and
+    the font is additionally capped so a full ``max_chars`` line fits the usable width. A
+    16:9 source (or the 1280x720 default) reproduces the legacy values exactly.
+    """
+    style = {
         "font_name": CONFIG.get("subtitle_font_name", "Arial"),
         "font_size": CONFIG.get("subtitle_font_size", 42),
         "primary_color": CONFIG.get("subtitle_primary_color", "&H00FFFFFF"),
@@ -276,6 +289,35 @@ def _subtitle_style_config():
         "play_res_x": CONFIG.get("subtitle_play_res_x", 1280),
         "play_res_y": CONFIG.get("subtitle_play_res_y", 720),
     }
+    pinned = "SUBTITLE_PLAY_RES_X" in os.environ or "SUBTITLE_PLAY_RES_Y" in os.environ
+    cw = int((canvas or {}).get("width", 0) or 0)
+    ch = int((canvas or {}).get("height", 0) or 0)
+    if canvas is None or pinned or cw <= 0 or ch <= 0:
+        return style  # legacy / manually-pinned: unchanged
+
+    base_font = float(style["font_size"])
+    kx = cw / float(SUBTITLE_STYLE_REF_W)  # horizontal metrics ∝ width
+    ky = ch / float(SUBTITLE_STYLE_REF_H)  # vertical metrics ∝ height
+    margin_l = round(float(style["margin_l"]) * kx)
+    margin_r = round(float(style["margin_r"]) * kx)
+    margin_v = round(float(style["margin_v"]) * ky)
+    # height-proportional size, then cap so a full line of CJK glyphs (≈1em wide) fits the
+    # usable width — this is what keeps portrait text on-screen instead of overflowing.
+    usable_w = max(1.0, cw - margin_l - margin_r)
+    width_cap = usable_w / max(1, int(style["max_chars"]))
+    font_size = max(1, int(min(base_font * ky, width_cap)))  # floor so a full line never overflows
+    font_scale = font_size / base_font if base_font else 1.0
+    style.update({
+        "font_size": font_size,
+        "outline": max(0, round(float(style["outline"]) * font_scale)),
+        "shadow": max(0, round(float(style["shadow"]) * font_scale)),
+        "margin_l": margin_l,
+        "margin_r": margin_r,
+        "margin_v": margin_v,
+        "play_res_x": cw,
+        "play_res_y": ch,
+    })
+    return style
 
 
 def _has_user_subtitles(work_dir):
@@ -989,10 +1031,11 @@ def _escape_ass_text(text):
     )
 
 
-def _generate_ass(narration, work_dir, video_duration=None):
+def _generate_ass(narration, work_dir, video_duration=None, canvas=None):
     """Generate an ASS subtitle file for readable hard-sub rendering. video_duration given ⇒ also
-    burn the original dialogue (from ASR) during the original-audio gaps."""
-    style = _subtitle_style_config()
+    burn the original dialogue (from ASR) during the original-audio gaps. canvas ({"width","height"})
+    scales the style to the real frame so portrait/竖屏 subtitles are not stretched."""
+    style = _subtitle_style_config(canvas)
     ass_lines = [
         "[Script Info]",
         "ScriptType: v4.00+",
@@ -1106,12 +1149,13 @@ def _apply_narration_speed(tts_segments, work_dir):
     log(f"解说整体提速: atempo={factor:.2f} ({done} 段)")
 
 
-def _source_subtitle_mask_filter():
+def _source_subtitle_mask_filter(canvas=None):
     """ffmpeg drawbox that masks burned-in source subtitles along the bottom, or None.
 
     Many source videos (e.g. 庆余年) ship hardcoded subtitles; without this the recap
     shows the original subs AND our narration subs stacked. Covers the bottom band with
-    an opaque box; our subtitles render on top of it.
+    an opaque box; our subtitles render on top of it. canvas ({"width","height"}) makes the
+    single-line band sizing match the canvas-scaled subtitle style.
     """
     if not (CONFIG.get("burn_subtitles", False) and CONFIG.get("mask_source_subtitles", False)):
         return None
@@ -1122,10 +1166,11 @@ def _source_subtitle_mask_filter():
     # not compress the picture (a 2-line band ate ~23% of the height). Take the larger of the raw
     # ratio and this single-line need.
     if CONFIG.get("burn_subtitles", False):
-        style = _subtitle_style_config()
+        style = _subtitle_style_config(canvas)
         play_res_y = max(1.0, float(style["play_res_y"]))
         line_h = float(style["font_size"]) * 1.25
-        sub_band = (float(style["margin_v"]) + line_h + 10.0) / play_res_y
+        pad = 10.0 * play_res_y / SUBTITLE_STYLE_REF_H  # keep the band pad proportional to the canvas
+        sub_band = (float(style["margin_v"]) + line_h + pad) / play_res_y
         ratio = min(0.5, max(ratio, sub_band))
     if ratio <= 0:
         return None
@@ -1300,6 +1345,7 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
         raise RuntimeError("tts_meta.json 没有有效解说音频，已中止以避免生成无解说视频")
 
     video_duration = get_video_duration(input_video)
+    canvas = _probe_canvas(input_video)  # drives subtitle PlayRes/scale so 竖屏 text isn't stretched
 
     # 解说整体提速（可选）后，将所有 TTS 片段按时间位置合成到与视频等长的音轨上
     _apply_narration_speed(tts_segments, work_dir)
@@ -1311,7 +1357,7 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
     log(f"字幕文件: {srt_path}")
     ass_path = None
     if CONFIG.get("burn_subtitles", False):
-        ass_path = _generate_ass(tts_segments, work_dir, video_duration)
+        ass_path = _generate_ass(tts_segments, work_dir, video_duration, canvas)
         log(f"压制字幕文件: {ass_path}")
 
     # 可选 BGM：作为一条独立音轨（input [2:a]）混入，旁白处自动压低
@@ -1390,7 +1436,7 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
     preset = str(CONFIG.get("output_preset", "veryfast") or "veryfast")
     max_h = int(CONFIG.get("output_max_height", 0) or 0)
     vf_chain = []
-    mask_filter = _source_subtitle_mask_filter()
+    mask_filter = _source_subtitle_mask_filter(canvas)
     if mask_filter:
         vf_chain.append(mask_filter)
     if CONFIG.get("burn_subtitles", False):
