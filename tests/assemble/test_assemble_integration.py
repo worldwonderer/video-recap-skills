@@ -112,11 +112,12 @@ def test_assemble_video_runs_when_source_has_no_audio_stream(tmp_path, monkeypat
     assert "audio" in _stream_types(out)
 
 
-def _make_422_source_video(path, seconds=2):
-    """A 4:2:2 source: plays on desktop but fails on WeChat/mobile if passed through as-is."""
+def _make_422_source_video(path, seconds=2, w=320, h=240):
+    """A 4:2:2 source: plays on desktop but fails on WeChat/mobile if passed through as-is.
+    4:2:2 (unlike 4:2:0) permits ODD dimensions, which is how an odd-height source arises."""
     subprocess.run([
         "ffmpeg", "-y",
-        "-f", "lavfi", "-i", f"color=c=green:s=320x240:d={seconds}:r=25",
+        "-f", "lavfi", "-i", f"color=c=green:s={w}x{h}:d={seconds}:r=25",
         "-f", "lavfi", "-i", f"sine=frequency=220:duration={seconds}",
         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv422p",
         "-c:a", "aac", "-shortest", str(path),
@@ -129,6 +130,15 @@ def _pix_fmt(path):
          "-show_entries", "stream=pix_fmt", "-of", "csv=p=0", str(path)],
         capture_output=True, text=True,
     ).stdout.strip()
+
+
+def _dims(path):
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", str(path)],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    return tuple(int(x) for x in out.split("x"))
 
 
 def _top_level_atoms(path):
@@ -171,3 +181,44 @@ def test_output_is_yuv420p_and_faststart_on_reencode(tmp_path, monkeypatch):
     atoms = _top_level_atoms(out)
     assert "moov" in atoms and "mdat" in atoms
     assert atoms.index("moov") < atoms.index("mdat"), f"moov not front-loaded: {atoms}"
+
+
+def test_odd_height_422_force_reencode_does_not_abort(tmp_path, monkeypatch):
+    """yuv420p needs even dims; an odd-height 4:2:2 source must still produce a valid file
+    (the bare force_video_reencode branch). Without the even-normalize, libx264 aborts to 0 bytes."""
+    monkeypatch.setitem(CONFIG, "final_loudnorm", False)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)
+    monkeypatch.setitem(CONFIG, "burn_subtitles", False)
+    monkeypatch.setitem(CONFIG, "force_video_reencode", True)
+    work = tmp_path / "w_odd_bare"
+    work.mkdir()
+    src = tmp_path / "src_odd.mp4"
+    _make_422_source_video(src, seconds=2, w=320, h=241)  # ODD height, 4:2:2
+    assert _dims(src)[1] % 2 == 1  # precondition: odd height
+    out = work / "recap_odd.mp4"
+    segs = _segment(work, 0.3, 1.5, overlaps=True, dur=1.0)
+    assemble_video(src, segs, work, out)
+    assert out.exists() and out.stat().st_size > 0
+    assert _pix_fmt(out) == "yuv420p"
+    w, h = _dims(out)
+    assert w % 2 == 0 and h % 2 == 0  # normalized to even
+
+
+def test_odd_height_422_with_burned_subs_does_not_abort(tmp_path, monkeypatch):
+    """Same hazard via the vf_chain branch (burned subtitles, no downscale): odd-height
+    4:2:2 source must render to even yuv420p rather than aborting."""
+    monkeypatch.setitem(CONFIG, "final_loudnorm", False)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)
+    monkeypatch.setitem(CONFIG, "burn_subtitles", True)  # drives the vf_chain branch
+    monkeypatch.setitem(CONFIG, "force_video_reencode", False)
+    work = tmp_path / "w_odd_burn"
+    work.mkdir()
+    src = tmp_path / "src_odd_burn.mp4"
+    _make_422_source_video(src, seconds=2, w=320, h=241)
+    out = work / "recap_odd_burn.mp4"
+    segs = _segment(work, 0.3, 1.5, overlaps=True, dur=1.0)
+    assemble_video(src, segs, work, out)
+    assert out.exists() and out.stat().st_size > 0
+    assert _pix_fmt(out) == "yuv420p"
+    w, h = _dims(out)
+    assert w % 2 == 0 and h % 2 == 0

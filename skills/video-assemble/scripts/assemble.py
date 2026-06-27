@@ -1401,8 +1401,13 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
     if max_h > 0:
         vf_chain.append(_output_downscale_filter(max_h))
     # yuv420p: 10-bit/4:2:2 sources re-encoded as-is play on desktop but fail on WeChat/
-    # mobile/Safari; force 8-bit 4:2:0 so every recap is universally decodable.
+    # mobile/Safari; force 8-bit 4:2:0 so every recap is universally decodable. yuv420p also
+    # needs EVEN width AND height, so normalize odd dims (4:2:2/4:4:4 permit them) before the
+    # encode — otherwise libx264 aborts to a 0-byte file. The downscale helper already evens out.
+    even = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
     if vf_chain:
+        if max_h <= 0:  # no downscale in the chain to force even dims
+            vf_chain.append(even)
         cmd += ["-vf", ",".join(vf_chain), "-c:v", "libx264", "-preset", preset, "-crf", crf,
                 "-pix_fmt", "yuv420p"]
         notes = ((["遮挡原字幕"] if mask_filter else [])
@@ -1410,7 +1415,7 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
                  + ([f"缩放≤{max_h}p"] if max_h > 0 else []))
         log(f"视频重编码: {' + '.join(notes)} (crf={crf}, preset={preset})")
     elif CONFIG.get("force_video_reencode", False):
-        cmd += ["-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p"]
+        cmd += ["-vf", even, "-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p"]
     else:
         cmd += ["-c:v", "copy"]
 
