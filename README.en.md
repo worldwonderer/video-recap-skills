@@ -42,11 +42,14 @@ flowchart LR
 
 ## Installation
 
-**① Install the plugin** — ask Claude Code:
+**① Install the plugin** — add this repo as a marketplace and install, inside Claude Code:
 
 ```text
-Install this plugin: https://github.com/worldwonderer/video-recap-skills
+/plugin marketplace add worldwonderer/video-recap-skills
+/plugin install video-recap-skills@video-recap-skills
 ```
+
+(Or just tell Claude Code: "Install this plugin: https://github.com/worldwonderer/video-recap-skills".)
 
 **② Install ffmpeg** (no `pip install`: pure standard library + `ffmpeg` on `PATH`, Python 3.10+):
 

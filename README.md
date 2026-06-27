@@ -42,11 +42,14 @@ flowchart LR
 
 ## 安装
 
-**① 装插件**——复制到 claude code：
+**① 装插件**——在 claude code 里添加本仓库为插件市场并安装：
 
 ```text
-安装这个插件：https://github.com/worldwonderer/video-recap-skills
+/plugin marketplace add worldwonderer/video-recap-skills
+/plugin install video-recap-skills@video-recap-skills
 ```
+
+（也可以直接对 claude code 说「安装这个插件：https://github.com/worldwonderer/video-recap-skills」。）
 
 **② 装 ffmpeg**（不用 `pip install`：纯标准库 + `PATH` 上的 `ffmpeg`，Python 3.10+）：
 

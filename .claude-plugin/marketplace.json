@@ -1,0 +1,16 @@
+{
+  "name": "video-recap-skills",
+  "owner": {
+    "name": "worldwonderer"
+  },
+  "description": "Turn any video into a Chinese-narration recap on ffmpeg + one Xiaomi MiMo API key.",
+  "plugins": [
+    {
+      "name": "video-recap-skills",
+      "source": "./",
+      "description": "Turn any video into a Chinese-narration recap (understanding -> narration -> cut -> voiceover -> assemble) on ffmpeg + one Xiaomi MiMo API key. A bundle of independent skills + a thin orchestrator. macOS / Linux / Windows.",
+      "homepage": "https://github.com/worldwonderer/video-recap-skills",
+      "license": "MIT"
+    }
+  ]
+}
