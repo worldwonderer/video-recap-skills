@@ -38,6 +38,8 @@ If `work_dir/background_research.json` exists (story research the agent did firs
 context, so scene descriptions can name people and read scenes with plot knowledge. Combine with
 `--context` for a quick inline hint.
 
+> **Running the scripts below** — the `scripts/…` paths are relative to this skill's own directory (the folder containing this `SKILL.md`). Claude Code runs commands from there, so they work as written. If your harness runs commands from the project root instead (opencode / Codex / OpenClaw commonly do), prefix this skill's absolute directory — e.g. `<skill-dir>/scripts/…`, using the directory your harness reports when it loads the skill. The scripts self-locate via `__file__`, so once started by the correct path they resolve their sibling skills and assets regardless of the working directory.
+
 ## Run
 
 ```bash

@@ -30,6 +30,8 @@ In the orchestrated cut-mode flow, the agent writes `narration.json` directly ag
 timeline, and the orchestrator passes it here. In the legacy direct-cut path,
 `narration_mapped.json` may be passed explicitly instead.
 
+> **Running the scripts below** — the `scripts/…` paths are relative to this skill's own directory (the folder containing this `SKILL.md`). Claude Code runs commands from there, so they work as written. If your harness runs commands from the project root instead (opencode / Codex / OpenClaw commonly do), prefix this skill's absolute directory — e.g. `<skill-dir>/scripts/…`, using the directory your harness reports when it loads the skill. The scripts self-locate via `__file__`, so once started by the correct path they resolve their sibling skills and assets regardless of the working directory.
+
 ## Run
 
 ```bash

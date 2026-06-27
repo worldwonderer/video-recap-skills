@@ -228,7 +228,7 @@ def _preflight_burn_subtitles(args):
             "字幕烧录已开启，但当前 ffmpeg 不支持 subtitles/libass 滤镜，整条流程会跑到最后渲染才失败。\n"
             "  解决其一：(1) 安装带 libass 的 ffmpeg；(2) 加 --no-burn-subtitles 关闭烧录"
             "（仍输出 .srt 外挂字幕）。\n"
-            "  自检：python3 skills/video-recap/scripts/doctor.py")
+            f"  自检：python3 {_entry('video-recap', 'doctor.py')}")
 
 
 def _print_narration_review_pointer(work_dir, *, review_ran=True):

@@ -14,6 +14,8 @@ Authoring + validation of the narration script. The **agent writes `work_dir/nar
 following the rules below; then `validate.py` lints it against the understanding index, and in
 full mode time-aligns it to quiet windows.
 
+> **Running the scripts below** — the `scripts/…` paths are relative to this skill's own directory (the folder containing this `SKILL.md`). Claude Code runs commands from there, so they work as written. If your harness runs commands from the project root instead (opencode / Codex / OpenClaw commonly do), prefix this skill's absolute directory — e.g. `<skill-dir>/scripts/…`, using the directory your harness reports when it loads the skill. The scripts self-locate via `__file__`, so once started by the correct path they resolve their sibling skills and assets regardless of the working directory. Some steps here call the sibling **video-recap** skill's `scripts/` (e.g. `recap_inspect.py`); resolve those the same way, via that skill's directory.
+
 ## Step 1 — read the brief
 
 Read `work_dir/agent_narration_brief.md` (scenes, durations, quiet windows, char budget) first.
@@ -21,7 +23,7 @@ Digest long dialogue via `asr_writing_chunks.json`; judge "is there speech/a sil
 via `timeline_fusion.json`. Check raw `vlm_analysis.json` / `asr_result.json` for details.
 In full mode, timestamps are **original-video time**. In orchestrated cut mode, pass 1 only writes `clip_plan.json`; after `edited_source.mp4` exists, pass 2 writes `narration.json` in **output timeline time**.
 
-写稿前先跑 `python3 skills/video-recap/scripts/recap_inspect.py --work-dir <work_dir> state` 看清楚当前模式、缺哪个产物、下一步该写什么。cut pass 2 写解说时用 `recap_inspect.py --work-dir <work_dir> clip-map --output-start <s> --output-end <e>`（或 `--source-start/--source-end`）核对输出↔原片时间轴，确认某段成片对应哪段原片、有没有跨剪辑边界或落进被剪掉的区间。
+写稿前先跑同捆 video-recap skill 的 `scripts/recap_inspect.py`（即 `recap_inspect.py --work-dir <work_dir> state`，用其绝对路径调起，见上方「Running the scripts」说明）看清楚当前模式、缺哪个产物、下一步该写什么。cut pass 2 写解说时用 `recap_inspect.py --work-dir <work_dir> clip-map --output-start <s> --output-end <e>`（或 `--source-start/--source-end`）核对输出↔原片时间轴，确认某段成片对应哪段原片、有没有跨剪辑边界或落进被剪掉的区间。
 
 ## Step 2 — write narration.json
 

@@ -35,6 +35,8 @@ Optionally `target_duration` at the object top level (e.g. `"10m"`).
 `work_dir/narration.json` (optional, legacy single-pass path only) — segments with original-video `start`/`end` + `narration` text, consumed only when `--no-narration-map` is NOT passed.
 Each segment may carry `source_clip_id` to disambiguate when overlapping clips are allowed.
 
+> **Running the scripts below** — the `scripts/…` paths are relative to this skill's own directory (the folder containing this `SKILL.md`). Claude Code runs commands from there, so they work as written. If your harness runs commands from the project root instead (opencode / Codex / OpenClaw commonly do), prefix this skill's absolute directory — e.g. `<skill-dir>/scripts/…`, using the directory your harness reports when it loads the skill. The scripts self-locate via `__file__`, so once started by the correct path they resolve their sibling skills and assets regardless of the working directory.
+
 ## Run
 
 ```bash
