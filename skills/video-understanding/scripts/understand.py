@@ -524,6 +524,84 @@ def _research_context(work_dir):
     return " ".join(parts).strip()[:1200]
 
 
+def _load_understanding_artifacts_for_brief(work_dir):
+    """Load existing analysis artifacts for a brief-only regeneration pass.
+
+    Material-library restores are allowed to reuse expensive analysis artifacts,
+    but cut pass 2 must still rebuild `agent_narration_brief.md` against the
+    rendered OUTPUT timeline. This helper deliberately performs no extraction,
+    ASR, VLM, or external API calls; it only reads already-present JSON.
+    """
+    work_dir = Path(work_dir)
+    scenes = []
+    for name in ("vlm_analysis.json", "scenes.json"):
+        path = work_dir / name
+        if not path.exists():
+            continue
+        try:
+            data = _load_json(path)
+        except (OSError, ValueError, TypeError):
+            continue
+        if isinstance(data, list):
+            scenes = data
+            break
+    asr_result = []
+    if (work_dir / "asr_result.json").exists():
+        try:
+            data = _load_json(work_dir / "asr_result.json")
+        except (OSError, ValueError, TypeError):
+            data = []
+        if isinstance(data, list):
+            asr_result = data
+    silence_periods = []
+    if (work_dir / "silence_periods.json").exists():
+        try:
+            data = _load_json(work_dir / "silence_periods.json")
+        except (OSError, ValueError, TypeError):
+            data = []
+        if isinstance(data, list):
+            silence_periods = data
+    return scenes, asr_result, silence_periods
+
+
+def _write_brief_from_existing_artifacts(video, work_dir, args, video_duration):
+    """Regenerate only the agent brief/timeline-fusion from existing artifacts."""
+    scenes, asr_result, silence_periods = _load_understanding_artifacts_for_brief(work_dir)
+    overview_path = Path(work_dir) / "mimo_video_overview.json"
+    if CONFIG.get("mimo_video_overview", False):
+        scenes = _merge_overview_into_scenes(scenes, overview_path)
+
+    source_storyboard = None
+    edited_storyboard = None
+    scenes_json = Path(work_dir) / "scenes.json"
+    if scenes_json.exists():
+        source_storyboard = _generate_source_storyboard(work_dir, Path(video), scenes, scenes_json, force=False)
+    edited_storyboard = _generate_edited_storyboard(work_dir, video, force=False)
+    cut_mode = (Path(work_dir) / "clip_plan_validated.json").exists()
+
+    substrate = assess_understanding_substrate(scenes, asr_result)
+    if substrate["level"] != "rich":
+        banner = "理解素材为空" if substrate["level"] == "empty" else "理解素材偏薄"
+        log(f"⚠️  {banner}：ASR {substrate['asr_chars']} 字 | 场景 {substrate['scene_count']} | "
+            f"带 frame_facts 的场景 {substrate['scenes_with_frame_facts']} | 平均画面描述 {substrate['avg_description_len']} 字")
+    brief_path = build_agent_brief(
+        scenes, asr_result, silence_periods, video_duration, work_dir, args.style,
+        mimo_overview_enabled=CONFIG.get("mimo_video_overview", False),
+        mimo_overview_video_path=video,
+    )
+    _prepend_storyboard_brief_header(brief_path, source_storyboard, edited_storyboard, cut_mode=cut_mode)
+    log("=" * 50)
+    log(f"brief-only 完成。写作 brief: {brief_path}")
+    print(json.dumps({
+        "status": "brief_only",
+        "work_dir": str(work_dir),
+        "brief": str(brief_path),
+        "substrate": substrate["level"],
+        "scenes": len(scenes),
+        "asr_segments": len(asr_result),
+    }, ensure_ascii=False))
+
+
 def main():
     ap = argparse.ArgumentParser(description="Analyze a video into an understanding index + narration brief.")
     ap.add_argument("video")
@@ -536,6 +614,8 @@ def main():
     ap.add_argument("--skip-asr", action="store_true")
     ap.add_argument("--mimo-video-overview", action="store_true")
     ap.add_argument("--force", action="store_true", help="ignore cached artifacts and recompute")
+    ap.add_argument("--brief-only", action="store_true",
+                    help="rebuild agent_narration_brief.md from existing artifacts only; no extraction/API")
     ap.add_argument("--consolidate", action=argparse.BooleanOptionalAction, default=True,
                     help="build the global understanding story index (Pass B); default ON, --no-consolidate to skip")
     ap.add_argument("--consolidate-asr", action="store_true", help="also clean the ASR transcript (Pass A)")
@@ -566,6 +646,10 @@ def main():
     if CONFIG["fps"] <= 0:
         CONFIG["fps"] = 2 if video_duration <= 60 else (1.5 if video_duration <= 300 else 1)
     log(f"FPS: {CONFIG['fps']} (视频时长: {video_duration:.1f}s)")
+
+    if args.brief_only:
+        _write_brief_from_existing_artifacts(video, work_dir, args, video_duration)
+        return
 
     scenes_json = work_dir / "scenes.json"
     asr_json = work_dir / "asr_result.json"

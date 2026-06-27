@@ -74,8 +74,8 @@ def test_build_video_clips_prefers_fingerprint_matched_validated_cut_plan(monkey
     clips = _build_video_clips(edited, tmp_path, duration_s=15.0)
 
     assert clips == [
-        {"source_path": str(original), "source_start": 10.0, "source_end": 20.0, "timeline_start": 0.0, "timeline_end": 10.0},
-        {"source_path": str(original), "source_start": 40.0, "source_end": 45.0, "timeline_start": 10.0, "timeline_end": 15.0},
+        {"source_id": None, "source_path": str(original), "source_start": 10.0, "source_end": 20.0, "timeline_start": 0.0, "timeline_end": 10.0},
+        {"source_id": None, "source_path": str(original), "source_start": 40.0, "source_end": 45.0, "timeline_start": 10.0, "timeline_end": 15.0},
     ]
 
 
@@ -126,7 +126,7 @@ def test_build_video_clips_ignores_stale_validated_cut_plan(monkeypatch, tmp_pat
     clips = _build_video_clips(edited, tmp_path, duration_s=5.0)
 
     assert clips == [
-        {"source_path": str(original), "source_start": 40.0, "source_end": 45.0, "timeline_start": 0.0, "timeline_end": 5.0},
+        {"source_id": None, "source_path": str(original), "source_start": 40.0, "source_end": 45.0, "timeline_start": 0.0, "timeline_end": 5.0},
     ]
 
 

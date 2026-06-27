@@ -201,3 +201,93 @@ def test_variable_ducking_keyframes_do_not_release_to_idle_between_close_windows
     # level — the duck never swells back to idle between them.
     held = [kf["gain"] for kf in keyframes if 1.0 <= kf["t"] <= 5.0]
     assert held and all(g == 0.12 for g in held)
+
+
+def test_build_video_clips_prefers_per_clip_source_path_without_explicit_source_video(monkeypatch, tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-assemble' / 'scripts'))
+    import assemble
+
+    a = tmp_path / "a.mp4"
+    b = tmp_path / "b.mp4"
+    rendered = tmp_path / "edited_source.mp4"
+    a.write_bytes(b"a")
+    b.write_bytes(b"b")
+    rendered.write_bytes(b"e")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "clip_plan_validated.json").write_text(json.dumps({
+        "clips": [
+            {"source_path": str(a), "source_start": 1.0, "source_end": 2.0, "output_start": 0.0, "output_end": 1.0},
+            {"source_path": str(b), "source_start": 3.0, "source_end": 5.0, "output_start": 1.0, "output_end": 3.0},
+        ]
+    }), encoding="utf-8")
+    monkeypatch.setitem(assemble.CONFIG, "source_video_explicit", False)
+    monkeypatch.setitem(assemble.CONFIG, "source_video", "")
+
+    clips = assemble._build_video_clips(rendered, work, 3.0)
+
+    assert [c["source_path"] for c in clips] == [str(a), str(b)]
+    assert clips[1]["timeline_start"] == 1.0
+
+
+def test_build_video_clips_degrades_only_missing_clip_keeps_present_provenance(monkeypatch, tmp_path):
+    """One stale source must degrade ONLY its own clip; clips whose source is present keep
+    their real source_id/source_path provenance (no whole-timeline collapse)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-assemble' / 'scripts'))
+    import assemble
+
+    rendered = tmp_path / "edited_source.mp4"
+    rendered.write_bytes(b"e")
+    present = tmp_path / "present.mp4"
+    present.write_bytes(b"p")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "clip_plan_validated.json").write_text(json.dumps({
+        "clips": [
+            {"source_id": "src_miss", "source_path": str(tmp_path / "missing.mp4"),
+             "source_start": 1.0, "source_end": 2.0, "output_start": 0.0, "output_end": 1.0},
+            {"source_id": "src_ok", "source_path": str(present),
+             "source_start": 3.0, "source_end": 5.0, "output_start": 1.0, "output_end": 3.0},
+        ]
+    }), encoding="utf-8")
+    monkeypatch.setitem(assemble.CONFIG, "source_video_explicit", False)
+    monkeypatch.setitem(assemble.CONFIG, "source_video", "")
+
+    clips = assemble._build_video_clips(rendered, work, 3.0)
+
+    assert len(clips) == 2
+    ok = clips[1]
+    assert ok["source_path"] == str(present) and ok["source_id"] == "src_ok"
+    assert ok["source_start"] == 3.0 and ok["source_end"] == 5.0
+    assert not ok.get("provenance_degraded")
+    bad = clips[0]
+    assert bad["provenance_degraded"] is True and bad["source_id"] == "src_miss"
+    assert bad["source_path"] == str(rendered)
+    assert bad["timeline_start"] == 0.0 and bad["timeline_end"] == 1.0
+    assert bad["provenance_reason"].startswith("missing_source_path:")
+
+
+def test_emit_timeline_marks_degraded_multi_source_fallback(monkeypatch, tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-assemble' / 'scripts'))
+    import assemble
+
+    rendered = tmp_path / "edited_source.mp4"
+    rendered.write_bytes(b"e")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "clip_plan_validated.json").write_text(json.dumps({
+        "clips": [
+            {"source_path": str(tmp_path / "missing.mp4"), "source_start": 1.0, "source_end": 2.0,
+             "output_start": 0.0, "output_end": 1.0},
+        ]
+    }), encoding="utf-8")
+    monkeypatch.setitem(assemble.CONFIG, "source_video_explicit", False)
+    monkeypatch.setitem(assemble.CONFIG, "source_video", "")
+    monkeypatch.setattr(assemble, "_probe_canvas", lambda _path: {"width": 100, "height": 100, "fps": 25})
+    monkeypatch.setattr(assemble, "_combined_subtitle_entries", lambda *_args: [])
+
+    timeline = assemble._emit_timeline(rendered, [], work, 3.0, has_bgm=False)
+
+    assert timeline["provenance"]["degraded"] is True
+    assert timeline["provenance"]["degraded_clips"][0]["reason"].startswith("missing_source_path:")
+    assert json.loads((work / "timeline.json").read_text(encoding="utf-8"))["provenance"]["degraded"] is True

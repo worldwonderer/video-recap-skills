@@ -57,6 +57,21 @@ Runs video-understanding (using `background_research.json` if you wrote it), wri
 **video-script** skill (read the brief first).
 Cut mode (`--edit-mode cut --target-duration 10m`) also requires `clip_plan.json`.
 
+Multi-video is cut-only. Use multiple positional videos plus `--edit-mode cut`; the generated project brief lists stable `source_id` values, and every `clip_plan.json` clip must include the chosen `source_id`:
+
+```bash
+python3 scripts/recap.py ep1.mp4 ep2.mp4 --edit-mode cut --target-duration 10m --work-dir work_dir_multi_ep
+```
+
+Optional filesystem material library:
+
+```bash
+python3 scripts/recap.py ep1.mp4 --material-library-dir .video-materials --save-materials
+python3 scripts/recap.py ep1.mp4 ep2.mp4 --edit-mode cut --material-library-dir .video-materials --use-materials
+```
+
+Search is plain grep over JSON/MD/JSONL (for example `grep -R "keyword" .video-materials`). No raw media, DB, embeddings, or semantic search are part of the MVP.
+
 ### 2. Continue → produce the recap
 
 Rerun the **same command** (narration.json now exists):
@@ -103,7 +118,7 @@ python3 scripts/recap.py --doctor
 ## Options (passed through to the stage skills)
 `--context`, `--scene-threshold`, `--style`, `--edit-mode {full,cut,dub}`, `--target-duration`,
 `--skip-asr`, `--mimo-video-overview`, `--consolidate`, `--consolidate-asr`, `--mimo-tts-voice`,
-`--no-burn-subtitles` (burn is on by default), `--output-dir`.
+`--no-burn-subtitles` (burn is on by default), `--output-dir`, `--material-library-dir`, `--use-materials`, `--save-materials`.
 
 ## What this skill does NOT do
 - Does NOT write narration.json / clip_plan.json — the agent authors those (see the video-script skill).

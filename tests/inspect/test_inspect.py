@@ -292,3 +292,37 @@ def test_clip_map_bare_list_plan_with_derived_output(tmp_path):
         source_start=51.0, source_end=54.0, compact=True)
     seg = result["queries"][0]["segments"][0]
     assert seg["output"] == [11.0, 14.0]
+
+
+def test_state_surfaces_multi_source_manifest(tmp_path):
+    (tmp_path / "multi_source_manifest.json").write_text(json.dumps({
+        "schema_version": 1,
+        "sources": [
+            {"source_id": "src_a", "source_path": "/videos/a.mp4", "source_name": "a.mp4",
+             "source_video_fingerprint": "a" * 64, "source_work_dir": "sources/src_a", "material_id": "a-src_a"},
+            {"source_id": "src_b", "source_path": "/videos/b.mp4", "source_name": "b.mp4",
+             "source_video_fingerprint": "b" * 64, "source_work_dir": "sources/src_b", "material_id": "b-src_b"},
+        ],
+    }), encoding="utf-8")
+    state = recap_inspect.cmd_state(tmp_path, compact=True)
+    assert state["mode"] == "cut"
+    assert [s["source_id"] for s in state["multi_source"]["sources"]] == ["src_a", "src_b"]
+    md = recap_inspect._render_state_md(state, compact=True)
+    assert "多源素材" in md
+    assert "src_a" in md and "sources/src_b" in md
+
+
+def test_clip_map_includes_multi_source_provenance(tmp_path):
+    _write_plan(tmp_path, {
+        "clips": [
+            {"clip_id": 0, "source_id": "src_a", "source_path": "/videos/a.mp4",
+             "source_start": 10.0, "source_end": 12.0, "output_start": 0.0, "output_end": 2.0},
+        ]
+    })
+    result = recap_inspect.cmd_clip_map(tmp_path, output_start=0.5, output_end=1.0,
+                                        source_start=None, source_end=None, compact=True)
+    seg = result["queries"][0]["segments"][0]
+    assert seg["source_id"] == "src_a"
+    assert seg["source_path"] == "/videos/a.mp4"
+    md = recap_inspect._render_clip_map_md(result, compact=True)
+    assert "src_a" in md and "/videos/a.mp4" in md

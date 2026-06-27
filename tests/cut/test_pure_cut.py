@@ -546,3 +546,129 @@ def test_detect_shot_changes_offsets_by_seek_and_filters_window(monkeypatch):
                         types.SimpleNamespace(run=lambda *a, **k: CompletedProcess(a, 0, "", stderr)))
     out = cut._detect_shot_changes("v.mkv", 55.0, 68.0, 0.4)  # seek=54.75
     assert out == [56.512, 60.616]  # 54.8 (54.75+0.05) is < win_start → filtered
+
+
+def test_normalize_multi_source_clip_plan_maps_sources_and_validates_per_source_overlap(tmp_path):
+    manifest = {
+        "sources": [
+            {"source_id": "a", "source_path": str(tmp_path / "a.mp4"), "duration": 10.0},
+            {"source_id": "b", "source_path": str(tmp_path / "b.mp4"), "duration": 5.0},
+        ]
+    }
+    plan = cut.normalize_multi_source_clip_plan([
+        {"source_id": "a", "start": 1.0, "end": 4.0, "reason": "A"},
+        {"source_id": "b", "start": 4.0, "end": 8.0, "reason": "B"},
+        {"source_id": "b", "start": 0.0, "end": 1.0, "reason": "B2"},
+    ], manifest, clip_padding=0.5)
+
+    assert plan["total_duration"] == 7.0
+    assert [c["source_id"] for c in plan["clips"]] == ["a", "b", "b"]
+    assert plan["clips"][0]["source_path"].endswith("a.mp4")
+    assert plan["clips"][0]["source_start"] == 0.5
+    assert plan["clips"][1]["source_end"] == 5.0  # clamped to source b duration
+    assert plan["clips"][2]["output_start"] == 5.5
+
+    with pytest.raises(ValueError, match="source_id a"):
+        cut.normalize_multi_source_clip_plan([
+            {"source_id": "a", "start": 1.0, "end": 4.0},
+            {"source_id": "a", "start": 3.5, "end": 5.0},
+        ], manifest)
+    with pytest.raises(ValueError, match="missing source_id"):
+        cut.normalize_multi_source_clip_plan([
+            {"start": 1.0, "end": 2.0},
+        ], manifest)
+    with pytest.raises(ValueError, match="unknown source_id"):
+        cut.normalize_multi_source_clip_plan([
+            {"source_id": "missing", "start": 1.0, "end": 2.0},
+        ], manifest)
+
+
+def test_build_edited_source_video_multi_source_uses_multiple_inputs_and_cache_meta(monkeypatch, tmp_path):
+    a = tmp_path / "a.mp4"
+    b = tmp_path / "b.mp4"
+    a.write_bytes(b"aaa")
+    b.write_bytes(b"bbb")
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    plan = cut.normalize_multi_source_clip_plan([
+        {"source_id": "a", "start": 0, "end": 1},
+        {"source_id": "b", "start": 2, "end": 3},
+        {"source_id": "a", "start": 4, "end": 5},
+    ], {"sources": [
+        {"source_id": "a", "source_path": str(a), "duration": 10},
+        {"source_id": "b", "source_path": str(b), "duration": 10},
+    ]})
+    commands = []
+
+    def fake_run_cmd(cmd):
+        commands.append(cmd)
+        if cmd[0] == "ffprobe":
+            return CompletedProcess(cmd, 0, stdout="", stderr="")
+        Path(cmd[-1]).write_bytes(b"edited")
+        return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("cut.run_cmd", fake_run_cmd)
+    monkeypatch.setattr("cut.get_video_duration", lambda path: 3.0)
+
+    out = cut.build_edited_source_video("ignored.mp4", plan, work_dir)
+
+    ffmpeg_cmd = [cmd for cmd in commands if cmd[0] == "ffmpeg"][0]
+    # Only the two media inputs — audio is now synthesized per-clip inside filter_complex,
+    # not via a single global anullsrc input.
+    assert ffmpeg_cmd.count("-i") == 2
+    joined = " ".join(ffmpeg_cmd)
+    assert f"-i {a}" in joined and f"-i {b}" in joined
+    assert "[0:v]trim=start=0.000:end=1.000" in joined
+    assert "[1:v]trim=start=2.000:end=3.000" in joined
+    assert "[0:v]trim=start=4.000:end=5.000" in joined
+    # Heterogeneous sources are normalized to one canvas before concat (probe is mocked
+    # empty -> default 1280x720), and each clip gets an audio segment (silent here).
+    assert "scale=1280:720" in joined and "setsar=1" in joined and "format=yuv420p" in joined
+    assert "anullsrc=r=48000:cl=stereo" in joined
+    assert "concat=n=3:v=1:a=1" in joined
+    assert cut.should_reuse_edited_source(out, plan, "ignored.mp4") is True
+
+
+def test_build_edited_source_video_multi_resolution_mixed_audio_real_render(tmp_path):
+    """Real ffmpeg: heterogeneous sources (different resolution/fps, one silent) must concat
+    into ONE playable output with an audio track. This path was previously all-mocked, hiding
+    the missing scale/setsar/fps normalization (concat would abort) and the all-or-nothing
+    audio drop."""
+    import shutil
+    import subprocess
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        pytest.skip("ffmpeg/ffprobe required for real render")
+    import cut
+
+    a = tmp_path / "a_1080_audio.mp4"   # 1920x1080@30, WITH audio
+    b = tmp_path / "b_480_silent.mp4"   # 854x480@24, NO audio
+    subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=size=1920x1080:rate=30:duration=2",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                    "-shortest", "-pix_fmt", "yuv420p", str(a)], check=True, capture_output=True)
+    subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=size=854x480:rate=24:duration=2",
+                    "-pix_fmt", "yuv420p", str(b)], check=True, capture_output=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    plan = cut.normalize_multi_source_clip_plan([
+        {"source_id": "a", "start": 0.0, "end": 1.0},
+        {"source_id": "b", "start": 0.0, "end": 1.0},
+        {"source_id": "a", "start": 1.0, "end": 2.0},
+    ], {"sources": [
+        {"source_id": "a", "source_path": str(a), "duration": 2.0},
+        {"source_id": "b", "source_path": str(b), "duration": 2.0},
+    ]})
+
+    out = cut.build_edited_source_video(str(a), plan, work)
+    assert out.exists() and out.stat().st_size > 0
+
+    def _has_stream(kind):
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", kind,
+                            "-show_entries", "stream=index", "-of", "csv=p=0", str(out)],
+                           capture_output=True, text=True)
+        return bool(r.stdout.strip())
+
+    assert _has_stream("v:0"), "no video stream in concatenated output"
+    assert _has_stream("a:0"), "audio track dropped even though one source had audio"
+    dur = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                "-of", "csv=p=0", str(out)], capture_output=True, text=True).stdout.strip())
+    assert dur > 2.0, f"expected ~3s of concatenated clips, got {dur}s"

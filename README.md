@@ -49,7 +49,11 @@ flowchart LR
 /plugin install video-recap-skills@video-recap
 ```
 
-（也可以直接对 claude code 说「安装这个插件：https://github.com/worldwonderer/video-recap-skills」。）
+> 也可以跳过命令，直接对 Claude Code 说：
+>
+> ```text
+> 安装这个插件：https://github.com/worldwonderer/video-recap-skills
+> ```
 
 **② 装 ffmpeg**（不用 `pip install`：纯标准库 + `PATH` 上的 `ffmpeg`，Python 3.10+）：
 
@@ -119,6 +123,28 @@ export MIMO_TOKEN_PLAN_CLUSTER=cn
 
 背后是编排器把几个阶段串起来跑，中间停下来让 Agent 写解说（剪辑模式会停两次：先写 `clip_plan.json` 挑片段，剪成成片后再对着成片写 `narration.json`）。第一次跑前可先自检环境：
 
+多视频剪辑 MVP 只支持剪辑模式：
+
+```bash
+python3 skills/video-recap/scripts/recap.py ep1.mp4 ep2.mp4 --edit-mode cut --target-duration 10m --work-dir work_dir_multi_story
+```
+
+它会在 `work_dir_multi_story/sources/<source_id>/` 分别沉淀每个源视频的理解产物，在项目级 `multi_source_manifest.json` 里记录 `source_id → source_path`，并要求 `clip_plan.json` 的每个片段写明 `source_id`。
+
+可选素材库也是纯文件系统，方便以后 grep 复用已分析素材：
+
+```bash
+python3 skills/video-recap/scripts/recap.py ep1.mp4 --edit-mode cut \
+  --material-library-dir .video-materials --save-materials
+
+grep -R "范闲" .video-materials
+
+python3 skills/video-recap/scripts/recap.py ep1.mp4 ep2.mp4 --edit-mode cut \
+  --material-library-dir .video-materials --use-materials
+```
+
+素材库只保存 JSON/MD 小文件和追加式 `materials_index.jsonl`，不复制原始媒体、不建数据库、不做 embedding/语义搜索。
+
 ```bash
 python3 skills/video-recap/scripts/recap.py --doctor
 ```
@@ -151,6 +177,8 @@ python3 skills/video-recap/scripts/recap.py --doctor
 - `work_dir/agent_narration_brief.md`：给 Agent 的时间和场景 brief
 - `work_dir/vlm_analysis.json` · `asr_result.json` · `silence_periods.json` · `timeline_fusion.json`：理解产物
 - `work_dir/clip_plan.json` · `edited_source.mp4` · `recap_phase.json`：剪辑模式产物（解说在成片时间轴上写，`recap_phase.json` 记录剪/配进度供断点续跑）
+- `work_dir/multi_source_manifest.json` · `work_dir/sources/<source_id>/`：多视频 cut 的来源清单与每个源视频的理解产物
+- `<material-library-dir>/materials/<material_id>/material.json|material.md` · `materials_index.jsonl`：可选素材库，方便 `grep -R` 查找/复用已分析素材
 - `work_dir/timeline.json` · `work_dir/assembly_manifest.json` · `tts_segments/` · `tts_meta.json`：多轨时间线、渲染记录与 TTS 音频
 
 ## 自带原声字幕（可选，更准）
