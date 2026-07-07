@@ -111,7 +111,8 @@ def test_synthesize_segment_block_truncation_accounts_for_narration_speed(monkey
     res2 = _synthesize_segment(1, {"start": 0.0, "end": 12.0, "narration": huge, "pause_after_ms": 200},
                                [huge], tts_dir, "mimo-tts")
     assert len(calls) == 2                         # re-synthesized after truncation
-    assert len(res2["narration"]) < len(huge)
+    assert res2["narration"] == huge               # authored narration stays intact for schema stability
+    assert len(res2["spoken_text"]) < len(huge)     # rendered text is what gets shortened
 
 
 def test_synthesize_segment_rejects_cache_when_wav_bytes_change(monkeypatch, tmp_path):
@@ -522,3 +523,105 @@ def test_partial_tts_meta_records_failed_segment_details(monkeypatch, tmp_path):
         "error": "network timeout",
     }]
     assert [seg["index"] for seg in meta["segments"]] == [0]
+
+
+def test_p0_tts_segment_result_versions_authored_and_spoken_text(tmp_path):
+    authored = "作者原始长文案。第二句作为 provenance 保留。"
+    spoken = "实际合成句。"
+    result = _build_tts_segment_result(
+        0,
+        {"start": 1.0, "end": 3.0, "narration": authored},
+        spoken,
+        tmp_path / "narr.wav",
+        1.2,
+        0.05,
+    )
+
+    assert result["segment_audio_schema_version"] >= 1
+    assert result["narration"] == authored
+    assert result["spoken_text"] == spoken
+    assert result["truncated"] is True
+    assert result["truncate_reason"] in {"sentence_boundary", "none"}
+    assert result["audio_duration"] == 1.2
+    assert result["global_narration_speed"] == CONFIG.get("narration_speed")
+    assert result["effective_tempo"] <= CONFIG.get("narration_cumulative_tempo_max", 1.35)
+
+
+def test_p0_synthesize_segment_budget_uses_cumulative_tempo_cap(monkeypatch, tmp_path):
+    """Voiceover rewrite budget must match assemble's cumulative tempo cap, not old 1.2 headroom."""
+    monkeypatch.setitem(CONFIG, "tts_dynamic_params", False)
+    monkeypatch.setitem(CONFIG, "narration_speed", 1.2)
+    monkeypatch.setitem(CONFIG, "narration_cumulative_tempo_max", 1.35)
+    monkeypatch.setitem(CONFIG, "mimo_tts_model", "mimo-v2.5-tts")
+    calls = []
+
+    def fake_run_tts(engine, text, output_wav, rate="+0%", pitch="+0Hz", emotion=None):
+        calls.append((text, rate))
+        output_wav.write_text(text, encoding="utf-8")
+
+    monkeypatch.setattr("voiceover._run_tts_engine", fake_run_tts)
+    monkeypatch.setattr(
+        "voiceover._get_audio_duration",
+        lambda p: len(Path(p).read_text(encoding="utf-8")) * 0.3 if Path(p).exists() else 0.0,
+    )
+    tts_dir = tmp_path / "tts_segments"
+    tts_dir.mkdir()
+
+    # slot 10s, pause 0s. With global speed 1.2 and cumulative cap 1.35,
+    # raw budget = 10 * 1.35 = 13.5s, not old 10*1.2*1.2=14.4s.
+    text = "情节推进。" * 10  # synthetic 15s, should be rewritten under P0 cap.
+    res = _synthesize_segment(0, {"start": 0.0, "end": 10.0, "narration": text, "pause_after_ms": 0}, [text], tts_dir, "mimo-tts")
+
+    assert len(calls) == 2
+    assert res["spoken_text"] != text
+    assert res["truncated"] is True
+    assert res["effective_tempo"] <= 1.35 + 1e-6
+
+
+def _write_constant_wav(path, amplitude, seconds=0.25, sample_rate=24000):
+    import wave
+    frames = int(seconds * sample_rate)
+    sample = int(amplitude).to_bytes(2, "little", signed=True)
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(sample * frames)
+
+
+def _wav_rms_dbfs(path):
+    import math
+    import wave
+    with wave.open(str(path), "rb") as wf:
+        data = wf.readframes(wf.getnframes())
+    samples = [int.from_bytes(data[i:i+2], "little", signed=True) for i in range(0, len(data), 2)]
+    rms = math.sqrt(sum(s * s for s in samples) / max(1, len(samples)))
+    return 20 * math.log10(max(rms, 1e-9) / 32768.0)
+
+
+def _wav_peak(path):
+    import wave
+    with wave.open(str(path), "rb") as wf:
+        data = wf.readframes(wf.getnframes())
+    return max(abs(int.from_bytes(data[i:i+2], "little", signed=True)) for i in range(0, len(data), 2)) / 32768.0
+
+
+def test_p0_tts_rms_normalization_helper_matches_blocks_without_clipping(tmp_path):
+    loud = tmp_path / "loud.wav"
+    quiet = tmp_path / "quiet.wav"
+    loud_out = tmp_path / "loud_norm.wav"
+    quiet_out = tmp_path / "quiet_norm.wav"
+    _write_constant_wav(loud, 12000)
+    _write_constant_wav(quiet, 1200)
+
+    assert hasattr(voiceover, "_normalize_tts_wav_rms"), "P0 requires a reusable TTS RMS normalization helper"
+    loud_meta = voiceover._normalize_tts_wav_rms(loud, loud_out, target_rms_dbfs=-20.0, peak_limit=0.98)
+    quiet_meta = voiceover._normalize_tts_wav_rms(quiet, quiet_out, target_rms_dbfs=-20.0, peak_limit=0.98)
+
+    assert abs(_wav_rms_dbfs(loud_out) - _wav_rms_dbfs(quiet_out)) <= 1.5
+    assert _wav_peak(loud_out) <= 0.98
+    assert _wav_peak(quiet_out) <= 0.98
+    assert loud_meta["rms_dbfs_before"] > quiet_meta["rms_dbfs_before"]
+    assert abs(loud_meta["rms_dbfs_after"] - quiet_meta["rms_dbfs_after"]) <= 1.5
+    assert loud_meta["peak_after"] <= 0.98
+    assert quiet_meta["peak_after"] <= 0.98

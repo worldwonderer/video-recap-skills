@@ -26,7 +26,7 @@ Defaults below are bundle-level defaults unless a note scopes them to a specific
 | Background music | `BGM_PATH` / `BGM_VOLUME` / `BGM_DUCKING_VOLUME` | off / `0.18` / `0.10` | optional looped music bed mixed as its own track; point `BGM_PATH` at any audio file. It ducks to `BGM_DUCKING_VOLUME` under narration |
 | Final loudness | `FINAL_LOUDNORM` / `TARGET_LUFS` | `true` / `-14` | end-of-pipeline normalize |
 | Output compression | `OUTPUT_CRF` / `OUTPUT_PRESET` / `OUTPUT_MAX_HEIGHT` | `18` / `veryfast` / `0` | x264 re-encode controls, applied whenever the final mux re-encodes (burning subtitles / masking / scaling / `FORCE_VIDEO_REENCODE`). Higher `OUTPUT_CRF` = smaller file/lower quality (18≈visually lossless, 23–26 much smaller); `slow`/`slower` preset shrinks more at the same CRF; `OUTPUT_MAX_HEIGHT>0` downscales the final height (keeps aspect, even width), e.g. `720` to halve 1080p pixels. Subtitles/mask render at native res then downscale, so they stay crisp |
-| Style | `--style` | `纪录片` | |
+| Style | `--style` | `纪录片` | freeform verbatim guidance passed into the agent brief. The agent synthesizes voice/pacing from this exact text plus evidence; it is not a fixed option list, preset, switch, or finite style taxonomy |
 | Edit mode | `EDIT_MODE` / `--edit-mode` | `full` | `full` or `cut` |
 | Cut target | `TARGET_DURATION` / `--target-duration` | — | e.g. `10m` (cut mode) |
 | Scene threshold | `--scene-threshold` | `0.1` | scene-cut sensitivity |

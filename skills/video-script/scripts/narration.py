@@ -1,4 +1,5 @@
 import hashlib
+import importlib.util
 import json
 import math
 import re
@@ -7,6 +8,17 @@ from pathlib import Path
 
 from lib import CONFIG, file_fingerprint, stable_hash
 from lib import log
+
+try:
+    from deslop_qc import analyze_deslop_qc
+except ModuleNotFoundError:
+    _deslop_qc_path = Path(__file__).resolve().parents[1].parent / "video-script" / "scripts" / "deslop_qc.py"
+    _deslop_qc_spec = importlib.util.spec_from_file_location("deslop_qc", _deslop_qc_path)
+    if _deslop_qc_spec is None or _deslop_qc_spec.loader is None:
+        raise
+    _deslop_qc_module = importlib.util.module_from_spec(_deslop_qc_spec)
+    _deslop_qc_spec.loader.exec_module(_deslop_qc_module)
+    analyze_deslop_qc = _deslop_qc_module.analyze_deslop_qc
 
 
 # ── Agent narration preparation and validation helpers ────────────────
@@ -617,15 +629,28 @@ def lint_narration(narration, scenes_analysis=None, *, clip_plan=None, mode="ful
                 avg_block_chars=round(avg_chars, 1), block_min_chars=block_min_chars,
             ))
 
+    deslop_qc = analyze_deslop_qc(narration, work_dir=work_dir)
+    for blocker in deslop_qc.get("blockers", []):
+        errors.append(_lint_issue(
+            "error", blocker.get("index"), blocker.get("code", "deslop_qc_blocker"),
+            blocker.get("message", "deslop QC objective blocker"),
+            source=blocker.get("source"), matches=blocker.get("matches"),
+            sentence=blocker.get("sentence"),
+        ))
+
     report = {
         "ok": not errors,
         "error_count": len(errors),
         "warning_count": len(warnings),
         "metrics": metrics,
+        "deslop_qc": deslop_qc,
         "errors": errors,
         "warnings": warnings,
     }
     if work_dir is not None:
+        Path(work_dir, "deslop_qc.json").write_text(
+            json.dumps(deslop_qc, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         Path(work_dir, "narration_lint.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -710,7 +735,7 @@ def _align_narration_to_quiet(narration, scenes_analysis, silence_periods):
             n["overlaps_speech"] = True
         return _validate_narration_budget(narration, scenes_analysis)
 
-    quiet_windows = [qp for qp in silence_periods if not qp.get("has_speech", False)]
+    quiet_windows = [qp for qp in silence_periods if _silence_window_is_usable_quiet(qp)]
     quiet_ratio_min = float(CONFIG.get("quiet_overlap_min_ratio", 0.8) or 0.8)
 
     # Run budget/dedup FIRST, then set the flag on the final (possibly merged) spans,
@@ -749,7 +774,7 @@ def _scene_asr_lines(asr_result, scene):
 def _quiet_windows_for_scene(silence_periods, scene):
     windows = []
     for qp in silence_periods or []:
-        if qp.get("has_speech", False):
+        if not _silence_window_is_usable_quiet(qp):
             continue
         if qp["start"] < scene["end"] and qp["end"] > scene["start"]:
             start = max(qp["start"], scene["start"])
@@ -757,6 +782,18 @@ def _quiet_windows_for_scene(silence_periods, scene):
             if end > start:
                 windows.append((start, end))
     return windows
+
+
+def _silence_window_is_usable_quiet(qp):
+    if not isinstance(qp, dict):
+        return False
+    reason = str(qp.get("has_speech_reason", "")).lower()
+    granularity = str(qp.get("asr_granularity", "")).lower()
+    if reason in {"coarse_asr_overlap_ignored", "asr_overlap_low_confidence_quiet", "coarse_asr_no_overlap"}:
+        return True
+    if granularity == "coarse_grid" and qp.get("has_speech") is True:
+        return True
+    return not qp.get("has_speech", False)
 
 
 def _quiet_overlap_seconds(start, end, quiet_windows):
@@ -783,7 +820,7 @@ def _overlap_seconds(start, end, other_start, other_end):
 def _build_timeline_fusion(scenes, asr_segments, silence_periods):
     """Fuse VLM scenes, ASR dialogue and quiet narration slots on one timeline."""
     fusion = []
-    quiet_windows = [w for w in silence_periods or [] if not w.get("has_speech", False)]
+    quiet_windows = [w for w in silence_periods or [] if _silence_window_is_usable_quiet(w)]
     for scene in scenes or []:
         try:
             start = float(scene.get("start", 0))
@@ -872,7 +909,7 @@ def _format_background_research(research, limit=1800):
     """Render background_research.json into a bounded Story-context brief section."""
     if not isinstance(research, dict) or not research:
         return []
-    lines = ["## Story context (from background_research.json)", ""]
+    lines = ["## Story context (from background_research.json)", "", "Research is context_only: use it for aliases/names/world terms and weak background only; do NOT reveal future plot or upgrade research-only relationships/causes into current on-screen facts without visual/ASR support.", ""]
     for key, label in (
         ("synopsis", "Synopsis"),
         ("worldbuilding", "Worldbuilding"),
@@ -1670,9 +1707,35 @@ def _format_output_clip_list(work_dir):
         except (TypeError, ValueError):
             continue
         reason = str(c.get("reason", "")).strip()
-        out.append(f"- output {os_:.1f}–{oe:.1f}s ← source {ss:.1f}–{se:.1f}s" + (f" — {reason}" if reason else ""))
+        source_id = c.get("source_id", c.get("source", "0"))
+        clip_id = c.get("id", c.get("clip_id", "?"))
+        out.append(f"- OUTPUT {os_:.1f}–{oe:.1f}s ← SOURCE[{source_id}] {ss:.1f}–{se:.1f}s (clip_id={clip_id})" + (f" — {reason}" if reason else ""))
     out.append("")
     return out if len(out) > 2 else []
+
+
+def _deslop_qc_owner():
+    skill_name = Path(__file__).resolve().parents[1].name
+    script_name = Path(__file__).stem
+    return f"{skill_name}.{script_name}"
+
+
+def _write_deslop_qc_requirements(work_dir, *, owner):
+    """Write the stable deslop QC contract consumed by deslop_qc.py."""
+    payload = {
+        "schema_version": 1,
+        "owner": owner,
+        "style_card_required": True,
+        "packaging_plan_expected": True,
+        "deslop_qc": {
+            "report_only": True,
+            "aigc_detector": False,
+            "auto_rewrite": False,
+        },
+    }
+    path = Path(work_dir) / "deslop_qc_requirements.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
 
 
 def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_duration, work_dir, style="纪录片", *, mimo_overview_enabled=None, mimo_overview_video_path=None):
@@ -1717,7 +1780,8 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         "Write the required JSON artifact(s) manually from the analysis files in this work directory.",
         "The CLI will not generate final narration text; it will only validate timing, run TTS, and assemble the video.",
         "",
-        f"- Style: {style}",
+        f"- Style (--style, freeform verbatim guidance): {style}",
+        "- Do not translate `--style` into a preset, enum, switch, or fallback ladder; synthesize the voice from this freeform text plus evidence.",
         f"- Edit mode: {edit_mode}",
         f"- Source video duration: {video_duration:.1f}s",
         f"- Target duration (cut mode): {target_duration}",
@@ -1754,6 +1818,13 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
     lines.extend([
         f"- Default pause between beats: {target_pause_ms}ms",
         f"- Context: {CONFIG.get('context_info') or '(none)'}",
+        "",
+        "## Shared expression / packaging artifacts",
+        "",
+        "Before final narration, author `style_card.json` and `packaging_plan.json` from `--style`, `--context`, source materials, ASR, scene evidence, and user preference signals.",
+        "- `style_card.json` owns freeform voice, pacing, payoff shape, subtitle/read posture, and evidence-backed expression intent. It is not a preset enum, fixed taxonomy, title plan, cover plan, or packaging promise.",
+        "- `packaging_plan.json` owns title, cover-frame/visual hook, first-line, viewer promise, packaging metadata, and packaging-to-story alignment. It must not override `style_card.json` voice or pacing policy.",
+        "- `deslop_qc.json` is deterministic report-only tool QC: do not hand-author it, do not treat it as an AIGC detector, and do not auto-rewrite from it. Corrections remain human/agent rewrite work guided by objective blockers and advisory readability signals.",
         "",
     ])
 
@@ -1812,7 +1883,9 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
                 "- Keep clips that carry causality, a reveal, a decision, or a strong emotional beat; cut establishing/transition/repeated/static shots.",
                 "- SKIP non-story footage: 片头/片尾 credits, 演职员表, 广告/赞助, 台标/水印 stretches, and any scene the analysis marks rejected/无法描述 (often a watermark) — they look bad on screen and add nothing.",
                 "- Prefer scenes that have a real visual description in the guide; favor faces, action and dialogue over scenery.",
-                "- Clip length ~3–15s; vary the pace; order clips in story order so the cut reads as a coherent story.",
+                "- Clip order is the story spine, not unordered highlights: you may use 0–1 optional cold-open/high-impact clip first, then return to the coherent main arc (setup → turn → payoff) and escalate to the ending.",
+                "- Use the `reason` field as craft intent where useful: `cold_open`, `setup`, `turn`, or `payoff` plus a short concrete why. Example: `cold_open: trial explosion reveals the stakes`.",
+                "- Clip length ~3–15s; vary the pace; after any cold-open, order clips by causality so the cut reads as one coherent story, not a flat highlights reel.",
                 "- End a clip on a COMPLETE spoken line — set the clip end at or just after an ASR line-end (or inside the quiet window that follows it), never mid-sentence, so the original dialogue is never chopped off. Use the ASR [start–end] times + Quiet windows below as safe cut points; the CLI also snaps clip ends to the nearest line-end as a safety net.",
                 "",
                 "### clip_plan.json shape (original source timestamps)",
@@ -1843,7 +1916,7 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
                 "block's text, then leave a few-second gap before the next block for an original-audio moment.",
                 "```json",
                 "[",
-                "  {\"start\": 2.0, \"end\": 13.0, \"narration\": \"范闲表面是个闲散少爷，背地里却握着监察院的暗线。这一次，他要赌上身家去查母亲的死。\", \"pause_after_ms\": 250, \"overlaps_speech\": true, \"emotion\": \"紧张\"}",
+                "  {\"start\": 2.0, \"end\": 13.0, \"narration\": \"【主角】表面只是旁观者，暗中却握着关键线索。这一次，TA要赌上全部去查清旧案真相。\", \"pause_after_ms\": 250, \"overlaps_speech\": true, \"emotion\": \"紧张\"}",
                 "]",
                 "```",
             ])
@@ -1855,7 +1928,7 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
             "block's text, then leave a few-second gap before the next block for an original-audio moment.",
             "```json",
             "[",
-            "  {\"start\": 5.0, \"end\": 16.0, \"narration\": \"范闲表面是个闲散少爷，背地里却握着监察院的暗线。这一次，他要赌上身家去查母亲的死。\", \"pause_after_ms\": 250, \"overlaps_speech\": true, \"emotion\": \"平静\"}",
+            "  {\"start\": 5.0, \"end\": 16.0, \"narration\": \"【主角】表面只是旁观者，暗中却握着关键线索。这一次，TA要赌上全部去查清旧案真相。\", \"pause_after_ms\": 250, \"overlaps_speech\": true, \"emotion\": \"平静\"}",
             "]",
             "```",
         ])
@@ -1907,7 +1980,7 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         "",
         "看图说话 (bad) vs recap (good) — same shot:",
         "- ✗ \"一个蒙眼的男人抱着一个篮子走在雨里。\"  (just describes the frame)",
-        "- ✓ \"杀手五竹本可以一走了之，却为了一个不是自己孩子的婴儿，把整座京都的追兵引向自己。\"  (who, why, stakes)",
+        "- ✓ \"护送者本可以独自离开，却为了保护那个孩子，主动把追兵引向自己。\"  (who, why, stakes)",
         "",
         "## Scene timing guide",
         "",
@@ -1937,5 +2010,6 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
 
     brief_path = Path(work_dir) / "agent_narration_brief.md"
     brief_path.write_text("\n".join(lines), encoding="utf-8")
+    _write_deslop_qc_requirements(work_dir, owner=_deslop_qc_owner())
     log(f"已写入 Agent 解说写作 brief: {brief_path}")
     return brief_path

@@ -7,11 +7,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from lib import CONFIG
-from lib import log, mimo_tts_api_call, get_video_duration
-from lib import _truncate_at_sentence, stable_hash, file_fingerprint
+from lib import log, mimo_tts_api_call, get_video_duration, narration_tempo_budget
+from lib import _truncate_at_sentence, _text_char_count, stable_hash, file_fingerprint
 
 SUPPORTED_TTS_ENGINES = {"mimo-tts"}
-TTS_CACHE_VERSION = 1
+SEGMENT_AUDIO_SCHEMA_VERSION = 1
+TTS_CACHE_VERSION = 2
 
 
 def _parse_rate_offset(rate_str):
@@ -95,33 +96,59 @@ def _synthesize_segment(i, seg, narration, tts_dir, engine):
     seg_slot = seg["end"] - seg["start"]
     seg_pause = seg.get("pause_after_ms", CONFIG.get("breath_ms", 250)) / 1000
     available = max(0.5, seg_slot - seg_pause)
-    # assemble speeds every segment up by narration_speed (global atempo) BEFORE placement, so the
-    # slot actually holds raw_dur / narration_speed; fold that in (plus the local per-segment adjust
-    # headroom atempo_max) or a 1.3x-authored BLOCK gets needlessly truncated into a clipped fragment.
-    narration_speed = float(CONFIG.get("narration_speed", 1.0) or 1.0)
-    raw_budget = available * narration_speed * 1.2
+    rate_offset = _parse_rate_offset(rate)
+    budget = narration_tempo_budget(rate_offset)
+    raw_budget = available * budget["max_raw_duration_factor"]
+    truncated = False
+    truncate_reason = "none"
     if dur > raw_budget and len(text) > 5:
-        chars_per_sec = len(text) / dur if dur > 0 else 3.0
+        chars_per_sec = _text_char_count(text) / dur if dur > 0 else 3.0
         target_chars = max(5, int(raw_budget * chars_per_sec) - 1)
-        truncated = _truncate_at_sentence(text, target_chars)
-        if truncated and len(truncated) >= 5 and truncated != text:
-            log(f"  段 {i+1}: 解说超出片段时长，自动截断 {len(text)}→{len(truncated)} 字以适配（建议在解说里改写得更短）")
-            text = truncated
+        shortened = _truncate_at_sentence(text, target_chars)
+        if shortened and len(shortened) >= 5 and shortened != text:
+            log(f"  段 {i+1}: 解说超出片段时长，按累计语速预算句界缩短 {len(text)}→{len(shortened)} 字以适配（建议在解说里改写得更短）")
+            text = shortened
+            truncated = True
+            truncate_reason = "sentence_boundary"
             _run_tts_engine(engine, text, output_wav, rate=rate, pitch=pitch, emotion=seg.get("emotion"))
             dur = _get_audio_duration(output_wav)
 
-    _write_tts_segment_cache(output_wav, cache_key, text, dur, _parse_rate_offset(rate))
-    return _build_tts_segment_result(i, seg, text, output_wav, dur, _parse_rate_offset(rate))
+    norm_meta = _maybe_normalize_tts_wav(output_wav)
+    if norm_meta:
+        dur = _get_audio_duration(output_wav)
+    _write_tts_segment_cache(output_wav, cache_key, text, dur, rate_offset,
+                             truncated, truncate_reason, norm_meta)
+    result = _build_tts_segment_result(
+        i, seg, text, output_wav, dur, rate_offset, truncated, truncate_reason, norm_meta)
+    return result
 
 
-def _build_tts_segment_result(index, seg, text, output_wav, duration, rate_offset):
+def _build_tts_segment_result(index, seg, text, output_wav, duration, rate_offset,
+                              truncated=False, truncate_reason="none", norm_meta=None):
+    budget = narration_tempo_budget(rate_offset)
+    authored_text = _clean_narration_text(str(seg.get("narration", text)))
+    resolved_truncated = bool(truncated) or (text != authored_text)
     result = {
+        "segment_audio_schema_version": SEGMENT_AUDIO_SCHEMA_VERSION,
         "index": index,
         "start": seg["start"],
         "end": seg["end"],
-        "narration": text,
+        "narration": authored_text,
+        "spoken_text": text,
+        "truncated": resolved_truncated,
+        "truncate_reason": (truncate_reason if truncate_reason != "none" else "sentence_boundary") if resolved_truncated else "none",
+        "fit_status": "pending_assembly",
         "audio_path": str(output_wav),
         "audio_duration": duration,
+        "placed_audio_duration": None,
+        "actual_place_start": None,
+        "actual_place_end": None,
+        "global_narration_speed": budget["global_narration_speed"],
+        "segment_tempo_factor": 1.0,
+        "effective_tempo": budget["global_narration_speed"] * budget["tts_rate_factor"],
+        "rms_dbfs_before": (norm_meta or {}).get("rms_dbfs_before"),
+        "rms_dbfs_after": (norm_meta or {}).get("rms_dbfs_after"),
+        "peak_after": (norm_meta or {}).get("peak_after"),
         "tts_rate_offset": rate_offset,
         "pause_after_ms": seg.get("pause_after_ms", CONFIG.get("breath_ms", 250)),
         "overlaps_speech": seg.get("overlaps_speech", True),
@@ -278,6 +305,93 @@ def _cleanup_partial_tts_outputs(output_wav):
             pass
 
 
+def _normalize_tts_wav_rms(input_wav, output_wav, *, target_rms_dbfs=-20.0, peak_limit=0.98):
+    """Normalize a mono/stereo 16-bit WAV to a target RMS with peak guard.
+
+    This helper is intentionally dependency-free so QC/assembly can reuse the
+    returned metadata even when normalization is applied in a later lane.
+    """
+    import math
+    import wave
+
+    input_wav = Path(input_wav)
+    output_wav = Path(output_wav)
+    with wave.open(str(input_wav), "rb") as wf:
+        channels = wf.getnchannels()
+        sampwidth = wf.getsampwidth()
+        framerate = wf.getframerate()
+        frames = wf.getnframes()
+        data = wf.readframes(frames)
+    if sampwidth != 2:
+        raise ValueError(f"仅支持 16-bit PCM WAV: {input_wav}")
+
+    samples = [int.from_bytes(data[i:i + 2], "little", signed=True) for i in range(0, len(data), 2)]
+    if not samples:
+        output_wav.write_bytes(input_wav.read_bytes())
+        return {
+            "rms_dbfs_before": None,
+            "rms_dbfs_after": None,
+            "peak_after": 0.0,
+            "gain_db": 0.0,
+        }
+    rms = math.sqrt(sum(s * s for s in samples) / len(samples))
+    peak = max(abs(s) for s in samples) / 32768.0
+    rms_dbfs_before = 20 * math.log10(max(rms, 1e-9) / 32768.0)
+    target_linear = 10 ** (float(target_rms_dbfs) / 20.0) * 32768.0
+    gain = target_linear / max(rms, 1e-9)
+    if peak > 0:
+        gain = min(gain, float(peak_limit) / peak)
+    normalized = []
+    for sample in samples:
+        value = int(round(sample * gain))
+        value = max(-32768, min(32767, value))
+        normalized.append(value.to_bytes(2, "little", signed=True))
+    out_data = b"".join(normalized)
+    with wave.open(str(output_wav), "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(sampwidth)
+        wf.setframerate(framerate)
+        wf.writeframes(out_data)
+
+    out_samples = [int.from_bytes(out_data[i:i + 2], "little", signed=True) for i in range(0, len(out_data), 2)]
+    out_rms = math.sqrt(sum(s * s for s in out_samples) / len(out_samples))
+    out_peak = max(abs(s) for s in out_samples) / 32768.0
+    return {
+        "rms_dbfs_before": rms_dbfs_before,
+        "rms_dbfs_after": 20 * math.log10(max(out_rms, 1e-9) / 32768.0),
+        "peak_after": out_peak,
+        "gain_db": 20 * math.log10(max(gain, 1e-9)),
+    }
+
+
+def _maybe_normalize_tts_wav(output_wav):
+    """Normalize a synthesized TTS block in-place when possible.
+
+    Unit tests often stub TTS with text bytes rather than real WAV. In that case
+    normalization is skipped safely; real MiMo WAV output gets RMS/peak metadata.
+    """
+    if not CONFIG.get("tts_segment_normalize", True):
+        return None
+    output_wav = Path(output_wav)
+    tmp = output_wav.with_name(f"{output_wav.stem}_norm{output_wav.suffix}")
+    try:
+        meta = _normalize_tts_wav_rms(
+            output_wav,
+            tmp,
+            target_rms_dbfs=float(CONFIG.get("tts_segment_target_rms_dbfs", -20.0) or -20.0),
+            peak_limit=float(CONFIG.get("tts_segment_peak_limit", 0.98) or 0.98),
+        )
+        os.replace(tmp, output_wav)
+        return meta
+    except Exception as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        log(f"  TTS RMS 归一跳过: {exc}")
+        return None
+
+
 def _tts_segment_cache_path(output_wav):
     return Path(str(output_wav) + ".cache.json")
 
@@ -304,8 +418,12 @@ def _reuse_tts_segment_cache(index, seg, output_wav, source_text, rate, cache_ke
         return None
     spoken_text = str(cached.get("spoken_text") or source_text)
     rate_offset = float(cached.get("tts_rate_offset", _parse_rate_offset(rate)) or 0.0)
+    truncated = bool(cached.get("truncated", False))
+    truncate_reason = str(cached.get("truncate_reason") or ("sentence_boundary" if truncated else "none"))
+    norm_meta = cached.get("normalization") if isinstance(cached.get("normalization"), dict) else None
     log(f"  段 {index+1}: 复用已有 ({existing_dur:.1f}s)")
-    return _build_tts_segment_result(index, seg, spoken_text, output_wav, existing_dur, rate_offset)
+    return _build_tts_segment_result(index, seg, spoken_text, output_wav, existing_dur,
+                                     rate_offset, truncated, truncate_reason, norm_meta)
 
 
 def _tts_segment_cache_key(engine, index, seg, source_text, rate, pitch):
@@ -353,7 +471,8 @@ def _load_tts_segment_cache(output_wav, cache_key):
     return data
 
 
-def _write_tts_segment_cache(output_wav, cache_key, spoken_text, duration, rate_offset):
+def _write_tts_segment_cache(output_wav, cache_key, spoken_text, duration, rate_offset,
+                             truncated=False, truncate_reason="none", norm_meta=None):
     """Persist non-secret provenance for safe per-segment TTS reuse."""
     try:
         import json
@@ -365,6 +484,9 @@ def _write_tts_segment_cache(output_wav, cache_key, spoken_text, duration, rate_
                 "spoken_text": spoken_text,
                 "audio_duration": duration,
                 "tts_rate_offset": rate_offset,
+                "truncated": bool(truncated),
+                "truncate_reason": truncate_reason if truncated else "none",
+                "normalization": norm_meta or None,
             }, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -405,6 +527,12 @@ def tts_settings_fingerprint(engine=None):
         "mimo_tts_voice": CONFIG.get("mimo_tts_voice"),
         "mimo_tts_style": CONFIG.get("mimo_tts_style"),
         "narration_speed": float(CONFIG.get("narration_speed", 1.0) or 1.0),
+        "narration_cumulative_tempo_max": float(CONFIG.get("narration_cumulative_tempo_max", 1.35) or 1.35),
+        "narration_cumulative_tempo_hard_max": float(CONFIG.get("narration_cumulative_tempo_hard_max", 1.40) or 1.40),
+        "tts_segment_tempo_max": float(CONFIG.get("tts_segment_tempo_max", 1.20) or 1.20),
+        "tts_segment_normalize": bool(CONFIG.get("tts_segment_normalize", True)),
+        "tts_segment_target_rms_dbfs": float(CONFIG.get("tts_segment_target_rms_dbfs", -20.0) or -20.0),
+        "tts_segment_peak_limit": float(CONFIG.get("tts_segment_peak_limit", 0.98) or 0.98),
     }
 
 

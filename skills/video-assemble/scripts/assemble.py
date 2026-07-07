@@ -6,11 +6,16 @@ import wave
 from pathlib import Path
 
 from lib import CONFIG
-from lib import log, run_cmd, get_video_duration
+from lib import log, run_cmd, get_video_duration, narration_tempo_budget
 from timeline import build_timeline, save_timeline
+from audio_automation import coalesce_duck_windows, ducking_expression, duck_ramp_expression
 
-SUBTITLE_RENDER_VERSION = 5  # bumped: subtitle style now scales to the probed canvas (fixes 竖屏 distortion)
+SUBTITLE_RENDER_VERSION = 6  # bumped: explicit visual QC/mask/overlay policy joins cache fingerprint
 ASSEMBLY_MANIFEST = "assembly_manifest.json"
+ASSEMBLY_QC = "assembly_qc.json"
+VISUAL_QC = "visual_qc.json"
+VISUAL_OVERLAYS = "visual_overlays.json"
+SEGMENT_AUDIO_SCHEMA_VERSION = 1
 # The default subtitle metrics (font/margins/PlayRes) were tuned in this reference space.
 # For any other canvas we scale them to it so glyphs are never stretched (PlayRes aspect ==
 # frame aspect) and stay proportional; a 16:9 source reproduces the legacy look exactly.
@@ -18,6 +23,17 @@ SUBTITLE_STYLE_REF_W = 1280
 SUBTITLE_STYLE_REF_H = 720
 _SUBTITLE_TERMINAL_PUNCTUATION = "。！？!?…."
 _SUBTITLE_CLOSING_QUOTES = "」』”’）)]】》〉\"'"
+_VISUAL_DELIVERY_FORBIDDEN_KEYS = {
+    "video_encode_passes",
+    "reencode_reason",
+    "audio_sample_rate",
+    "final_compat_notes",
+    "double_encode",
+    "delivery_compatibility",
+    "loudness_mode",
+    "loudnorm_measurement",
+}
+_SUPPORTED_VISUAL_OVERLAY_TYPES = {"top_title", "inline_label_or_callout"}
 
 
 def _stable_json_dumps(value):
@@ -72,6 +88,8 @@ def _assembly_manifest_payload(input_video, tts_segments, work_dir, output_path,
     input_video = Path(input_video)
     output_path = Path(output_path)
     source_video, source_video_fingerprint = _source_video_identity()
+    qc_path = Path(work_dir) / ASSEMBLY_QC
+    qc = _load_work_json(work_dir, ASSEMBLY_QC) if qc_path.exists() else None
     payload = {
         "schema_version": 2,
         "input_video": str(input_video.resolve()),
@@ -81,6 +99,38 @@ def _assembly_manifest_payload(input_video, tts_segments, work_dir, output_path,
         "tts_segments": len(tts_segments or []),
         "assembly_settings": assembly_settings_fingerprint(work_dir),
         "output_path": str(output_path.resolve()),
+        "segment_audio_schema_version": SEGMENT_AUDIO_SCHEMA_VERSION,
+        "qc_path": str(qc_path.resolve()) if qc_path.exists() else None,
+        "qc_verdict": qc.get("verdict") if isinstance(qc, dict) else None,
+        "qc_blocking_codes": qc.get("blocking_codes", []) if isinstance(qc, dict) else [],
+        # The settings fingerprint records the configured/fallback loudness policy; these QC
+        # fields record what the just-finished render actually used after the loudnorm probe.
+        "qc_loudness_mode": qc.get("loudness_mode") if isinstance(qc, dict) else None,
+        "qc_loudnorm_measurement": qc.get("loudnorm_measurement") if isinstance(qc, dict) else None,
+        "audio_segments": [
+            {
+                "index": seg.get("index"),
+                "segment_audio_schema_version": seg.get("segment_audio_schema_version", SEGMENT_AUDIO_SCHEMA_VERSION),
+                "narration": seg.get("narration", ""),
+                "spoken_text": seg.get("spoken_text") or seg.get("narration", ""),
+                "truncated": bool(seg.get("truncated", False)),
+                "truncate_reason": seg.get("truncate_reason", "none"),
+                "fit_status": seg.get("fit_status"),
+                "blocking": bool(seg.get("blocking", False)),
+                "audio_duration": seg.get("audio_duration"),
+                "placed_audio_duration": seg.get("placed_audio_duration"),
+                "actual_place_start": seg.get("actual_place_start"),
+                "actual_place_end": seg.get("actual_place_end"),
+                "global_narration_speed": seg.get("global_narration_speed"),
+                "segment_tempo_factor": seg.get("segment_tempo_factor"),
+                "effective_tempo": seg.get("effective_tempo"),
+                "rms_dbfs_before": seg.get("rms_dbfs_before"),
+                "rms_dbfs_after": seg.get("rms_dbfs_after"),
+                "peak_after": seg.get("peak_after"),
+            }
+            for seg in (tts_segments or [])
+            if isinstance(seg, dict)
+        ],
     }
     if final_output is not None:
         payload["final_output"] = str(Path(final_output).resolve())
@@ -94,6 +144,186 @@ def _write_assembly_manifest(work_dir, manifest):
     path = Path(work_dir) / ASSEMBLY_MANIFEST
     path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def _visual_qc_rollup(visual_qc):
+    if not isinstance(visual_qc, dict):
+        return {
+            "present": False,
+            "verdict": "MISSING",
+            "blocking": True,
+            "blocking_codes": ["missing_visual_qc"],
+            "summary": {},
+        }
+    subtitles = visual_qc.get("subtitles") or visual_qc.get("subtitle") or {}
+    overlays = visual_qc.get("overlays") or visual_qc.get("overlay") or {}
+    return {
+        "present": True,
+        "artifact": visual_qc.get("artifact", VISUAL_QC),
+        "verdict": visual_qc.get("verdict"),
+        "blocking": bool(visual_qc.get("blocking", False)),
+        "blocking_codes": list(visual_qc.get("blocking_codes") or []),
+        "summary": visual_qc.get("summary", {}),
+        "geometry": visual_qc.get("geometry", {}),
+        "subtitles": {
+            "entries": subtitles.get("entries", 0),
+            "multi_line": subtitles.get("multi_line", False),
+            "overflow": subtitles.get("overflow", False),
+            "safe_area": subtitles.get("safe_area", {}),
+        },
+        "subtitle": subtitles,
+        "mask": visual_qc.get("mask", {}),
+        "overlays": {
+            "present": overlays.get("present", bool(overlays.get("items"))),
+            "rendered": overlays.get("rendered", len(overlays.get("items", [])) if isinstance(overlays.get("items"), list) else 0),
+            "unsupported": overlays.get("unsupported", []),
+            "overflow": overlays.get("overflow", []),
+        },
+        "overlay": overlays,
+    }
+
+
+def _build_assembly_qc(tts_segments, video_duration, *, output_path=None,
+                       source_has_audio=None, loudness_mode=None, loudnorm_measurement=None,
+                       visual_qc=None, render_delivery=None, delivery_qc=None):
+    """Machine-readable assembly release gate.
+
+    Visual facts are rolled up from visual_qc.json. Delivery/render facts live here
+    (or render/delivery QC in future), never in visual_qc.json.
+    """
+    hard_max = float(CONFIG.get("narration_cumulative_tempo_hard_max", 1.40) or 1.40)
+    segments = [s for s in (tts_segments or []) if isinstance(s, dict)]
+    no_safe = [
+        int(s.get("index", i))
+        for i, s in enumerate(segments)
+        if s.get("fit_status") == "no_safe_fit"
+        or s.get("truncate_reason") in {"no_safe_boundary", "no_room"}
+        or bool(s.get("blocking", False))
+    ]
+    skipped = [
+        int(s.get("index", i))
+        for i, s in enumerate(segments)
+        if s.get("fit_status") == "skipped"
+    ]
+    fit_failed = [
+        int(s.get("index", i))
+        for i, s in enumerate(segments)
+        if s.get("fit_status") == "speed_adjust_failed"
+    ]
+    tempo_exceeded = []
+    max_effective = 0.0
+    for i, s in enumerate(segments):
+        try:
+            eff = float(s.get("effective_tempo", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            eff = 0.0
+        max_effective = max(max_effective, eff)
+        if eff > hard_max + 1e-6:
+            tempo_exceeded.append(int(s.get("index", i)))
+
+    placed = [
+        float(s.get("placed_audio_duration", 0.0) or 0.0)
+        for s in segments
+        if s.get("placed_audio_duration") is not None
+    ]
+    blocking_codes = []
+    if not segments:
+        blocking_codes.append("missing_narration")
+    if skipped:
+        blocking_codes.append("skipped_segments")
+    if fit_failed:
+        blocking_codes.append("fit_failed")
+    if no_safe:
+        blocking_codes.append("no_safe_fit")
+    if tempo_exceeded:
+        blocking_codes.append("effective_tempo_exceeded")
+    if placed and max(placed) <= 0.0 and not no_safe:
+        blocking_codes.append("empty_narration")
+    visual_rollup = (
+        _visual_qc_rollup(visual_qc)
+        if visual_qc is not None
+        else {"present": False, "verdict": "NOT_RUN", "blocking": False, "blocking_codes": [], "summary": {}}
+    )
+    if visual_rollup.get("blocking"):
+        blocking_codes.append("visual_qc_failed")
+    if source_has_audio is False:
+        # Not blocking: assemble can synthesize a silent original track.
+        source_audio = "synthetic_silence"
+    elif source_has_audio is True:
+        source_audio = "present"
+    else:
+        source_audio = "unknown"
+
+    output = {}
+    if output_path is not None:
+        output_path = Path(output_path)
+        output = {
+            "path": str(output_path),
+            "exists": output_path.exists(),
+            "bytes": output_path.stat().st_size if output_path.exists() else 0,
+        }
+        if output_path.exists() and output["bytes"] <= 0:
+            blocking_codes.append("empty_output")
+
+    render_delivery = render_delivery or delivery_qc or {}
+    qc_payload = {
+        "schema_version": 1,
+        "artifact": ASSEMBLY_QC,
+        "verdict": "FAIL" if blocking_codes else "PASS",
+        "blocking": bool(blocking_codes),
+        "blocking_codes": blocking_codes,
+        "duration": round(float(video_duration or 0.0), 4),
+        "source_audio": source_audio,
+        "loudness_mode": loudness_mode or _loudness_mode(loudnorm_measurement),
+        "loudnorm_measurement": loudnorm_measurement,
+        "release_gate": {
+            "verdict": "FAIL" if blocking_codes else "PASS",
+            "visual_qc": visual_rollup.get("verdict"),
+            "delivery_qc": "PASS",
+            "audio_qc": "FAIL" if any(
+                c in blocking_codes
+                for c in ("missing_narration", "skipped_segments", "fit_failed", "no_safe_fit", "effective_tempo_exceeded", "empty_narration")
+            ) else "PASS",
+        },
+        "visual_qc": visual_rollup,
+        "delivery_qc": {
+            "video_encode_passes": render_delivery.get("video_encode_passes"),
+            "reencode_reason": render_delivery.get("reencode_reason"),
+            "audio_sample_rate": render_delivery.get("audio_sample_rate"),
+            "final_compat_notes": render_delivery.get("final_compat_notes", []),
+        },
+        "summary": {
+            "segments": len(segments),
+            "placed_segments": sum(1 for x in placed if x > 0.0),
+            "skipped_segments": skipped,
+            "fit_failed_segments": fit_failed,
+            "no_safe_fit_segments": no_safe,
+            "tempo_exceeded_segments": tempo_exceeded,
+            "max_effective_tempo": round(max_effective, 4),
+            "truncated_segments": [
+                int(s.get("index", i))
+                for i, s in enumerate(segments)
+                if bool(s.get("truncated", False))
+            ],
+        },
+        "output": output,
+    }
+    qc_payload["visual_rollup"] = visual_rollup
+    qc_payload["delivery_rollup"] = qc_payload["delivery_qc"]
+    return qc_payload
+
+
+def _write_assembly_qc(work_dir, qc):
+    path = Path(work_dir) / ASSEMBLY_QC
+    path.write_text(json.dumps(qc, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _enforce_assembly_qc(work_dir, qc):
+    _write_assembly_qc(work_dir, qc)
+    if qc.get("blocking"):
+        codes = ", ".join(qc.get("blocking_codes", []))
+        raise RuntimeError(f"声音组装 QC 失败: {codes}；详见 {Path(work_dir) / ASSEMBLY_QC}")
 
 
 def _resolve_final_output(base, stem):
@@ -119,26 +349,142 @@ def _load_cut_timeline_plan(work_dir):
     return raw_plan
 
 
+def _ratio_to_float(value, default=1.0):
+    value = str(value or "").strip()
+    if not value or value in {"0:1", "0/1", "N/A"}:
+        return default
+    try:
+        if ":" in value:
+            num, den = value.split(":", 1)
+        elif "/" in value:
+            num, den = value.split("/", 1)
+        else:
+            return float(value)
+        den_f = float(den or 0)
+        return float(num) / den_f if den_f else default
+    except (TypeError, ValueError, ZeroDivisionError):
+        return default
+
+
+def _fps_from_rate(value, default=30.0):
+    try:
+        if "/" in str(value):
+            num, den = str(value).split("/", 1)
+            den_f = float(den or 0)
+            return round(float(num) / den_f, 3) if den_f else default
+        return round(float(value), 3)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return default
+
+
+def _stream_rotation(stream):
+    """Extract rotation from tags or side_data_list in ffprobe JSON."""
+    if not isinstance(stream, dict):
+        return 0
+    for source in (
+        (stream.get("tags") or {}).get("rotate"),
+        stream.get("rotation"),
+    ):
+        if source not in (None, ""):
+            try:
+                return int(round(float(source))) % 360
+            except (TypeError, ValueError):
+                pass
+    for item in stream.get("side_data_list") or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("rotation", "displaymatrix"):
+            if item.get(key) not in (None, ""):
+                try:
+                    return int(round(float(item.get(key)))) % 360
+                except (TypeError, ValueError):
+                    pass
+    return 0
+
+
+def _canvas_from_stream(stream, *, default_width=1280, default_height=720, default_fps=30.0):
+    storage_w = int(stream.get("width") or default_width)
+    storage_h = int(stream.get("height") or default_height)
+    fps = _fps_from_rate(stream.get("r_frame_rate") or stream.get("avg_frame_rate"), default_fps)
+    sar_text = stream.get("sample_aspect_ratio") or "1:1"
+    dar_text = stream.get("display_aspect_ratio") or ""
+    sar = _ratio_to_float(sar_text, 1.0)
+    rotation = _stream_rotation(stream)
+
+    display_w = max(1, int(round(storage_w * sar)))
+    display_h = max(1, storage_h)
+    if dar_text and dar_text not in {"0:1", "N/A"}:
+        dar = _ratio_to_float(dar_text, 0.0)
+        # ffprobe sources are not consistent: some report DAR before rotation
+        # (landscape value > 1 for a 90° stream), while simple line mocks and
+        # some containers report the already-rotated portrait DAR (< 1). Only
+        # apply DAR before swapping when it describes the stored orientation.
+        if dar > 0 and not (rotation in {90, 270} and dar < 1.0):
+            # Preserve height and adjust width. This keeps legacy square-pixel landscape
+            # byte-identical while honoring non-square pixel DAR metadata.
+            display_w = max(1, int(round(display_h * dar)))
+    if rotation in {90, 270}:
+        display_w, display_h = display_h, display_w
+
+    return {
+        "width": display_w,
+        "height": display_h,
+        "fps": fps,
+        "storage_width": storage_w,
+        "storage_height": storage_h,
+        "rotation": rotation,
+        "sample_aspect_ratio": sar_text,
+        "display_aspect_ratio": dar_text or f"{display_w}:{display_h}",
+        "sar": sar_text,
+        "dar": dar_text or f"{display_w}:{display_h}",
+        "display_width": display_w,
+        "display_height": display_h,
+    }
+
+
 def _probe_canvas(video_path):
-    """Return {width, height, fps} for a video via ffprobe (best-effort defaults)."""
-    res = run_cmd(["ffprobe", "-v", "error", "-select_streams", "v:0",
-                   "-show_entries", "stream=width,height,r_frame_rate",
-                   "-of", "default=nw=1:nk=0", str(video_path)])
-    width, height, fps = 1280, 720, 30.0
+    """Return rotation/SAR/DAR-aware canvas facts for a video.
+
+    ``width``/``height`` are the display canvas used by subtitle/overlay geometry.
+    For legacy square-pixel landscape sources, these remain the raw storage dimensions.
+    Extra storage/rotation/SAR/DAR fields are visual QC facts and are safe for callers
+    that only consume width/height/fps.
+    """
+    defaults = {"width": 1280, "height": 720, "fps": 30.0}
+    res = run_cmd([
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries",
+        "stream=width,height,r_frame_rate,avg_frame_rate,sample_aspect_ratio,display_aspect_ratio:stream_tags=rotate:stream_side_data=rotation",
+        "-of", "json", str(video_path),
+    ])
     if res.returncode == 0:
-        for line in res.stdout.splitlines():
+        try:
+            data = json.loads(res.stdout or "{}")
+            stream = (data.get("streams") or [{}])[0]
+            if isinstance(stream, dict) and stream:
+                return _canvas_from_stream(stream)
+        except (ValueError, TypeError, KeyError):
+            pass
+        # Tests and older mocks may still feed default=nw=1:nk=0 style lines.
+        stream = {}
+        for line in (res.stdout or "").splitlines():
             line = line.strip()
-            if line.startswith("width="):
-                width = int(line.split("=", 1)[1] or width)
-            elif line.startswith("height="):
-                height = int(line.split("=", 1)[1] or height)
-            elif line.startswith("r_frame_rate="):
-                rate = line.split("=", 1)[1]
-                if "/" in rate:
-                    num, den = rate.split("/", 1)
-                    if float(den or 0):
-                        fps = round(float(num) / float(den), 3)
-    return {"width": width, "height": height, "fps": fps}
+            if not line or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            stream[key] = value
+        if stream:
+            return _canvas_from_stream(stream)
+    return {
+        **defaults,
+        "storage_width": defaults["width"],
+        "storage_height": defaults["height"],
+        "rotation": 0,
+        "sample_aspect_ratio": "1:1",
+        "display_aspect_ratio": "16:9",
+        "display_width": defaults["width"],
+        "display_height": defaults["height"],
+    }
 
 
 def _has_audio_stream(video_path):
@@ -374,30 +720,109 @@ def _has_user_subtitles(work_dir):
     )
 
 
+def _source_subtitle_mask_policy(work_dir=None):
+    """Explicit source-subtitle mask policy and trigger facts for visual QC/cache keys.
+
+    Older builds treated ``MASK_SOURCE_SUBTITLES=True`` as an ambient default black
+    band. The visual contract now requires an explicit policy, so a bare truthy
+    legacy flag is represented as ``legacy_implicit`` and blocks the visual gate
+    instead of silently masking picture information.
+    """
+    burn = bool(CONFIG.get("burn_subtitles", False))
+    raw_policy = str(CONFIG.get("source_subtitle_mask_policy", "") or "").strip().lower()
+    legacy_flag = bool(CONFIG.get("mask_source_subtitles", False))
+    allowed = {"off", "opt_in", "safe", "forced"}
+    declared = bool(CONFIG.get("source_subtitle_mask_policy_declared", False)) or raw_policy in {"opt_in", "safe", "forced"}
+    implicit = False
+    if legacy_flag and not declared:
+        raw_policy = "legacy_implicit"
+        implicit = True
+    elif not raw_policy:
+        raw_policy = "off"
+    elif raw_policy not in allowed:
+        implicit = True
+    user_subtitles = _has_user_subtitles(work_dir)
+    active = False
+    trigger = "policy_off"
+    reason = "source subtitle masking disabled by explicit policy"
+    if raw_policy == "off":
+        active = False
+    elif raw_policy in {"opt_in", "forced"}:
+        active = burn and legacy_flag
+        trigger = "burn_subtitles_and_legacy_mask_flag"
+        reason = "explicit policy permits masking only with burned recap subtitles"
+    elif raw_policy == "safe":
+        active = burn and (legacy_flag or user_subtitles)
+        trigger = "safe_policy_with_burned_subtitles"
+        reason = "safe policy masks only when recap subtitles are burned and an original-subtitle source is declared"
+    else:
+        active = False
+        trigger = "implicit_or_invalid_policy"
+        reason = "mask_source_subtitles requires explicit SOURCE_SUBTITLE_MASK_POLICY"
+    if not burn and active:
+        active = False
+        trigger = "burn_subtitles_disabled"
+        reason = "mask-only black band is forbidden without burned recap subtitles"
+    return {
+        "policy": raw_policy,
+        "declared": bool(declared and raw_policy in allowed),
+        "active": bool(active),
+        "scope": "bottom_source_subtitle_band" if active else "none",
+        "trigger": trigger,
+        "reason": reason,
+        "burn_subtitles": burn,
+        "legacy_mask_flag": legacy_flag,
+        "user_subtitles_present": user_subtitles,
+        "blocking": bool(implicit),
+    }
+
+
+def _source_subtitle_mask_policy_qc(canvas=None, work_dir=None):
+    """Compatibility/test helper: return the same explicit policy facts used by visual QC."""
+    return _source_subtitle_mask_policy(work_dir)
+
+
 def assembly_settings_fingerprint(work_dir=None):
     """Settings that affect the rendered video, used by pipeline resume cache. When work_dir is
     given, a user_subtitles presence flag is included so dropping in a user-subtitle file rebuilds
     the cached subtitles."""
     burn_subtitles = bool(CONFIG.get("burn_subtitles", False))
-    mask_source_subtitles = burn_subtitles and bool(CONFIG.get("mask_source_subtitles", False))
+    mask_policy = _source_subtitle_mask_policy(work_dir)
+    mask_source_subtitles = bool(mask_policy["active"])
     user_subtitles = _has_user_subtitles(work_dir)
+    overlay_path = Path(work_dir) / VISUAL_OVERLAYS if work_dir is not None else None
     fingerprint = {
         "version": SUBTITLE_RENDER_VERSION,
         "subtitle_text_normalize": SUBTITLE_TEXT_NORMALIZE_VERSION,
         "user_subtitles": user_subtitles,
         "burn_subtitles": burn_subtitles,
         "force_video_reencode": bool(CONFIG.get("force_video_reencode", False)),
+        "encode": {
+            "output_crf": CONFIG.get("output_crf", 18),
+            "output_preset": CONFIG.get("output_preset", "veryfast"),
+            "output_max_height": CONFIG.get("output_max_height", 0),
+        },
         "video_filters": {
             "mask_source_subtitles": mask_source_subtitles,
+            "source_subtitle_mask_policy": mask_policy["policy"],
+            "source_subtitle_mask_policy_declared": mask_policy["declared"],
+            "source_subtitle_mask_policy_trigger": mask_policy["trigger"],
             "source_subtitle_mask_ratio": (
                 CONFIG.get("source_subtitle_mask_ratio", 0.14) if mask_source_subtitles else None
             ),
+            "visual_overlays": {
+                "artifact": VISUAL_OVERLAYS,
+                "present": bool(overlay_path and overlay_path.exists()),
+                "fingerprint": _artifact_fingerprint(overlay_path) if overlay_path and overlay_path.exists() else None,
+            },
         },
         "narration_timing": {
             "delay_seconds": CONFIG.get("narration_delay_seconds", 1.5),
             "tail_pad_seconds": CONFIG.get("narration_tail_pad_seconds", 0.1),
             "fade_ms": CONFIG.get("fade_ms", 120),
             "narration_speed": CONFIG.get("narration_speed", 1.0),
+            "narration_cumulative_tempo_max": CONFIG.get("narration_cumulative_tempo_max", 1.35),
+            "tts_segment_tempo_max": CONFIG.get("tts_segment_tempo_max", 1.20),
         },
         "audio_mix": {
             "ducking_mode": CONFIG.get("ducking_mode", "fixed"),
@@ -414,7 +839,8 @@ def assembly_settings_fingerprint(work_dir=None):
             "ducking_release": CONFIG.get("ducking_release", 300),
             "ducking_level_sc": CONFIG.get("ducking_level_sc", 2.0),
             "ducking_makeup": CONFIG.get("ducking_makeup", 1.2),
-            "final_loudnorm": final_loudnorm_filter() or "off",
+            "final_loudnorm": final_loudnorm_filter(),
+            "loudness_mode": _loudness_mode(),
             "bgm_path": CONFIG.get("bgm_path", ""),
             "bgm_volume": CONFIG.get("bgm_volume", 0.18),
             "bgm_ducking_volume": CONFIG.get("bgm_ducking_volume", 0.10),
@@ -565,7 +991,7 @@ def _subtitle_entries(narration):
     for seg in narration:
         if not isinstance(seg, dict):
             continue
-        text = str(seg.get("narration", "")).strip()
+        text = str(seg.get("spoken_text") or seg.get("narration", "")).strip()
         if not text:
             continue
         try:
@@ -895,9 +1321,10 @@ def _original_gap_subtitle_entries(tts_segments, work_dir, video_duration):
     # the original dialogue shown, e.g. a clean/foreign source with mask OFF (no burned subs to
     # double). Without a user file we keep the mask requirement so we don't double the source's own
     # visible subs. subtitle_original_in_gaps is the explicit override either way.
+    mask_policy = _source_subtitle_mask_policy(work_dir)
     if not (CONFIG.get("burn_subtitles", False)
             and CONFIG.get("subtitle_original_in_gaps", True)
-            and (CONFIG.get("mask_source_subtitles", False) or _has_user_subtitles(work_dir))):
+            and (mask_policy.get("active") or _has_user_subtitles(work_dir))):
         return []
     gaps = _narration_gap_windows(tts_segments, video_duration)
     if not gaps:
@@ -1124,6 +1551,370 @@ def _generate_ass(narration, work_dir, video_duration=None, canvas=None):
     return ass_path
 
 
+def _visual_text_units(text):
+    """Approximate visual text width in em units for deterministic geometry QC."""
+    units = 0.0
+    for ch in str(text or ""):
+        if ch.isspace():
+            units += 0.35
+        elif ord(ch) < 128:
+            units += 0.56
+        else:
+            units += 1.0
+    return units
+
+
+def _subtitle_layout_qc(entries, canvas=None, style=None, safe_area=None):
+    """Machine-check subtitle safe-area/multiline/overflow facts for visual_qc.json."""
+    canvas = canvas or {}
+    style = style or _subtitle_style_config(canvas)
+    play_x = int(style.get("play_res_x") or canvas.get("width") or 1280)
+    play_y = int(style.get("play_res_y") or canvas.get("height") or 720)
+    margin_l = int(style.get("margin_l") or 0)
+    margin_r = int(style.get("margin_r") or 0)
+    margin_v = int(style.get("margin_v") or 0)
+    font_size = float(style.get("font_size") or 1)
+    max_lines = int(CONFIG.get("subtitle_max_lines", 2) or 2)
+    usable_w = max(1.0, play_x - margin_l - margin_r)
+    if safe_area:
+        safe_area = {
+            "x": int(safe_area.get("x", margin_l) or 0),
+            "y": int(safe_area.get("y", margin_v) or 0),
+            "width": int(safe_area.get("width", safe_area.get("w", play_x - margin_l - margin_r)) or 1),
+            "height": int(safe_area.get("height", safe_area.get("h", play_y - 2 * margin_v)) or 1),
+            "bottom_margin": margin_v,
+        }
+        usable_w = max(1.0, float(safe_area["width"]))
+    else:
+        safe_area = {
+        "x": margin_l,
+        "y": margin_v,
+        "width": max(1, play_x - margin_l - margin_r),
+        "height": max(1, play_y - 2 * margin_v),
+        "bottom_margin": margin_v,
+        }
+    line_h = font_size * 1.25
+    overflow_entries = []
+    violations = []
+    multi_line_entries = []
+    max_observed_lines = 0
+    entry_facts = []
+    for i, entry in enumerate(entries or []):
+        raw_text = _normalize_subtitle_text(entry.get("text", ""))
+        lines = [ln for ln in re.split(r"(?:\\N|\n)+", raw_text) if ln != ""]
+        if not lines:
+            lines = [""]
+        line_count = len(lines)
+        max_observed_lines = max(max_observed_lines, line_count)
+        widths = [_visual_text_units(line) * font_size for line in lines]
+        max_w = max(widths or [0.0])
+        band_h = line_count * line_h + float(style.get("outline", 0)) * 2 + float(style.get("shadow", 0))
+        overflow_reasons = []
+        if line_count > max_lines:
+            overflow_reasons.append("max_lines_exceeded")
+        if max_w > usable_w + 1e-6:
+            overflow_reasons.append("safe_width_exceeded")
+        if band_h > safe_area["height"] + 1e-6:
+            overflow_reasons.append("safe_height_exceeded")
+        fact = {
+            "index": i,
+            "start": round(float(entry.get("start", 0.0) or 0.0), 3),
+            "end": round(float(entry.get("end", 0.0) or 0.0), 3),
+            "line_count": line_count,
+            "max_line_width": round(max_w, 2),
+            "safe_width": round(usable_w, 2),
+            "band_height": round(band_h, 2),
+            "overflow": bool(overflow_reasons),
+            "overflow_reasons": overflow_reasons,
+        }
+        entry_facts.append(fact)
+        if line_count > 1:
+            multi_line_entries.append(i)
+        if overflow_reasons:
+            overflow_entries.append(fact)
+            for reason in overflow_reasons:
+                kind = {
+                    "max_lines_exceeded": "line_count",
+                    "safe_width_exceeded": "line_width",
+                    "safe_height_exceeded": "safe_area",
+                }.get(reason, "safe_area")
+                violations.append({"index": i, "kind": kind, "reason": reason})
+    return {
+        "enabled": bool(CONFIG.get("burn_subtitles", False)),
+        "renderer": "ass" if CONFIG.get("burn_subtitles", False) else "sidecar_srt",
+        "style": {
+            "font_size": int(font_size),
+            "max_chars": int(style.get("max_chars") or 0),
+            "max_lines": max_lines,
+            "play_res_x": play_x,
+            "play_res_y": play_y,
+            "alignment": int(style.get("alignment") or 0),
+            "margin_l": margin_l,
+            "margin_r": margin_r,
+            "margin_v": margin_v,
+        },
+        "safe_area": safe_area,
+        "entries": len(entry_facts),
+        "max_lines": max_observed_lines,
+        "max_observed_lines": max_observed_lines,
+        "multi_line": bool(multi_line_entries),
+        "multi_line_entries": multi_line_entries,
+        "overflow": bool(overflow_entries),
+        "overflow_entries": overflow_entries,
+        "violations": violations,
+        "entry_facts": entry_facts,
+    }
+
+
+def _load_visual_overlays(work_dir, *, with_source=False):
+    path = Path(work_dir) / VISUAL_OVERLAYS
+    if not path.exists():
+        result = ([], {"present": False, "path": str(path), "fingerprint": None})
+        return result if with_source else result[0]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        result = ([], {
+            "present": True,
+            "path": str(path),
+            "fingerprint": _artifact_fingerprint(path),
+            "load_error": "invalid_json",
+            "load_error_detail": str(exc),
+        })
+        return result if with_source else result[0]
+    source = {
+        "present": True,
+        "path": str(path),
+        "fingerprint": _artifact_fingerprint(path),
+        "schema_version": data.get("schema_version") if isinstance(data, dict) else None,
+    }
+    schema_version = data.get("schema_version") if isinstance(data, dict) else None
+    valid_schema_version = (
+        isinstance(schema_version, int)
+        and not isinstance(schema_version, bool)
+        and schema_version == 1
+    )
+    if isinstance(data, dict) and valid_schema_version and isinstance(data.get("overlays"), list):
+        overlays = data["overlays"]
+    else:
+        overlays = []
+        source["load_error"] = "invalid_schema"
+    return (overlays, source) if with_source else overlays
+
+
+def _escape_drawtext_text(text):
+    return (
+        str(text or "")
+        .replace("\\", "\\\\")
+        .replace(":", "\\:")
+        .replace("'", "\\'")
+        .replace("%", "\\%")
+        .replace("\n", "\\n")
+    )
+
+
+def _overlay_time_window(overlay, video_duration):
+    try:
+        start = float(overlay.get("start", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        start = 0.0
+    try:
+        end = float(overlay.get("end", video_duration) or video_duration)
+    except (TypeError, ValueError):
+        end = float(video_duration or 0.0)
+    end = max(start, end)
+    return start, end
+
+
+def _overlay_bbox(overlay, canvas, *, default_y):
+    width = int((canvas or {}).get("width") or 1280)
+    height = int((canvas or {}).get("height") or 720)
+    text = str(overlay.get("text") or "")
+    font_size = int(overlay.get("font_size") or max(18, round(height * 0.045)))
+    lines = [ln for ln in text.splitlines() if ln.strip()] or [text]
+    max_w = max((_visual_text_units(ln) * font_size for ln in lines), default=0.0)
+    text_h = len(lines) * font_size * 1.25
+    if overlay.get("type") == "top_title":
+        x = max(0.0, (width - max_w) / 2)
+        y = float(overlay.get("y", default_y) or default_y)
+    else:
+        raw_x = overlay.get("x", 0.08)
+        raw_y = overlay.get("y", 0.25)
+        try:
+            x = float(raw_x)
+            if 0.0 <= x <= 1.0:
+                x *= width
+        except (TypeError, ValueError):
+            x = width * 0.08
+        try:
+            y = float(raw_y)
+            if 0.0 <= y <= 1.0:
+                y *= height
+        except (TypeError, ValueError):
+            y = height * 0.25
+    return {
+        "x": round(x, 2),
+        "y": round(y, 2),
+        "width": round(max_w, 2),
+        "height": round(text_h, 2),
+        "font_size": font_size,
+        "line_count": len(lines),
+        "overflow": x < 0 or y < 0 or x + max_w > width or y + text_h > height,
+    }
+
+
+def _visual_overlay_filters(work_dir, canvas, video_duration):
+    """Render the first-release canonical visual_overlays.json contract.
+
+    Only two semantic renderers are supported: top_title and inline_label_or_callout.
+    Unsupported types are QC-blocking and deliberately do not silently render.
+    """
+    overlays, source = _load_visual_overlays(work_dir, with_source=True)
+    width = int((canvas or {}).get("width") or 1280)
+    height = int((canvas or {}).get("height") or 720)
+    default_top_y = max(24, round(height * 0.05))
+    filters = []
+    facts = []
+    unsupported = []
+    overflow = []
+    for idx, overlay in enumerate(overlays):
+        if not isinstance(overlay, dict):
+            unsupported.append({"index": idx, "type": None, "reason": "overlay_not_object"})
+            continue
+        typ = str(overlay.get("type") or "").strip()
+        text = str(overlay.get("text") or "").strip()
+        if typ not in _SUPPORTED_VISUAL_OVERLAY_TYPES:
+            unsupported.append({"index": idx, "type": typ, "reason": "unsupported_overlay_type"})
+            continue
+        if not text:
+            unsupported.append({"index": idx, "type": typ, "reason": "missing_text"})
+            continue
+        start, end = _overlay_time_window(overlay, video_duration)
+        bbox = _overlay_bbox(overlay, canvas, default_y=default_top_y)
+        if bbox["overflow"]:
+            overflow.append({"index": idx, "type": typ, "bbox": bbox})
+        font_size = bbox["font_size"]
+        safe_text = _escape_drawtext_text(text)
+        enable = f"between(t\\,{start:.3f}\\,{end:.3f})"
+        if typ == "top_title":
+            filt = (
+                "drawtext="
+                f"text='{safe_text}':x=(w-text_w)/2:y={int(bbox['y'])}:"
+                f"fontsize={font_size}:fontcolor=white:borderw=2:bordercolor=black@0.85:"
+                f"box=1:boxcolor=black@0.35:boxborderw=12:enable='{enable}'"
+            )
+        else:
+            filt = (
+                "drawtext="
+                f"text='{safe_text}':x={int(bbox['x'])}:y={int(bbox['y'])}:"
+                f"fontsize={font_size}:fontcolor=white:borderw=2:bordercolor=black@0.85:"
+                f"box=1:boxcolor=black@0.45:boxborderw=8:enable='{enable}'"
+            )
+        filters.append(filt)
+        facts.append({
+            "index": idx,
+            "type": typ,
+            "text_chars": len(text),
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "bbox": bbox,
+        })
+    qc = {
+        "source": source,
+        "load_error": source.get("load_error"),
+        "supported_types": sorted(_SUPPORTED_VISUAL_OVERLAY_TYPES),
+        "present": bool(source.get("present")),
+        "count": len(overlays),
+        "rendered": len(facts),
+        "facts": facts,
+        "unsupported": unsupported,
+        "overflow": overflow,
+    }
+    return filters, qc
+
+
+def _visual_qc_has_forbidden_delivery_facts(value):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in _VISUAL_DELIVERY_FORBIDDEN_KEYS:
+                return True
+            if _visual_qc_has_forbidden_delivery_facts(child):
+                return True
+    elif isinstance(value, list):
+        return any(_visual_qc_has_forbidden_delivery_facts(item) for item in value)
+    return False
+
+
+def _build_visual_qc(tts_segments, work_dir, video_duration, canvas, *, overlay_qc=None, mask_filter=None):
+    entries = _combined_subtitle_entries(tts_segments, work_dir, video_duration)
+    style = _subtitle_style_config(canvas)
+    subtitle_layout = _subtitle_layout_qc(entries, canvas, style)
+    mask = _source_subtitle_mask_policy(work_dir)
+    ratio = None
+    if mask.get("active"):
+        ratio = max(0.0, min(0.5, float(CONFIG.get("source_subtitle_mask_ratio", 0.14) or 0.0)))
+    mask.update({
+        "ratio": ratio,
+        "filter": "drawbox" if mask_filter else None,
+    })
+    overlay_qc = overlay_qc or _visual_overlay_filters(work_dir, canvas, video_duration)[1]
+    blocking_codes = []
+    if mask.get("blocking"):
+        blocking_codes.append("mask_policy_not_explicit")
+    if subtitle_layout.get("overflow"):
+        blocking_codes.append("subtitle_overflow")
+    if overlay_qc.get("load_error"):
+        blocking_codes.append("invalid_visual_overlays_json")
+    if overlay_qc.get("unsupported"):
+        blocking_codes.append("unsupported_visual_overlay")
+    if overlay_qc.get("overflow"):
+        blocking_codes.append("visual_overlay_overflow")
+    qc = {
+        "schema_version": 1,
+        "artifact": VISUAL_QC,
+        "verdict": "FAIL" if blocking_codes else "PASS",
+        "blocking": bool(blocking_codes),
+        "blocking_codes": blocking_codes,
+        "geometry": {
+            "canvas": {
+                "width": int(canvas.get("width", 1280)),
+                "height": int(canvas.get("height", 720)),
+                "fps": float(canvas.get("fps", 30.0)),
+            },
+            "storage": {
+                "width": int(canvas.get("storage_width", canvas.get("width", 1280))),
+                "height": int(canvas.get("storage_height", canvas.get("height", 720))),
+            },
+            "rotation": int(canvas.get("rotation", 0) or 0),
+            "sample_aspect_ratio": canvas.get("sample_aspect_ratio", "1:1"),
+            "display_aspect_ratio": canvas.get("display_aspect_ratio"),
+        },
+        "subtitles": subtitle_layout,
+        "mask": mask,
+        "overlays": overlay_qc,
+        "summary": {
+            "subtitle_entries": subtitle_layout.get("entries", 0),
+            "subtitle_overflow": bool(subtitle_layout.get("overflow")),
+            "subtitle_multi_line": bool(subtitle_layout.get("multi_line")),
+            "mask_policy": mask.get("policy"),
+            "mask_active": bool(mask.get("active")),
+            "overlay_rendered": int(overlay_qc.get("rendered", 0) or 0),
+            "overlay_unsupported": len(overlay_qc.get("unsupported") or []),
+        },
+    }
+    if _visual_qc_has_forbidden_delivery_facts(qc):
+        qc["verdict"] = "FAIL"
+        qc["blocking"] = True
+        qc["blocking_codes"].append("visual_qc_contains_delivery_fact")
+    return qc
+
+
+def _write_visual_qc(work_dir, qc):
+    path = Path(work_dir) / VISUAL_QC
+    path.write_text(json.dumps(qc, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
 def _escape_subtitle_filter_path(path):
     """Escape a path for ffmpeg subtitle/ass video filter arguments."""
     text = str(path).replace("\\", "/")
@@ -1154,19 +1945,103 @@ def _output_downscale_filter(max_h):
     return f"scale=-2:'2*trunc(min(ih,{max_h})/2)':flags=lanczos"
 
 
-def final_loudnorm_filter():
-    """Final-mix loudness normalization filter from CONFIG, or None when disabled.
+def _limiter_filter():
+    peak = float(CONFIG.get("final_limiter_peak", 0.98) or 0.98)
+    return f"alimiter=limit={peak:.2f}:level=false"
+
+
+def _loudness_mode(measured=None):
+    if not CONFIG.get("final_loudnorm", True):
+        return "limiter_only"
+    return "two_pass_linear" if measured else "equivalent"
+
+
+def final_loudnorm_filter(measured=None):
+    """Final-mix loudness normalization/limiter filter from CONFIG.
 
     Ducking branches set only relative balance; this single stage owns the
-    absolute output loudness so the recap is not left too quiet.
+    absolute output loudness so the recap is not left too quiet. When `measured`
+    is supplied from a first loudnorm pass, ffmpeg runs the deterministic second
+    pass; without it we still force the same target and peak limiter as a
+    documented equivalent/fallback path.
     """
     if not CONFIG.get("final_loudnorm", True):
-        return None
+        return _limiter_filter()
+    filt = (
+        f"loudnorm=I={CONFIG.get('target_lufs', -14.0)}"
+        f":TP={CONFIG.get('target_true_peak', -1.0)}"
+        f":LRA={CONFIG.get('target_lra', 11.0)}"
+        f":linear=true"
+    )
+    if measured:
+        for src, dst in (
+            ("input_i", "measured_I"),
+            ("input_tp", "measured_TP"),
+            ("input_lra", "measured_LRA"),
+            ("input_thresh", "measured_thresh"),
+            ("target_offset", "offset"),
+        ):
+            if src in measured:
+                filt += f":{dst}={measured[src]}"
+    filt += ":print_format=summary"
+    return f"{filt},{_limiter_filter()}"
+
+
+def _parse_loudnorm_json(text):
+    """Extract ffmpeg loudnorm JSON from stderr/stdout."""
+    for match in reversed(list(re.finditer(r"\{[\s\S]*?\}", str(text or "")))):
+        try:
+            data = json.loads(match.group(0))
+        except ValueError:
+            continue
+        if isinstance(data, dict) and {"input_i", "input_tp", "input_lra", "input_thresh", "target_offset"} <= set(data):
+            return data
+    return None
+
+
+def _loudnorm_first_pass_filter():
     return (
         f"loudnorm=I={CONFIG.get('target_lufs', -14.0)}"
         f":TP={CONFIG.get('target_true_peak', -1.0)}"
         f":LRA={CONFIG.get('target_lra', 11.0)}"
+        f":print_format=json"
     )
+
+
+def _run_loudnorm_first_pass(input_video, narration_wav, original_audio_input,
+                             bgm_input, filter_complex, work_dir):
+    """Measure the exact mixed audio graph before final render.
+
+    Returns ffmpeg loudnorm JSON, or None when probing fails. The caller then
+    falls back to the documented equivalent single-pass target+limiter filter.
+    """
+    if not CONFIG.get("final_loudnorm", True):
+        return None
+    probe_fc = f"{filter_complex};[aout]{_loudnorm_first_pass_filter()}[lnprobe]"
+    probe_script = Path(work_dir) / ".filter_complex_loudnorm_probe.txt"
+    probe_script.write_text(probe_fc, encoding="utf-8")
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(input_video),
+        "-i", str(narration_wav),
+        *original_audio_input,
+        *bgm_input,
+        "-filter_complex_script", str(probe_script),
+        "-map", "[lnprobe]",
+        "-f", "null", "-",
+    ]
+    try:
+        result = run_cmd(cmd)
+    finally:
+        probe_script.unlink(missing_ok=True)
+    if result.returncode != 0:
+        log(f"  ⚠️ loudnorm 首遍测量失败，降级到目标滤镜+limiter: {result.stderr}")
+        return None
+    measured = _parse_loudnorm_json((result.stdout or "") + "\n" + (result.stderr or ""))
+    if not measured:
+        log("  ⚠️ loudnorm 首遍未返回 JSON，降级到目标滤镜+limiter")
+        return None
+    return measured
 
 
 def _apply_narration_speed(tts_segments, work_dir):
@@ -1185,17 +2060,29 @@ def _apply_narration_speed(tts_segments, work_dir):
         src = seg.get("audio_path")
         if not src or not os.path.exists(src):
             continue
+        seg.setdefault("segment_audio_schema_version", SEGMENT_AUDIO_SCHEMA_VERSION)
+        seg.setdefault("narration", str(seg.get("narration") or seg.get("spoken_text") or ""))
+        seg.setdefault("spoken_text", str(seg.get("spoken_text") or seg.get("narration") or ""))
+        seg.setdefault("truncated", False)
+        seg.setdefault("truncate_reason", "none")
+        seg.setdefault("source_audio_duration", seg.get("audio_duration"))
+        seg["global_narration_speed"] = factor
         out = str(Path(work_dir) / f"_spd_{seg.get('index', 0)}.wav")
         res = run_cmd(["ffmpeg", "-y", "-i", src, "-filter:a", f"atempo={factor:.3f}",
                        "-ar", "44100", "-ac", "1", "-acodec", "pcm_s16le", out])
         if res.returncode == 0 and os.path.exists(out):
             seg["audio_path"] = out
             seg["audio_duration"] = get_video_duration(out)
+            seg["effective_tempo"] = (
+                factor
+                * (1.0 + float(seg.get("tts_rate_offset", 0.0) or 0.0))
+                * float(seg.get("segment_tempo_factor", 1.0) or 1.0)
+            )
             done += 1
     log(f"解说整体提速: atempo={factor:.2f} ({done} 段)")
 
 
-def _source_subtitle_mask_filter(canvas=None):
+def _source_subtitle_mask_filter(canvas=None, work_dir=None):
     """ffmpeg drawbox that masks burned-in source subtitles along the bottom, or None.
 
     Many source videos (e.g. 庆余年) ship hardcoded subtitles; without this the recap
@@ -1203,7 +2090,8 @@ def _source_subtitle_mask_filter(canvas=None):
     an opaque box; our subtitles render on top of it. canvas ({"width","height"}) makes the
     single-line band sizing match the canvas-scaled subtitle style.
     """
-    if not (CONFIG.get("burn_subtitles", False) and CONFIG.get("mask_source_subtitles", False)):
+    policy = _source_subtitle_mask_policy(work_dir)
+    if not policy.get("active"):
         return None
     ratio = max(0.0, min(0.5, float(CONFIG.get("source_subtitle_mask_ratio", 0.14) or 0.0)))
     # When we burn our OWN subtitle the band must sit behind it, but our subtitles are split into
@@ -1240,11 +2128,8 @@ def _amix_tail(narr_vol, bgm_chain=""):
 
 
 def _duck_ramp(s, e, fade):
-    """A 0→1 trapezoid over [s,e] with `fade`-second ramps at each edge (no clicks)."""
-    if float(fade or 0) <= 0:
-        return f"between(t,{s:.2f},{e:.2f})"
-    return f"min(1,max(0,min(t-{s:.2f},{e:.2f}-t)/{fade:.2f}))"
-
+    """Compatibility wrapper for the canonical pre-roll/hold/post-roll ramp."""
+    return duck_ramp_expression(s, e, fade)
 
 def _placement_windows(tts_segments, level_for):
     """Collect [(start, end, level)] placement windows for the placed beats, using
@@ -1261,57 +2146,34 @@ def _placement_windows(tts_segments, level_for):
 
 
 def _coalesce_duck_windows(windows, bridge):
-    """Merge placement windows whose gap is smaller than `bridge` into one held span,
-    so the duck stays low across short inter-beat gaps (a continuous bed) instead of the
-    original swelling back to idle between sentences. Each merged span keeps the
-    most-ducked (lowest) level of its members. Genuine gaps >= bridge survive as separate
-    dips, so the original still breathes there. `windows` is [(start, end, level)]."""
-    rel = sorted(([float(s), float(e), float(g)] for s, e, g in windows if e > s),
-                 key=lambda w: w[0])
-    if not rel:
-        return []
-    merged = [rel[0][:]]
-    for s, e, g in rel[1:]:
-        if s - merged[-1][1] < bridge:
-            merged[-1][1] = max(merged[-1][1], e)
-            merged[-1][2] = min(merged[-1][2], g)
-        else:
-            merged.append([s, e, g])
-    return merged
+    """Compatibility wrapper around the canonical audio automation coalescer."""
+    return coalesce_duck_windows(windows, bridge)
 
 
 def _duck_envelope(tts_segments, idle, speech_vol, quiet_vol, fade, bridge=None):
     """Per-beat ducking automation for the ORIGINAL track.
 
-    Ramps the original down under each placed narration window — to speech_vol where the
-    beat overlaps source dialogue, quiet_vol where it sits in a quiet window — and HOLDS
-    that duck across inter-beat gaps shorter than `bridge` so the source dialogue does not
-    pop back up between sentences. Only gaps >= bridge swell back to `idle` (lead-in/out
-    and deliberate long pauses). Returns a volume= expression, or None when no beat carries
-    placement info (caller falls back to a constant)."""
+    Uses the shared ducking contract: [start-fade,start] pre-roll ramp down,
+    [start,end] held at the selected duck level, and [end,end+fade] release.
+    Bridged spans use the most-ducked (lowest) level, matching timeline.json /
+    JianYing keyframes. Returns a volume= expression, or None when no beat carries
+    placement info (caller falls back to a constant).
+    """
     if bridge is None:
         bridge = 2 * float(fade or 0)
     windows = _placement_windows(
         tts_segments, lambda seg: speech_vol if seg.get("overlaps_speech", True) else quiet_vol)
-    merged = _coalesce_duck_windows(windows, bridge)
-    if not merged:
-        return None
-    terms = [f"+({level - idle:.3f})*{_duck_ramp(s, e, fade)}" for s, e, level in merged]
-    return f"max(0,min(1,{idle}{''.join(terms)}))"
+    merged = coalesce_duck_windows(windows, bridge)
+    return ducking_expression(merged, idle, fade)
 
 
 def _bgm_envelope(tts_segments, base, duck, fade, bridge=None):
-    """Per-beat ducking automation for the BGM track: hold the bed at `base`, dip to
-    `duck` under each narration window (held across gaps < `bridge`) so the voice stays
-    clear. None if no beats."""
+    """Per-beat ducking automation for the BGM track using the shared contract."""
     if bridge is None:
         bridge = 2 * float(fade or 0)
     windows = _placement_windows(tts_segments, lambda seg: duck)
-    merged = _coalesce_duck_windows(windows, bridge)
-    if not merged:
-        return None
-    terms = [f"+({lvl - base:.3f})*{_duck_ramp(s, e, fade)}" for s, e, lvl in merged]
-    return f"max(0,min(1,{base}{''.join(terms)}))"
+    merged = coalesce_duck_windows(windows, bridge)
+    return ducking_expression(merged, base, fade)
 
 
 def _build_audio_filter_complex(
@@ -1417,6 +2279,23 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
     # 多轨时间线模型（timeline.json）：canonical 渲染仍是 ffmpeg，此模型供检视/可选导出
     _emit_timeline(input_video, tts_segments, work_dir, video_duration, has_bgm)
 
+    overlay_filters, overlay_qc = _visual_overlay_filters(work_dir, canvas, video_duration)
+    mask_filter = _source_subtitle_mask_filter(canvas, work_dir)
+    visual_qc = _build_visual_qc(
+        tts_segments,
+        work_dir,
+        video_duration,
+        canvas,
+        overlay_qc=overlay_qc,
+        mask_filter=mask_filter,
+    )
+    _write_visual_qc(work_dir, visual_qc)
+    assembly_qc_path = Path(work_dir) / ASSEMBLY_QC
+    assembly_qc_path.unlink(missing_ok=True)
+    if visual_qc.get("blocking"):
+        codes = ", ".join(visual_qc.get("blocking_codes", []))
+        raise RuntimeError(f"视觉 QC 失败: {codes}；详见 {Path(work_dir) / VISUAL_QC}")
+
     # 混合原始音频 + 解说音频（+ 可选 BGM）
     source_has_audio = _has_audio_stream(input_video)
     if source_has_audio:
@@ -1438,18 +2317,26 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
         bgm_audio_label=bgm_audio_label,
     )
 
+    # BGM is input [2:a]; -stream_loop -1 loops it to cover the whole timeline (amix
+    # duration=first + -t trim it back to the video length).
+    bgm_input = ["-stream_loop", "-1", "-i", str(bgm_path)] if has_bgm else []
+
     # 对于超长 volume 表达式（多段解说），使用 -filter_complex_script 避免命令行溢出
     # 末端整体响度归一：ducking 只管相对平衡，这一步统一成片绝对响度
     aout_label = "[aout]"
-    final_ln = final_loudnorm_filter()
+    loudnorm_measurement = _run_loudnorm_first_pass(
+        input_video,
+        narration_wav,
+        original_audio_input,
+        bgm_input,
+        filter_complex,
+        work_dir,
+    )
+    final_ln = final_loudnorm_filter(loudnorm_measurement)
     if final_ln:
         filter_complex += f";[aout]{final_ln}[aoutln]"
         aout_label = "[aoutln]"
         log(f"成片响度归一: {final_ln}")
-
-    # BGM is input [2:a]; -stream_loop -1 loops it to cover the whole timeline (amix
-    # duration=first + -t trim it back to the video length).
-    bgm_input = ["-stream_loop", "-1", "-i", str(bgm_path)] if has_bgm else []
 
     filter_complex_bytes = filter_complex.encode('utf-8')
     if len(filter_complex_bytes) > 8000:
@@ -1482,9 +2369,9 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
     preset = str(CONFIG.get("output_preset", "veryfast") or "veryfast")
     max_h = int(CONFIG.get("output_max_height", 0) or 0)
     vf_chain = []
-    mask_filter = _source_subtitle_mask_filter(canvas)
     if mask_filter:
         vf_chain.append(mask_filter)
+    vf_chain.extend(overlay_filters)
     if CONFIG.get("burn_subtitles", False):
         vf_chain.append(_subtitle_burn_filter(ass_path))
     # Downscale LAST so the mask + burned subtitles render at native resolution and are then
@@ -1497,23 +2384,26 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
     # needs EVEN width AND height, so normalize odd dims (4:2:2/4:4:4 permit them) before the
     # encode — otherwise libx264 aborts to a 0-byte file. The downscale helper already evens out.
     even = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    notes = []
     if vf_chain:
         if max_h <= 0:  # no downscale in the chain to force even dims
             vf_chain.append(even)
         cmd += ["-vf", ",".join(vf_chain), "-c:v", "libx264", "-preset", preset, "-crf", crf,
                 "-pix_fmt", "yuv420p"]
         notes = ((["遮挡原字幕"] if mask_filter else [])
+                 + ([f"视觉叠加×{len(overlay_filters)}"] if overlay_filters else [])
                  + (["压制解说字幕"] if CONFIG.get("burn_subtitles", False) else [])
                  + ([f"缩放≤{max_h}p"] if max_h > 0 else []))
         log(f"视频重编码: {' + '.join(notes)} (crf={crf}, preset={preset})")
     elif CONFIG.get("force_video_reencode", False):
+        notes = ["force_video_reencode"]
         cmd += ["-vf", even, "-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p"]
     else:
         cmd += ["-c:v", "copy"]
 
     # +faststart relocates the moov atom to the front so web/social players can start
     # before the full file downloads; valid (and beneficial) on the copy path too.
-    cmd += ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+    cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart",
             "-t", str(video_duration), str(output_path)]
     try:
         result = run_cmd(cmd)
@@ -1525,37 +2415,74 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
             fc_script.unlink(missing_ok=True)
 
     log(f"最终视频: {output_path} ({output_path.stat().st_size / 1024 / 1024:.1f}MB)")
+    _write_assembly_qc(
+        work_dir,
+        _build_assembly_qc(
+            tts_segments,
+            video_duration,
+            output_path=output_path,
+            source_has_audio=source_has_audio,
+            loudness_mode=_loudness_mode(loudnorm_measurement),
+            loudnorm_measurement=loudnorm_measurement,
+            visual_qc=visual_qc,
+            render_delivery={
+                "video_encode_passes": 1 if (vf_chain or CONFIG.get("force_video_reencode", False)) else 0,
+                "reencode_reason": notes if (vf_chain or CONFIG.get("force_video_reencode", False)) else [],
+                "audio_sample_rate": 48000,
+                "final_compat_notes": ["yuv420p"] if (vf_chain or CONFIG.get("force_video_reencode", False)) else ["video_copy", "aac_48000", "faststart"],
+            },
+        ),
+    )
     return output_path
 
 
-def _adjust_tts_speed(audio_path, target_duration, work_dir, tts_rate_offset=0.0):
-    """如果 TTS 音频超过目标时长，用 ffmpeg atempo 温和加速"""
+def _adjust_tts_speed(audio_path, target_duration, work_dir, tts_rate_offset=0.0, *, return_meta=True):
+    """Fit overlong TTS with bounded atempo; never time-trim speech in assemble.
+
+    Assemble has no word/sentence timestamps, so if bounded atempo cannot make the
+    audio fit, it returns `fit_status=no_safe_fit` and leaves the original audio
+    untouched for QC to block instead of guessing a spoken_text truncation.
+    """
     audio_path = Path(audio_path)
     current_dur = get_video_duration(audio_path)
+    budget = narration_tempo_budget(tts_rate_offset)
+    meta = {
+        "fit_status": "fits",
+        "blocking": False,
+        "tempo_factor": 1.0,
+        "segment_tempo_factor": 1.0,
+        "truncated": False,
+        "truncate_reason": "none",
+        "tts_rate_offset": float(tts_rate_offset or 0.0),
+        "audio_duration": current_dur,
+        "placed_audio_duration": current_dur,
+        "global_narration_speed": budget["global_narration_speed"],
+        "effective_tempo": budget["global_narration_speed"] * budget["tts_rate_factor"],
+        "cumulative_tempo_max": budget["cumulative_tempo_max"],
+        "cumulative_tempo_hard_max": budget["cumulative_tempo_hard_max"],
+    }
     if current_dur <= target_duration or current_dur == 0:
-        return str(audio_path), current_dur
+        return (str(audio_path), current_dur, meta)
 
     ratio = current_dur / target_duration
 
-    # 累积上限：TTS rate × atempo ≤ 1.2x
-    effective_max = 1.2 / (1.0 + tts_rate_offset)
-    effective_max = max(1.0, effective_max)
+    effective_max = budget["segment_tempo_max"]
 
     if ratio > effective_max:
-        # 实际截断到目标时长，加 fade-out 防止爆音
-        truncated_path = audio_path.with_name(f"{audio_path.stem}_cut{audio_path.suffix}")
-        fade_out = min(0.15, target_duration * 0.1)
-        cmd = ["ffmpeg", "-y", "-i", str(audio_path),
-               "-t", f"{target_duration:.3f}",
-               "-af", f"afade=t=out:st={max(0, target_duration - fade_out):.3f}:d={fade_out:.3f}",
-               "-ar", "44100", "-ac", "1", str(truncated_path)]
-        result = run_cmd(cmd)
-        if result.returncode == 0:
-            new_dur = get_video_duration(truncated_path)
-            log(f"  TTS 截断: {current_dur:.1f}s → {new_dur:.1f}s (无法加速到 x{ratio:.2f})")
-            return str(truncated_path), new_dur
-        log(f"  警告: TTS 截断失败，保留原音频 ({current_dur:.1f}s)")
-        return str(audio_path), current_dur
+        meta.update({
+            "fit_status": "no_safe_fit",
+            "blocking": True,
+            "truncate_reason": "no_safe_boundary",
+            "placed_audio_duration": 0.0,
+            "needed_tempo_factor": ratio,
+            "segment_tempo_factor": 1.0,
+            "tempo_factor": 1.0,
+        })
+        log(
+            f"  TTS 无安全放置: {current_dur:.1f}s 需 x{ratio:.2f}，"
+            f"超过段内预算 x{effective_max:.2f}（assemble 不按时间硬切）"
+        )
+        return (str(audio_path), current_dur, meta)
 
     # 温和加速
     tempo = min(ratio, effective_max)
@@ -1566,9 +2493,18 @@ def _adjust_tts_speed(audio_path, target_duration, work_dir, tts_rate_offset=0.0
     result = run_cmd(cmd)
     if result.returncode == 0:
         new_dur = get_video_duration(adjusted_path)
+        meta.update({
+            "fit_status": "tempo_adjusted",
+            "tempo_factor": tempo,
+            "segment_tempo_factor": tempo,
+            "placed_audio_duration": new_dur,
+            "effective_tempo": budget["global_narration_speed"] * budget["tts_rate_factor"] * tempo,
+        })
         log(f"  TTS 温和加速: {current_dur:.1f}s → {new_dur:.1f}s (x{tempo:.2f})")
-        return str(adjusted_path), new_dur
-    return str(audio_path), current_dur
+        return (str(adjusted_path), new_dur, meta)
+    meta["fit_status"] = "speed_adjust_failed"
+    meta["truncate_reason"] = "resample_failed"
+    return (str(audio_path), current_dur, meta)
 
 
 def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
@@ -1580,6 +2516,7 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
     prev_pause_samples = 0  # 前一段的 pause_after_ms，控制段间间隔
     skipped_count = 0  # 因 WAV 缺失/损坏/重采样失败而被跳过的段数
     placed_count = 0  # 真正写入音频的段数；防止"成功"生成全静音旁白
+    no_safe_fit_count = 0  # 超预算但不能安全截断；交由 QC/manifest 阻断
     prev_authored_end = None  # 上一段作者标注的结束时间，用于判断"段落"边界
     run_gap = float(CONFIG.get("narration_run_gap_seconds", 1.6))   # 作者留白 > 此值 = 新段落
     tighten = bool(CONFIG.get("narration_tighten", True))
@@ -1588,6 +2525,20 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
     max_pull_samples = int(max(0.0, float(CONFIG.get("narration_max_pull_seconds", 2.5))) * sample_rate)
 
     for seg in tts_segments:
+        seg.setdefault("segment_audio_schema_version", SEGMENT_AUDIO_SCHEMA_VERSION)
+        seg.setdefault("narration", str(seg.get("narration") or seg.get("spoken_text") or ""))
+        seg.setdefault("spoken_text", str(seg.get("spoken_text") or seg.get("narration") or ""))
+        seg.setdefault("truncated", False)
+        seg.setdefault("truncate_reason", "none")
+        seg.setdefault("fit_status", "pending_assembly")
+        seg.setdefault("blocking", False)
+        seg.setdefault("segment_tempo_factor", 1.0)
+        seg.setdefault("global_narration_speed", float(CONFIG.get("narration_speed", 1.0) or 1.0))
+        rate_factor = 1.0 + float(seg.get("tts_rate_offset", 0.0) or 0.0)
+        seg.setdefault("effective_tempo", float(seg["global_narration_speed"]) * rate_factor * float(seg.get("segment_tempo_factor", 1.0) or 1.0))
+        seg.setdefault("rms_dbfs_before", None)
+        seg.setdefault("rms_dbfs_after", None)
+        seg.setdefault("peak_after", None)
         wav_path = seg["audio_path"]
         seg_pause_ms = seg.get("pause_after_ms", CONFIG.get("breath_ms", 250))
         # 段落收紧：同一段落内（与上一句作者留白 <= run_gap）把这一句紧贴上一句的实际收尾播放，
@@ -1601,6 +2552,9 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         if not os.path.exists(wav_path):
             seg["actual_place_start"] = seg["start"]
             seg["actual_place_end"] = seg["start"]
+            seg["placed_audio_duration"] = 0.0
+            seg["fit_status"] = "skipped"
+            seg["truncate_reason"] = "missing_wav"
             prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
             skipped_count += 1
             continue
@@ -1616,6 +2570,9 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
                     log(f"  跳过非标准 WAV: {wav_path} (channels={wf_channels}, sampwidth={wf_sampwidth}), 需要 mono 16-bit")
                     seg["actual_place_start"] = seg["start"]
                     seg["actual_place_end"] = seg["start"]
+                    seg["placed_audio_duration"] = 0.0
+                    seg["fit_status"] = "skipped"
+                    seg["truncate_reason"] = "resample_failed"
                     prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
                     skipped_count += 1
                     continue
@@ -1625,6 +2582,9 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
             log(f"  WAV 读取失败: {wav_path}: {e}")
             seg["actual_place_start"] = seg["start"]
             seg["actual_place_end"] = seg["start"]
+            seg["placed_audio_duration"] = 0.0
+            seg["fit_status"] = "skipped"
+            seg["truncate_reason"] = "missing_wav"
             prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
             skipped_count += 1
             continue
@@ -1656,9 +2616,45 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         available_samples = end_boundary - actual_start
         available_duration = max(available_samples / sample_rate, 0)
         if tts_dur > available_duration > 0:
-            wav_path, _actual_dur = _adjust_tts_speed(wav_path, available_duration, work_dir, tts_rate_offset)
+            try:
+                wav_path, _actual_dur, fit_meta = _adjust_tts_speed(
+                    wav_path, available_duration, work_dir, tts_rate_offset, return_meta=True)
+            except TypeError:
+                # Tests/older extensions may monkeypatch the old signature; normalize it.
+                adjusted_result = _adjust_tts_speed(wav_path, available_duration, work_dir, tts_rate_offset)
+                if len(adjusted_result) == 2:
+                    wav_path, _actual_dur = adjusted_result
+                    fit_meta = {
+                        "fit_status": "tempo_adjusted" if wav_path != original_wav_path else "fits",
+                        "segment_tempo_factor": 1.0,
+                        "effective_tempo": narration_tempo_budget(tts_rate_offset)["global_narration_speed"],
+                        "global_narration_speed": narration_tempo_budget(tts_rate_offset)["global_narration_speed"],
+                        "truncate_reason": "none",
+                    }
+                else:
+                    wav_path, _actual_dur, fit_meta = adjusted_result
+            seg.update({
+                "fit_status": fit_meta["fit_status"],
+                "segment_tempo_factor": fit_meta.get("segment_tempo_factor", 1.0),
+                "effective_tempo": fit_meta.get("effective_tempo", seg.get("effective_tempo")),
+                "global_narration_speed": fit_meta.get("global_narration_speed", seg.get("global_narration_speed")),
+                "blocking": bool(fit_meta.get("blocking", False)),
+            })
+            if fit_meta["fit_status"] == "no_safe_fit":
+                seg["actual_place_start"] = actual_start / sample_rate
+                seg["actual_place_end"] = actual_start / sample_rate
+                seg["placed_audio_duration"] = 0.0
+                seg["truncate_reason"] = fit_meta["truncate_reason"]
+                prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
+                skipped_count += 1
+                no_safe_fit_count += 1
+                continue
         else:
-            pass  # tts_dur <= available_duration, no speed adjust needed
+            budget = narration_tempo_budget(tts_rate_offset)
+            seg["fit_status"] = "fits"
+            seg["segment_tempo_factor"] = 1.0
+            seg["global_narration_speed"] = budget["global_narration_speed"]
+            seg["effective_tempo"] = budget["global_narration_speed"] * budget["tts_rate_factor"]
 
         # _adjust_tts_speed 输出固定 44100Hz mono 16bit，若文件被替换则无需 resample
         if wav_path != original_wav_path:
@@ -1672,6 +2668,9 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
                 log(f"  重采样失败，跳过本段: {wav_path}: {rs_result.stderr}")
                 seg["actual_place_start"] = seg["start"]
                 seg["actual_place_end"] = seg["start"]
+                seg["placed_audio_duration"] = 0.0
+                seg["fit_status"] = "skipped"
+                seg["truncate_reason"] = "resample_failed"
                 prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
                 skipped_count += 1
                 continue
@@ -1683,17 +2682,35 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         # 按场景边界裁剪
         audio_samples = len(wf_data) // 2
         available = end_boundary - actual_start
-        write_samples = min(audio_samples, max(available, 0))
+        write_samples = audio_samples
 
-        if write_samples <= 0:
+        if write_samples <= 0 or available <= 0:
             log(f"  跳过: {seg['start']:.1f}s-{seg['end']:.1f}s (无空间)")
             seg["actual_place_start"] = seg["start"]
             seg["actual_place_end"] = seg["start"]
+            seg["placed_audio_duration"] = 0.0
+            seg["fit_status"] = "no_safe_fit"
+            seg["blocking"] = True
+            seg["truncate_reason"] = "no_room"
             prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
+            no_safe_fit_count += 1
             continue
 
-        # 裁剪到写入长度
-        wf_data = wf_data[:write_samples * 2]
+        if audio_samples > available:
+            # Do not cut spoken audio by time alone. Without upstream boundary
+            # metadata, assemble cannot prove which text would remain spoken.
+            over = (audio_samples - available) / sample_rate
+            log(f"  TTS 无安全放置: 段 {seg.get('index', '?')} 超出可用窗口 {over:.2f}s，跳过并交由 QC 阻断")
+            seg["actual_place_start"] = actual_start / sample_rate
+            seg["actual_place_end"] = actual_start / sample_rate
+            seg["placed_audio_duration"] = 0.0
+            seg["fit_status"] = "no_safe_fit"
+            seg["blocking"] = True
+            seg["truncate_reason"] = "no_safe_boundary"
+            prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
+            skipped_count += 1
+            no_safe_fit_count += 1
+            continue
 
         # 重叠检测：跳过与前段重叠的部分（在 fade 之前，避免截断后丢失 fade-in）
         if actual_start < last_written_end:
@@ -1703,16 +2720,30 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
                     f"(与前段重叠 {overlap_ms:.0f}ms)")
                 seg["actual_place_start"] = seg["start"]
                 seg["actual_place_end"] = seg["start"]
+                seg["placed_audio_duration"] = 0.0
+                seg["fit_status"] = "no_safe_fit"
+                seg["blocking"] = True
+                seg["truncate_reason"] = "no_room"
                 prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
+                no_safe_fit_count += 1
                 continue
-            log(f"  重叠 {overlap_ms:.0f}ms，截断前部")
-            skip_samples = last_written_end - actual_start
-            wf_data = wf_data[skip_samples * 2:]
-            write_samples -= skip_samples
             actual_start = last_written_end
+            available = end_boundary - actual_start
+            if write_samples > available:
+                log(f"  重叠 {overlap_ms:.0f}ms 后无安全完整窗口，跳过")
+                seg["actual_place_start"] = actual_start / sample_rate
+                seg["actual_place_end"] = actual_start / sample_rate
+                seg["placed_audio_duration"] = 0.0
+                seg["fit_status"] = "no_safe_fit"
+                seg["blocking"] = True
+                seg["truncate_reason"] = "no_safe_boundary"
+                prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
+                skipped_count += 1
+                no_safe_fit_count += 1
+                continue
 
         # fade-in / fade-out（在 overlap 裁剪之后应用，确保正确的音频包络）
-        fade_len = min(int(CONFIG.get("fade_ms", 300) * sample_rate / 1000), write_samples // 4)
+        fade_len = min(int(CONFIG.get("fade_ms", 120) * sample_rate / 1000), write_samples // 4)
         for i in range(fade_len):
             gain = i / fade_len
             s = i * 2
@@ -1731,6 +2762,11 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         buffer[actual_start * 2: actual_start * 2 + write_samples * 2] = wf_data
         seg["actual_place_start"] = actual_start / sample_rate
         seg["actual_place_end"] = (actual_start + write_samples) / sample_rate
+        seg["placed_audio_duration"] = write_samples / sample_rate
+        if seg.get("fit_status") == "pending_assembly":
+            seg["fit_status"] = "fits"
+        if seg.get("truncate_reason") in (None, ""):
+            seg["truncate_reason"] = "none"
         last_written_end = actual_start + write_samples
         prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
         placed_count += 1
@@ -1741,7 +2777,7 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         wf.setframerate(sample_rate)
         wf.writeframes(bytes(buffer))
 
-    if tts_segments and placed_count == 0:
+    if tts_segments and placed_count == 0 and no_safe_fit_count == 0:
         output_wav.unlink(missing_ok=True)
         raise RuntimeError(
             f"全部 {len(tts_segments)} 段解说均被跳过或未能写入"

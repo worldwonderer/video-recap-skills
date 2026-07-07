@@ -31,6 +31,18 @@ def test_brief_noop_without_consolidation(tmp_path):
     asr chunking uses RAW asr (byte-identical to the pre-consolidate behavior)."""
     brief_path = build_agent_brief(SCENES, ASR, SILENCE, 6.0, tmp_path)
     text = brief_path.read_text(encoding="utf-8")
+    requirements = json.loads((tmp_path / "deslop_qc_requirements.json").read_text(encoding="utf-8"))
+    assert requirements == {
+        "schema_version": 1,
+        "owner": "video-understanding.brief",
+        "style_card_required": True,
+        "packaging_plan_expected": True,
+        "deslop_qc": {
+            "report_only": True,
+            "aigc_detector": False,
+            "auto_rewrite": False,
+        },
+    }
     assert "Understanding index (from consolidate.py)" not in text
     written = json.loads((tmp_path / "asr_writing_chunks.json").read_text(encoding="utf-8"))
     assert written == _chunk_asr_for_writing(ASR, SCENES)
@@ -243,3 +255,37 @@ def test_build_agent_brief_cut_mode_sizes_to_output(monkeypatch, tmp_path):
     assert "narration BLOCKS across the ~1min CUT OUTPUT" in text   # sized to 1min output
     assert "47 narration BLOCKS" not in text                        # NOT the source-sized (10min) count
     assert "step 1 of 2" in text           # A1: cut-first, write clip_plan only (no edited_source yet)
+
+
+def test_cut_pass1_brief_encourages_cold_open_but_preserves_story_spine(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "edit_mode", "cut")
+    monkeypatch.setitem(CONFIG, "target_duration", "1m")
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    text = build_agent_brief(SCENES, ASR, SILENCE, 60.0, tmp_path).read_text(encoding="utf-8")
+
+    assert "0–1 optional cold-open/high-impact clip" in text
+    assert "story spine, not unordered highlights" in text
+    assert "cold_open" in text and "setup" in text and "turn" in text and "payoff" in text
+    assert "not a flat highlights reel" in text
+
+
+def test_build_agent_brief_preserves_freeform_style_and_artifact_contract(tmp_path):
+    style = "悬疑冷幽默，但每句都像朋友复盘：别端着，保留东北味儿"
+
+    text = build_agent_brief(SCENES, ASR, SILENCE, 6.0, tmp_path, style=style).read_text(encoding="utf-8")
+
+    assert f"- Style (--style, freeform verbatim guidance): {style}" in text
+    assert "Do not translate `--style` into a preset, enum, switch, or fallback ladder" in text
+    assert "style_card.json" in text
+    assert "packaging_plan.json" in text
+    assert "deterministic report-only tool QC" in text
+    assert "not treat it as an AIGC detector" in text
+    assert "do not auto-rewrite" in text
+    assert "not a preset enum, fixed taxonomy" in text
+
+
+def test_understanding_brief_does_not_leak_hardcoded_example_entities(tmp_path):
+    text = build_agent_brief(SCENES, ASR, SILENCE, 6.0, tmp_path, style="纪实复盘").read_text(encoding="utf-8")
+
+    for leaked in ["范闲", "监察院", "五竹", "京都"]:
+        assert leaked not in text

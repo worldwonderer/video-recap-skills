@@ -22,6 +22,7 @@ import argparse
 import base64
 import json
 import re
+import unicodedata
 import wave
 from pathlib import Path
 
@@ -38,6 +39,8 @@ CLONE_MODEL = "mimo-v2.5-tts-voiceclone"
 CLONE_SR = 24000  # mimo voiceclone returns 24kHz mono PCM16 wav
 ASR_MIME = "audio/wav"
 ATEMPO_CAP = 2.0  # max compression before we trim instead (atempo>2 also sounds rushed)
+DUB_FAST_SPEECH_CPS = 7.0
+DUB_TRIM_RISK_CPS = 7.0
 
 DUB_SCHEMA_VERSION = 1
 # Tolerate ~1-frame rounding in agent-estimated timings so the gate blocks only GENUINE
@@ -82,7 +85,15 @@ DUB_ARTIFACT_SCHEMAS = {
 
 def _chars_per_second(text, room):
     room = max(float(room or 0.0), 0.001)
-    return len(str(text or "")) / room
+    effective = 0
+    for ch in str(text or ""):
+        if ch.isspace():
+            continue
+        cat = unicodedata.category(ch)
+        if cat.startswith("P") or cat.startswith("S"):
+            continue
+        effective += 1
+    return effective / room
 
 
 def _issue(severity, code, line, message, start=None, end=None):
@@ -164,9 +175,9 @@ def lint_dub_script(script, duration, work_dir=None):
             max_cps = max(max_cps, cps)
             if room < 0.4:
                 issues.append(_issue("error", "room_too_short", line_no, "line has less than 0.4s room for speech", start, end))
-            elif zh and cps > 8.0:
+            elif zh and cps >= DUB_FAST_SPEECH_CPS:
                 issues.append(_issue("warning", "fast_speech", line_no, f"translation is dense ({cps:.1f} chars/s)", start, end))
-            if zh and cps > 12.0:
+            if zh and cps >= DUB_TRIM_RISK_CPS:
                 trim_risk.append(line_no)
                 issues.append(_issue("warning", "trim_risk", line_no, "likely to be compressed hard or trimmed by render", start, end))
     error_items = [x for x in issues if x["severity"] == "error"]

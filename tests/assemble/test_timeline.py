@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-assemble' / 'scripts'))
 import json  # noqa: E402
+import pytest  # noqa: E402
 from timeline import build_timeline, ducking_keyframes, load_timeline, save_timeline, variable_ducking_keyframes  # noqa: E402
 
 def _track(timeline, kind, name=None):
@@ -291,3 +292,86 @@ def test_emit_timeline_marks_degraded_multi_source_fallback(monkeypatch, tmp_pat
     assert timeline["provenance"]["degraded"] is True
     assert timeline["provenance"]["degraded_clips"][0]["reason"].startswith("missing_source_path:")
     assert json.loads((work / "timeline.json").read_text(encoding="utf-8"))["provenance"]["degraded"] is True
+
+
+def _eval_filter_gain(filter_complex, t):
+    start = filter_complex.index("volume='") + len("volume='")
+    end = filter_complex.index("':eval=frame", start)
+    expr = filter_complex[start:end]
+    return eval(expr, {"__builtins__": {}}, {"t": float(t), "min": min, "max": max})
+
+
+def _interp_keyframe_gain(keyframes, t):
+    pts = sorted((float(k["t"]), float(k["gain"])) for k in keyframes)
+    if t <= pts[0][0]:
+        return pts[0][1]
+    for (t0, g0), (t1, g1) in zip(pts, pts[1:]):
+        if t <= t1:
+            if abs(t1 - t0) < 1e-9:
+                return g1
+            ratio = (t - t0) / (t1 - t0)
+            return g0 + (g1 - g0) * ratio
+    return pts[-1][1]
+
+
+def test_p0_ducking_ffmpeg_expression_matches_timeline_keyframes(monkeypatch):
+    """Rendered mp4 ducking and timeline/JianYing ducking share the same outside-ramp semantics."""
+    import assemble
+
+    monkeypatch.setitem(assemble.CONFIG, "ducking_mode", "fixed")
+    monkeypatch.setitem(assemble.CONFIG, "idle_orig_volume", 0.85)
+    monkeypatch.setitem(assemble.CONFIG, "speech_ducking_volume", 0.2)
+    monkeypatch.setitem(assemble.CONFIG, "zone_ducking_volume", 0.12)
+    monkeypatch.setitem(assemble.CONFIG, "duck_fade_seconds", 0.25)
+    monkeypatch.setitem(assemble.CONFIG, "duck_bridge_seconds", 6.0)
+    segments = [
+        {"actual_place_start": 2.0, "actual_place_end": 4.0, "overlaps_speech": True},
+        {"actual_place_start": 6.0, "actual_place_end": 8.0, "overlaps_speech": False},
+    ]
+
+    fc = assemble._build_audio_filter_complex(segments)
+    kfs = variable_ducking_keyframes(
+        [(2.0, 4.0, 0.2), (6.0, 8.0, 0.12)],
+        idle=0.85,
+        fade=0.25,
+        span_start=0.0,
+        span_end=10.0,
+        bridge=6.0,
+    )
+
+    # Mixed-level bridged windows flatten to the min level (0.12) and ramp outside [s,e].
+    for t in [1.75, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 8.25]:
+        assert _eval_filter_gain(fc, t) == pytest.approx(_interp_keyframe_gain(kfs, t), abs=0.015)
+
+
+def _sample_keyframes(keyframes, t):
+    prev = keyframes[0]
+    for cur in keyframes[1:]:
+        if t <= cur["t"]:
+            if cur["t"] == prev["t"]:
+                return cur["gain"]
+            ratio = (t - prev["t"]) / (cur["t"] - prev["t"])
+            return prev["gain"] + (cur["gain"] - prev["gain"]) * ratio
+        prev = cur
+    return keyframes[-1]["gain"]
+
+
+def test_ducking_ffmpeg_and_timeline_share_pre_hold_post_semantics():
+    from audio_automation import coalesce_duck_windows, ducking_gain_at
+
+    windows = [(2.0, 4.0, 0.2), (4.5, 6.0, 0.12)]
+    idle = 0.85
+    fade = 0.25
+    merged = coalesce_duck_windows(windows, bridge=1.0)  # bridged mixed levels -> min 0.12
+    keyframes = variable_ducking_keyframes(windows, idle=idle, fade=fade,
+                                           span_start=0.0, span_end=8.0, bridge=1.0)
+
+    for t, expected in [
+        (1.75, idle),   # pre-roll starts at s-fade
+        (2.0, 0.12),    # spoken start is fully ducked
+        (3.0, 0.12),    # hold through midpoint / bridged gap
+        (6.0, 0.12),    # spoken end is still fully ducked
+        (6.25, idle),   # post-roll releases by e+fade
+    ]:
+        assert ducking_gain_at(merged, idle, fade, t) == pytest.approx(expected)
+        assert _sample_keyframes(keyframes, t) == pytest.approx(expected)

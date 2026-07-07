@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 # ── 配置 ──────────────────────────────────────────────────────────────
+_EXISTING_CONFIG_REF = globals().get("CONFIG")
 
 DEFAULT_MIMO_API_URL = "https://api.xiaomimimo.com/v1"
 DEFAULT_MIMO_TOKEN_PLAN_CLUSTER = "cn"
@@ -231,8 +232,16 @@ CONFIG = {
     "jianying_bundle_media": env_bool("JIANYING_BUNDLE_MEDIA", True),  # 默认开：macOS 剪映沙箱读不到外部路径，须把素材拷进草稿目录
     "bgm_volume": env_float("BGM_VOLUME", 0.18, minimum=0.0),  # BGM 铺底音量
     "bgm_ducking_volume": env_float("BGM_DUCKING_VOLUME", 0.10, minimum=0.0),  # 旁白时 BGM 压低到的音量
-    "narration_speed": env_float("NARRATION_SPEED", 1.3, minimum=0.5),  # 解说整体提速(atempo)，默认偏快适配短视频；长片可设 1.0
-    "mask_source_subtitles": env_bool("MASK_SOURCE_SUBTITLES", True),  # 遮挡原片烧录字幕（默认开；无烧录字幕素材设 false）
+    "narration_speed": env_float("NARRATION_SPEED", 1.15, minimum=0.5),  # 解说整体提速(atempo)，默认回到可懂区间；长片可设 1.0
+    "narration_cumulative_tempo_max": env_float("NARRATION_CUMULATIVE_TEMPO_MAX", 1.35, minimum=1.0),  # TTS rate × 全局 atempo × 段内 atempo 的累计上限
+    "narration_cumulative_tempo_hard_max": env_float("NARRATION_CUMULATIVE_TEMPO_HARD_MAX", 1.40, minimum=1.0),  # QC/阻断硬上限
+    "tts_segment_tempo_max": env_float("TTS_SEGMENT_TEMPO_MAX", 1.20, minimum=1.0),  # 兼容旧段内 atempo 上限；实际会被累计预算收紧
+    "mask_source_subtitles": env_bool("MASK_SOURCE_SUBTITLES", False),  # 遮挡原片烧录字幕；必须配合显式 SOURCE_SUBTITLE_MASK_POLICY
+    "source_subtitle_mask_policy_declared": bool(os.environ.get("SOURCE_SUBTITLE_MASK_POLICY", "").strip()),
+    "source_subtitle_mask_policy": (
+        os.environ.get("SOURCE_SUBTITLE_MASK_POLICY", "").strip().lower()
+        or "off"
+    ),  # off | opt_in | safe | forced；MASK_SOURCE_SUBTITLES alone is legacy implicit and QC-blocking
     "source_subtitle_mask_ratio": env_float("SOURCE_SUBTITLE_MASK_RATIO", 0.14, minimum=0.0),  # 底部遮挡比例
     "narration_delay_seconds": 1.5,  # 解说延迟放置秒数，让画面先出现再解说（仅用于段落起点）
     "narration_tighten": env_bool("NARRATION_TIGHTEN", True),  # 段落内把句子紧贴上一句实际收尾播放，句间间隔稳定≤tight_pause，杜绝"一句解说一段空白"的卡顿
@@ -267,6 +276,9 @@ CONFIG = {
     "tts_timeout": env_int("TTS_TIMEOUT", 90, minimum=1),  # 单段 TTS 命令超时秒数
     "tts_retries": env_int("TTS_RETRIES", 3, minimum=1),  # 单段 TTS 失败重试次数
     "allow_partial_tts": env_bool("ALLOW_PARTIAL_TTS", False),
+    "tts_segment_normalize": env_bool("TTS_SEGMENT_NORMALIZE", True),  # 单段 TTS RMS 归一，降低段间忽大忽小
+    "tts_segment_target_rms_dbfs": env_float("TTS_SEGMENT_TARGET_RMS_DBFS", -20.0),
+    "tts_segment_peak_limit": env_float("TTS_SEGMENT_PEAK_LIMIT", 0.98, minimum=0.1),
     "edit_mode": os.environ.get("EDIT_MODE", "full"),  # full | cut
     "edit_mode_source": "env" if os.environ.get("EDIT_MODE") else "default",
     "target_duration": os.environ.get("TARGET_DURATION", ""),  # cut 模式目标成片时长，如 10m
@@ -286,6 +298,7 @@ CONFIG = {
     "target_lufs": env_float("TARGET_LUFS", -14.0),       # 目标综合响度 (LUFS)
     "target_true_peak": env_float("TARGET_TRUE_PEAK", -1.0),  # 目标真峰值 (dBTP)
     "target_lra": env_float("TARGET_LRA", 11.0),          # 目标响度范围 (LU)
+    "final_limiter_peak": env_float("FINAL_LIMITER_PEAK", 0.98, minimum=0.1),  # loudnorm 后峰值保护 limiter
     "subtitle_font_name": os.environ.get("SUBTITLE_FONT_NAME", "Arial"),
     "subtitle_font_size": env_int("SUBTITLE_FONT_SIZE", 42, minimum=8),
     "subtitle_primary_color": os.environ.get("SUBTITLE_PRIMARY_COLOR", "&H00FFFFFF"),
@@ -297,12 +310,42 @@ CONFIG = {
     "subtitle_margin_r": env_int("SUBTITLE_MARGIN_R", 40, minimum=0),
     "subtitle_alignment": env_int("SUBTITLE_ALIGNMENT", 2, minimum=1),
     "subtitle_max_chars": env_int("SUBTITLE_MAX_CHARS", 20, minimum=6),
+    "subtitle_max_lines": env_int("SUBTITLE_MAX_LINES", 2, minimum=1),
     "subtitle_play_res_x": env_int("SUBTITLE_PLAY_RES_X", 1280, minimum=1),
     "subtitle_play_res_y": env_int("SUBTITLE_PLAY_RES_Y", 720, minimum=1),
 }
+if isinstance(_EXISTING_CONFIG_REF, dict):
+    _EXISTING_CONFIG_REF.clear()
+    _EXISTING_CONFIG_REF.update(CONFIG)
+    CONFIG = _EXISTING_CONFIG_REF
 
 SCRIPT_DIR = Path(__file__).parent
 PROMPTS_DIR = SCRIPT_DIR.parent / "references"
+
+def narration_tempo_budget(tts_rate_offset=0.0, *, config=None):
+    """Return the canonical tempo budget shared by voiceover and assemble.
+
+    `effective_tempo` is the user-perceived cumulative compression:
+    TTS rate × global narration atempo × per-segment atempo.  The segment atempo
+    cap is therefore tightened by the configured global speed and TTS rate
+    offset; callers must fail/shorten instead of time-trimming speech when the
+    needed ratio exceeds `segment_tempo_max`.
+    """
+    cfg = config or CONFIG
+    global_speed = max(0.01, float(cfg.get("narration_speed", 1.0) or 1.0))
+    rate_factor = max(0.01, 1.0 + float(tts_rate_offset or 0.0))
+    cumulative_max = max(1.0, float(cfg.get("narration_cumulative_tempo_max", 1.35) or 1.35))
+    hard_max = max(cumulative_max, float(cfg.get("narration_cumulative_tempo_hard_max", 1.40) or 1.40))
+    legacy_segment_cap = max(1.0, float(cfg.get("tts_segment_tempo_max", 1.20) or 1.20))
+    segment_tempo_max = max(1.0, min(legacy_segment_cap, cumulative_max / (global_speed * rate_factor)))
+    return {
+        "global_narration_speed": global_speed,
+        "tts_rate_factor": rate_factor,
+        "cumulative_tempo_max": cumulative_max,
+        "cumulative_tempo_hard_max": hard_max,
+        "segment_tempo_max": segment_tempo_max,
+        "max_raw_duration_factor": global_speed * segment_tempo_max,
+    }
 
 def log(msg):
     print(f"[video-recap] {msg}", flush=True)

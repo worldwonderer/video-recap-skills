@@ -34,7 +34,8 @@ def test_parse_clean_rejects_count_mismatch_and_garbage():
 
 def test_parse_index_normalizes_to_four_list_keys():
     r = consolidate.parse_index_response('garbage no json')
-    assert r == {"characters": [], "relationships": [], "plot_points": [], "entities": []}
+    assert {k: r[k] for k in ("characters", "relationships", "plot_points", "entities")} == {"characters": [], "relationships": [], "plot_points": [], "entities": []}
+    assert r["schema_version"] == 2 and r["research_glossary"] == []
     r2 = consolidate.parse_index_response('{"characters":[{"name":"A"}],"plot_points":["p1"]}')
     assert r2["characters"][0]["name"] == "A" and r2["plot_points"] == ["p1"]
     assert r2["relationships"] == [] and r2["entities"] == []
@@ -180,3 +181,74 @@ def test_consolidate_index_recomputes_when_prompt_provenance_missing(monkeypatch
 
     assert calls["n"] == 2
     assert second["characters"][0]["name"] == "第二次"
+
+
+def test_build_index_messages_v2_includes_asr_and_research_glossary():
+    content = consolidate.build_index_messages(
+        [{"scene_id": 0, "start": 0, "end": 5, "description": "门口对峙"}],
+        asr_result=[{"start": 1, "end": 2, "text": "叶青眉留下了线索"}],
+        background_research={"character_details": {"叶轻眉": {"aliases": ["叶青眉"], "role": "主角之母"}}},
+    )[0]["content"]
+    assert "[asr:0" in content and "叶青眉留下了线索" in content
+    assert "support=context_only" in content and "叶轻眉" in content and "aliases=叶青眉" in content
+
+
+def test_parse_index_v2_keeps_old_keys_and_context_only_glossary():
+    r = consolidate.parse_index_response('{"characters":[{"name":"A"}],"research_glossary":[{"name":"叶轻眉","support":"direct"}]}')
+    assert r["schema_version"] == 2
+    assert r["characters"][0]["name"] == "A"
+    assert r["relationships"] == [] and r["plot_points"] == [] and r["entities"] == []
+    assert r["research_glossary"][0]["support"] == "context_only"
+
+
+def test_consolidate_index_cache_invalidates_on_asr_and_research(monkeypatch, tmp_path):
+    (tmp_path / "vlm_analysis.json").write_text(json.dumps([{"scene_id": 0, "start": 0, "end": 5, "description": "d"}], ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "asr_result.json").write_text(json.dumps([{"start": 0, "end": 1, "text": "第一版"}], ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "background_research.json").write_text(json.dumps({"characters": {"甲": "第一版"}}, ensure_ascii=False), encoding="utf-8")
+    calls = {"n": 0}
+    def fake(payload):
+        calls["n"] += 1
+        return _fake('{"characters":[],"relationships":[],"plot_points":[],"entities":[]}')
+    monkeypatch.setattr("consolidate.api_call", fake)
+    consolidate.consolidate_index(tmp_path)
+    consolidate.consolidate_index(tmp_path)
+    assert calls["n"] == 1
+    (tmp_path / "background_research.json").write_text(json.dumps({"characters": {"甲": "第二版"}}, ensure_ascii=False), encoding="utf-8")
+    consolidate.consolidate_index(tmp_path)
+    assert calls["n"] == 2
+    (tmp_path / "asr_result.json").write_text(json.dumps([{"start": 0, "end": 1, "text": "第二版"}], ensure_ascii=False), encoding="utf-8")
+    consolidate.consolidate_index(tmp_path)
+    assert calls["n"] == 3
+    meta = json.loads((tmp_path / "understanding_index.json.meta.json").read_text(encoding="utf-8"))
+    assert meta["schema_version"] == 2 and meta["asr_md5"] and meta["research_md5"]
+
+
+
+def test_index_v2_deterministic_asr_mentions_when_llm_omits(monkeypatch, tmp_path):
+    (tmp_path / "vlm_analysis.json").write_text(json.dumps([{"scene_id": 0, "start": 0, "end": 5, "description": "无人名画面"}], ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "asr_result.json").write_text(json.dumps([{"start": 1, "end": 2, "text": "叶青眉留下线索"}], ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "background_research.json").write_text(json.dumps({"character_details": {"叶轻眉": {"aliases": ["叶青眉"], "role": "关键人物"}}}, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr("consolidate.api_call", lambda payload: _fake('{"characters":[],"relationships":[],"plot_points":[],"entities":[],"research_glossary":[]}'))
+    idx = consolidate.consolidate_index(tmp_path)
+    char = idx["characters"][0]
+    assert char["name"] == "叶轻眉"
+    assert char["asr_mentions"][0]["evidence_id"] == "asr:0"
+    assert "asr:0" in char["evidence_ids"]
+    assert idx["research_glossary"][0]["support"] == "context_only"
+
+
+def test_index_v2_cache_invalidates_on_asr_clean(monkeypatch, tmp_path):
+    (tmp_path / "vlm_analysis.json").write_text(json.dumps([{"scene_id": 0, "start": 0, "end": 5, "description": "d"}], ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "asr_result.json").write_text(json.dumps([{"start": 0, "end": 1, "text": "raw"}], ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "asr_clean.json").write_text(json.dumps({"segments": [{"start": 0, "end": 1, "text": "第一版"}]}, ensure_ascii=False), encoding="utf-8")
+    calls = {"n": 0}
+    def fake(payload):
+        calls["n"] += 1
+        return _fake('{"characters":[],"relationships":[],"plot_points":[],"entities":[]}')
+    monkeypatch.setattr("consolidate.api_call", fake)
+    consolidate.consolidate_index(tmp_path)
+    consolidate.consolidate_index(tmp_path)
+    assert calls["n"] == 1
+    (tmp_path / "asr_clean.json").write_text(json.dumps({"segments": [{"start": 0, "end": 1, "text": "第二版"}]}, ensure_ascii=False), encoding="utf-8")
+    consolidate.consolidate_index(tmp_path)
+    assert calls["n"] == 2

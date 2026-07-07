@@ -191,3 +191,20 @@ def test_dub_print_schema_includes_new_artifacts(capsys):
     assert "dub_lint.json" in schemas
     assert "dub_review.json" in schemas
     assert "dub_manifest.json" in schemas
+
+
+def test_p0_dub_chars_per_second_ignores_punctuation_for_density():
+    assert dub._chars_per_second("你，好！……", 1.0) == pytest.approx(2.0)
+    assert dub._chars_per_second("Hello, world!", 2.0) == pytest.approx(5.0)
+
+
+def test_p0_dub_lint_warns_near_trim_risk_before_hard_cut():
+    script = [{"start": 0.0, "end": 2.0, "zh": "这是一句中文台词需要稍微压缩"}]  # 14 effective chars / 2s = 7 cps
+    lint = dub.lint_dub_script(script, duration=3.0)
+
+    assert lint["verdict"] == "PASS"
+    codes = {issue["code"] for issue in lint["issues"]}
+    assert "fast_speech" in codes
+    assert "trim_risk" in codes
+    assert lint["summary"]["trim_risk_lines"] == [0]
+    assert lint["summary"]["max_chars_per_second"] == pytest.approx(7.0)

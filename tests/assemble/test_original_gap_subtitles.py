@@ -11,6 +11,7 @@ import assemble  # noqa: E402
 def _burn_on(monkeypatch):
     monkeypatch.setitem(assemble.CONFIG, "burn_subtitles", True)
     monkeypatch.setitem(assemble.CONFIG, "mask_source_subtitles", True)
+    monkeypatch.setitem(assemble.CONFIG, "source_subtitle_mask_policy", "opt_in")
     monkeypatch.setitem(assemble.CONFIG, "subtitle_original_in_gaps", True)
 
 
@@ -81,6 +82,7 @@ def test_original_gap_entries_gated_off(monkeypatch, tmp_path):
     # burn off
     monkeypatch.setitem(assemble.CONFIG, "burn_subtitles", False)
     monkeypatch.setitem(assemble.CONFIG, "mask_source_subtitles", True)
+    monkeypatch.setitem(assemble.CONFIG, "source_subtitle_mask_policy", "opt_in")
     monkeypatch.setitem(assemble.CONFIG, "subtitle_original_in_gaps", True)
     assert assemble._original_gap_subtitle_entries([], tmp_path, 10.0) == []
     # not masking → source subs already show, so we must NOT add ours
@@ -89,6 +91,7 @@ def test_original_gap_entries_gated_off(monkeypatch, tmp_path):
     assert assemble._original_gap_subtitle_entries([], tmp_path, 10.0) == []
     # explicit override off
     monkeypatch.setitem(assemble.CONFIG, "mask_source_subtitles", True)
+    monkeypatch.setitem(assemble.CONFIG, "source_subtitle_mask_policy", "opt_in")
     monkeypatch.setitem(assemble.CONFIG, "subtitle_original_in_gaps", False)
     assert assemble._original_gap_subtitle_entries([], tmp_path, 10.0) == []
 
