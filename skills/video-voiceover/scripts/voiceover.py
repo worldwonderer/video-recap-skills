@@ -22,6 +22,21 @@ def _parse_rate_offset(rate_str):
     return 0.0
 
 
+def _per_segment_atempo_max(tts_rate_offset=0.0, narration_speed=None):
+    """Cap assembly-time local atempo under the cumulative tempo ceiling."""
+    global_speed = float(narration_speed if narration_speed is not None else CONFIG.get("narration_speed", 1.0) or 1.0)
+    rate_multiplier = max(0.001, 1.0 + float(tts_rate_offset or 0.0))
+    tempo_ceiling = max(1.0, float(CONFIG.get("max_cumulative_narration_tempo", 1.35) or 1.35))
+    return max(1.0, tempo_ceiling / (max(0.001, global_speed) * rate_multiplier))
+
+
+def _raw_duration_budget(available_duration, tts_rate_offset=0.0):
+    """Raw synthesized-audio duration allowed before assemble must cut."""
+    narration_speed = float(CONFIG.get("narration_speed", 1.0) or 1.0)
+    return float(available_duration) * narration_speed * _per_segment_atempo_max(
+        tts_rate_offset, narration_speed)
+
+
 def _compute_tts_params(text, narration, seg_index):
     """根据内容特征和位置计算 TTS 语速/音高参数"""
     rate = "+5%"
@@ -85,6 +100,7 @@ def _synthesize_segment(i, seg, narration, tts_dir, engine):
     if prepared is None:
         return None
     text, output_wav, rate, pitch, cache_key = prepared
+    source_text = text
     cached = _reuse_tts_segment_cache(i, seg, output_wav, text, rate, cache_key)
     if cached:
         return cached
@@ -98,8 +114,8 @@ def _synthesize_segment(i, seg, narration, tts_dir, engine):
     # assemble speeds every segment up by narration_speed (global atempo) BEFORE placement, so the
     # slot actually holds raw_dur / narration_speed; fold that in (plus the local per-segment adjust
     # headroom atempo_max) or a 1.3x-authored BLOCK gets needlessly truncated into a clipped fragment.
-    narration_speed = float(CONFIG.get("narration_speed", 1.0) or 1.0)
-    raw_budget = available * narration_speed * 1.2
+    rate_offset = _parse_rate_offset(rate)
+    raw_budget = _raw_duration_budget(available, rate_offset)
     if dur > raw_budget and len(text) > 5:
         chars_per_sec = len(text) / dur if dur > 0 else 3.0
         target_chars = max(5, int(raw_budget * chars_per_sec) - 1)
@@ -110,11 +126,15 @@ def _synthesize_segment(i, seg, narration, tts_dir, engine):
             _run_tts_engine(engine, text, output_wav, rate=rate, pitch=pitch, emotion=seg.get("emotion"))
             dur = _get_audio_duration(output_wav)
 
-    _write_tts_segment_cache(output_wav, cache_key, text, dur, _parse_rate_offset(rate))
-    return _build_tts_segment_result(i, seg, text, output_wav, dur, _parse_rate_offset(rate))
+    _write_tts_segment_cache(output_wav, cache_key, text, dur, rate_offset)
+    return _build_tts_segment_result(
+        i, seg, text, output_wav, dur, rate_offset, source_text=source_text,
+        truncation_reason="voiceover_precheck_text_budget",
+    )
 
 
-def _build_tts_segment_result(index, seg, text, output_wav, duration, rate_offset):
+def _build_tts_segment_result(index, seg, text, output_wav, duration, rate_offset,
+                              source_text=None, truncation_reason=None):
     result = {
         "index": index,
         "start": seg["start"],
@@ -126,6 +146,10 @@ def _build_tts_segment_result(index, seg, text, output_wav, duration, rate_offse
         "pause_after_ms": seg.get("pause_after_ms", CONFIG.get("breath_ms", 250)),
         "overlaps_speech": seg.get("overlaps_speech", True),
     }
+    if source_text and str(source_text).strip() != str(text).strip():
+        result["narration_original"] = str(source_text).strip()
+        result["truncated"] = True
+        result["truncation_reason"] = truncation_reason or "voiceover_text_budget"
     for optional_key in ("source_start", "source_end", "source_clip_id", "emotion"):
         if optional_key in seg:
             result[optional_key] = seg[optional_key]
@@ -305,7 +329,10 @@ def _reuse_tts_segment_cache(index, seg, output_wav, source_text, rate, cache_ke
     spoken_text = str(cached.get("spoken_text") or source_text)
     rate_offset = float(cached.get("tts_rate_offset", _parse_rate_offset(rate)) or 0.0)
     log(f"  段 {index+1}: 复用已有 ({existing_dur:.1f}s)")
-    return _build_tts_segment_result(index, seg, spoken_text, output_wav, existing_dur, rate_offset)
+    return _build_tts_segment_result(
+        index, seg, spoken_text, output_wav, existing_dur, rate_offset,
+        source_text=source_text, truncation_reason="cached_voiceover_text_budget",
+    )
 
 
 def _tts_segment_cache_key(engine, index, seg, source_text, rate, pitch):
@@ -405,6 +432,8 @@ def tts_settings_fingerprint(engine=None):
         "mimo_tts_voice": CONFIG.get("mimo_tts_voice"),
         "mimo_tts_style": CONFIG.get("mimo_tts_style"),
         "narration_speed": float(CONFIG.get("narration_speed", 1.0) or 1.0),
+        "max_cumulative_narration_tempo": float(
+            CONFIG.get("max_cumulative_narration_tempo", 1.35) or 1.35),
     }
 
 

@@ -5,7 +5,18 @@ import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
 from lib import CONFIG
 import voiceover
-from voiceover import _build_tts_segment_result, _detect_tts_engine, _parse_rate_offset, _run_tts_engine, _synthesize_segment, _tts_mimo, resolve_tts_engine, synthesize_tts
+from voiceover import (
+    _build_tts_segment_result,
+    _detect_tts_engine,
+    _parse_rate_offset,
+    _per_segment_atempo_max,
+    _raw_duration_budget,
+    _run_tts_engine,
+    _synthesize_segment,
+    _tts_mimo,
+    resolve_tts_engine,
+    synthesize_tts,
+)
 
 
 def test_parse_rate_offset():
@@ -78,12 +89,40 @@ def test_tts_cache_key_changes_with_narration_speed(monkeypatch, tmp_path):
     assert key_normal != key_fast
 
 
+def test_tts_cache_key_changes_with_cumulative_tempo_ceiling(monkeypatch, tmp_path):
+    seg = {"start": 0.0, "end": 2.0, "narration": "缓存语速上限。"}
+    tts_dir = tmp_path / "tts_segments"
+    tts_dir.mkdir()
+
+    monkeypatch.setitem(CONFIG, "tts_dynamic_params", False)
+    monkeypatch.setitem(CONFIG, "mimo_tts_model", "mimo-v2.5-tts")
+    monkeypatch.setitem(CONFIG, "mimo_tts_voice", "冰糖")
+
+    monkeypatch.setitem(CONFIG, "max_cumulative_narration_tempo", 1.20)
+    key_low = voiceover._prepare_tts_segment(0, seg, [seg], tts_dir, "mimo-tts")[4]
+    monkeypatch.setitem(CONFIG, "max_cumulative_narration_tempo", 1.35)
+    key_high = voiceover._prepare_tts_segment(0, seg, [seg], tts_dir, "mimo-tts")[4]
+
+    assert key_low != key_high
+
+
+def test_voiceover_raw_budget_matches_cumulative_tempo_ceiling(monkeypatch):
+    monkeypatch.setitem(CONFIG, "narration_speed", 1.15)
+    monkeypatch.setitem(CONFIG, "max_cumulative_narration_tempo", 1.35)
+
+    assert _per_segment_atempo_max(0.05) == pytest.approx(1.35 / (1.15 * 1.05))
+    # Raw budget includes the global speed already applied by assemble, but the
+    # local headroom is capped so TTS rate × global atempo × local atempo ≤ 1.35.
+    assert _raw_duration_budget(10.0, 0.05) == pytest.approx(10.0 * 1.15 * (1.35 / (1.15 * 1.05)))
+
+
 def test_synthesize_segment_block_truncation_accounts_for_narration_speed(monkeypatch, tmp_path):
     # assemble speeds every segment up by narration_speed before placement, so the slot holds
     # raw_dur / narration_speed. A block whose RAW tts overflows the slot but fits after the 1.3x
     # speedup must NOT be truncated; only a block that overflows even then is trimmed.
     monkeypatch.setitem(CONFIG, "tts_dynamic_params", False)
-    monkeypatch.setitem(CONFIG, "narration_speed", 1.3)
+    monkeypatch.setitem(CONFIG, "narration_speed", 1.15)
+    monkeypatch.setitem(CONFIG, "max_cumulative_narration_tempo", 1.35)
     monkeypatch.setitem(CONFIG, "mimo_tts_model", "mimo-v2.5-tts")
     calls = []
 
@@ -97,8 +136,9 @@ def test_synthesize_segment_block_truncation_accounts_for_narration_speed(monkey
     tts_dir = tmp_path / "tts_segments"
     tts_dir.mkdir()
 
-    # slot 12s, pause 0.2s -> available 11.8s; raw budget = 11.8 * 1.3 * 1.2 ≈ 18.4s.
-    # 50-char block -> raw 15s: over the old 14.2s (available*1.2) budget, but fits the speed-aware one.
+    # slot 12s, pause 0.2s -> available 11.8s; with default cumulative cap and +0% TTS
+    # rate, raw budget = 11.8 * 1.35 ≈ 15.9s.
+    # 50-char block -> raw 15s: fits the cumulative-aware budget and must not be cut.
     block = "情节推进。" * 10
     res = _synthesize_segment(0, {"start": 0.0, "end": 12.0, "narration": block, "pause_after_ms": 200},
                               [block], tts_dir, "mimo-tts")
@@ -112,6 +152,8 @@ def test_synthesize_segment_block_truncation_accounts_for_narration_speed(monkey
                                [huge], tts_dir, "mimo-tts")
     assert len(calls) == 2                         # re-synthesized after truncation
     assert len(res2["narration"]) < len(huge)
+    assert res2["truncated"] is True
+    assert res2["narration_original"] == huge
 
 
 def test_synthesize_segment_rejects_cache_when_wav_bytes_change(monkeypatch, tmp_path):

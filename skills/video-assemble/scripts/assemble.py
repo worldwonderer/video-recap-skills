@@ -18,6 +18,7 @@ SUBTITLE_STYLE_REF_W = 1280
 SUBTITLE_STYLE_REF_H = 720
 _SUBTITLE_TERMINAL_PUNCTUATION = "。！？!?…."
 _SUBTITLE_CLOSING_QUOTES = "」』”’）)]】》〉\"'"
+_TRUNCATION_ELLIPSIS = "…"
 
 
 def _stable_json_dumps(value):
@@ -398,6 +399,7 @@ def assembly_settings_fingerprint(work_dir=None):
             "tail_pad_seconds": CONFIG.get("narration_tail_pad_seconds", 0.1),
             "fade_ms": CONFIG.get("fade_ms", 120),
             "narration_speed": CONFIG.get("narration_speed", 1.0),
+            "max_cumulative_narration_tempo": CONFIG.get("max_cumulative_narration_tempo", 1.35),
         },
         "audio_mix": {
             "ducking_mode": CONFIG.get("ducking_mode", "fixed"),
@@ -473,6 +475,78 @@ def _subtitle_chunk_weight(text):
     """Weight raw subtitle chunks for timing, independent of display punctuation cleanup."""
     core = re.sub(r"\s+", "", str(text or ""))
     return max(1, len(core))
+
+
+def _text_char_count(text):
+    """Count effective spoken chars, ignoring punctuation/whitespace."""
+    return len(re.sub(r'[，。！？、；：…“”‘’《》〈〉\s"\'「」『』（）()【】\[\]—～·,.!?;:\\-]', '', text or ""))
+
+
+def _truncate_at_sentence(text, max_chars):
+    """Sentence-boundary truncation using effective spoken characters."""
+    if _text_char_count(text) <= max_chars:
+        return text
+    eff = 0
+    cutoff = len(text)
+    for i, ch in enumerate(text):
+        eff += 1 if _text_char_count(ch) else 0
+        if eff > max_chars:
+            cutoff = i + 1
+            break
+    idx = max(text[:cutoff].rfind(sep) for sep in ['。', '！', '？', '!', '?'])
+    if idx > 0:
+        return text[:idx + 1]
+    idx = max(text[:cutoff].rfind(sep) for sep in ['，', '、', '；', ','])
+    if idx > 3:
+        return text[:idx] + '。'
+    return ""
+
+
+def _truncate_text_to_ratio(text, ratio):
+    """Return display/spoken text that fits the retained audio ratio.
+
+    Prefer a sentence/phrase boundary. If no boundary fits, shorten conservatively
+    and visibly mark the line as clipped so subtitles never show unspoken text as
+    if it were complete narration.
+    """
+    original = str(text or "").strip()
+    if not original:
+        return ""
+    ratio = max(0.0, min(1.0, float(ratio or 0.0)))
+    if ratio >= 0.995:
+        return original
+    budget = max(1, int(_text_char_count(original) * ratio))
+    boundary = _truncate_at_sentence(original, budget)
+    if boundary and boundary != original:
+        return boundary
+
+    eff = 0
+    cutoff = 0
+    for i, ch in enumerate(original):
+        eff += 1 if _text_char_count(ch) else 0
+        cutoff = i + 1
+        if eff >= budget:
+            break
+    shortened = original[:cutoff].rstrip(" \t\r\n，。！？、；：…,.!?;:")
+    if not shortened:
+        shortened = original[:max(1, cutoff)].strip()
+    return shortened.rstrip(_TRUNCATION_ELLIPSIS) + _TRUNCATION_ELLIPSIS
+
+
+def _mark_segment_truncated(seg, *, original_duration, played_duration, reason):
+    """Persist truncation metadata and align viewer-facing narration text."""
+    current_text = str(seg.get("narration") or "").strip()
+    original_text = str(seg.get("narration_original") or current_text).strip()
+    if original_text:
+        seg["narration_original"] = original_text
+    if current_text:
+        ratio = (float(played_duration) / float(original_duration)) if float(original_duration or 0) > 0 else 0.0
+        seg["narration"] = _truncate_text_to_ratio(current_text, ratio)
+    seg["truncated"] = True
+    seg["truncation_reason"] = str(reason)
+    seg["truncation_original_duration"] = float(original_duration or 0.0)
+    seg["truncation_played_duration"] = float(played_duration or 0.0)
+    seg["truncation_cut_duration"] = max(0.0, float(original_duration or 0.0) - float(played_duration or 0.0))
 
 
 def _subtitle_entry_chunks(raw_chunks):
@@ -578,6 +652,8 @@ def _subtitle_entries(narration):
         chunks = _subtitle_entry_chunks(_split_subtitle_chunks(text, max_chars))
         if not chunks:
             continue
+        if seg.get("truncated") and text.endswith(_TRUNCATION_ELLIPSIS):
+            chunks[-1]["text"] = chunks[-1]["text"].rstrip(_TRUNCATION_ELLIPSIS) + _TRUNCATION_ELLIPSIS
         if len(chunks) == 1:
             entries.append({"start": start, "end": end, "text": chunks[0]["text"]})
             continue
@@ -1154,19 +1230,80 @@ def _output_downscale_filter(max_h):
     return f"scale=-2:'2*trunc(min(ih,{max_h})/2)':flags=lanczos"
 
 
-def final_loudnorm_filter():
-    """Final-mix loudness normalization filter from CONFIG, or None when disabled.
+def _loudnorm_targets():
+    return {
+        "I": float(CONFIG.get("target_lufs", -14.0)),
+        "TP": float(CONFIG.get("target_true_peak", -1.0)),
+        "LRA": float(CONFIG.get("target_lra", 11.0)),
+    }
+
+
+def _loudnorm_base_filter():
+    targets = _loudnorm_targets()
+    return f"loudnorm=I={targets['I']}:TP={targets['TP']}:LRA={targets['LRA']}"
+
+
+def loudnorm_measure_filter():
+    """First-pass loudnorm measurement filter."""
+    if not CONFIG.get("final_loudnorm", True):
+        return None
+    return f"{_loudnorm_base_filter()}:print_format=json"
+
+
+def parse_loudnorm_stats(output_text):
+    """Parse ffmpeg loudnorm JSON from stdout/stderr and validate required fields."""
+    text = str(output_text or "")
+    required = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
+    matches = re.findall(r"\{[\s\S]*?\}", text)
+    for raw in reversed(matches):
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        if not all(k in data for k in required):
+            continue
+        stats = {k: str(data[k]).strip() for k in required}
+        try:
+            for value in stats.values():
+                float(value)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"loudnorm 测量结果包含无效数值: {stats}") from exc
+        return stats
+    raise RuntimeError("无法解析 final loudnorm 一阶段测量 JSON，已中止以避免回退到动态单通道响度归一")
+
+
+def loudnorm_render_filter(stats):
+    """Second-pass linear loudnorm render filter with measured values injected."""
+    if not CONFIG.get("final_loudnorm", True):
+        return None
+    if not isinstance(stats, dict):
+        raise RuntimeError("final loudnorm 二阶段缺少一阶段测量数据")
+    required = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
+    missing = [k for k in required if k not in stats]
+    if missing:
+        raise RuntimeError(f"final loudnorm 二阶段缺少测量字段: {', '.join(missing)}")
+    return (
+        f"{_loudnorm_base_filter()}"
+        f":measured_I={stats['input_i']}"
+        f":measured_TP={stats['input_tp']}"
+        f":measured_LRA={stats['input_lra']}"
+        f":measured_thresh={stats['input_thresh']}"
+        f":offset={stats['target_offset']}"
+        ":linear=true"
+    )
+
+
+def final_loudnorm_filter(stats=None):
+    """Final-mix loudness normalization descriptor/render filter, or None when disabled.
 
     Ducking branches set only relative balance; this single stage owns the
     absolute output loudness so the recap is not left too quiet.
     """
     if not CONFIG.get("final_loudnorm", True):
         return None
-    return (
-        f"loudnorm=I={CONFIG.get('target_lufs', -14.0)}"
-        f":TP={CONFIG.get('target_true_peak', -1.0)}"
-        f":LRA={CONFIG.get('target_lra', 11.0)}"
-    )
+    if stats is not None:
+        return loudnorm_render_filter(stats)
+    return f"{_loudnorm_base_filter()}:linear=true"
 
 
 def _apply_narration_speed(tts_segments, work_dir):
@@ -1230,6 +1367,14 @@ def _seg_place_window(seg):
     return s, e
 
 
+def _per_segment_atempo_max(tts_rate_offset=0.0, narration_speed=None):
+    """Cap per-segment atempo so TTS rate × global speed × local atempo stays bounded."""
+    global_speed = float(narration_speed if narration_speed is not None else CONFIG.get("narration_speed", 1.0) or 1.0)
+    rate_multiplier = max(0.001, 1.0 + float(tts_rate_offset or 0.0))
+    tempo_ceiling = max(1.0, float(CONFIG.get("max_cumulative_narration_tempo", 1.35) or 1.35))
+    return max(1.0, tempo_ceiling / (max(0.001, global_speed) * rate_multiplier))
+
+
 def _amix_tail(narr_vol, bgm_chain=""):
     """Mix the prepared original track [orig] (+ optional BGM bed) with the boosted
     narration [narr] into [aout]. bgm_chain, when given, defines [bgm] from input [2:a]."""
@@ -1240,10 +1385,11 @@ def _amix_tail(narr_vol, bgm_chain=""):
 
 
 def _duck_ramp(s, e, fade):
-    """A 0→1 trapezoid over [s,e] with `fade`-second ramps at each edge (no clicks)."""
+    """A 0→1 trapezoid whose ramps sit outside [s,e] so narration is fully ducked inside."""
     if float(fade or 0) <= 0:
         return f"between(t,{s:.2f},{e:.2f})"
-    return f"min(1,max(0,min(t-{s:.2f},{e:.2f}-t)/{fade:.2f}))"
+    fade = float(fade)
+    return f"min(1,max(0,min(t-({s - fade:.2f}),({e + fade:.2f})-t)/{fade:.2f}))"
 
 
 def _placement_windows(tts_segments, level_for):
@@ -1385,6 +1531,46 @@ def _build_audio_filter_complex(
     return orig + _amix_tail(narr_vol, bgm_chain)
 
 
+def _filter_complex_args(filter_complex, work_dir, suffix=""):
+    """Return ffmpeg filter-complex args, spilling long graphs to a script file."""
+    filter_complex_bytes = filter_complex.encode("utf-8")
+    if len(filter_complex_bytes) <= 8000:
+        return ["-filter_complex", filter_complex], None, len(filter_complex_bytes)
+    fc_script = Path(work_dir) / f".filter_complex{suffix}.txt"
+    fc_script.write_text(filter_complex, encoding="utf-8")
+    log(f"使用 filter_complex_script (表达式长度 {len(filter_complex_bytes)} bytes)")
+    return ["-filter_complex_script", str(fc_script)], fc_script, len(filter_complex_bytes)
+
+
+def _measure_loudnorm(input_video, narration_wav, original_audio_input, bgm_input,
+                      filter_complex, work_dir, video_duration):
+    measure_filter = loudnorm_measure_filter()
+    if not measure_filter:
+        return None
+    measured_label = "[aoutln]"
+    measure_complex = f"{filter_complex};[aout]{measure_filter}{measured_label}"
+    fc_args, fc_script, _ = _filter_complex_args(measure_complex, work_dir, "_loudnorm_measure")
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(input_video),
+        "-i", str(narration_wav),
+        *original_audio_input,
+        *bgm_input,
+        *fc_args,
+        "-map", measured_label,
+        "-t", str(video_duration),
+        "-f", "null", "-",
+    ]
+    try:
+        result = run_cmd(cmd)
+        if result.returncode != 0:
+            raise RuntimeError(f"final loudnorm 一阶段测量失败: {result.stderr}")
+        return parse_loudnorm_stats(f"{result.stderr}\n{result.stdout}")
+    finally:
+        if fc_script:
+            fc_script.unlink(missing_ok=True)
+
+
 def assemble_video(input_video, tts_segments, work_dir, output_path):
     """组装最终视频"""
     if not tts_segments:
@@ -1438,43 +1624,31 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
         bgm_audio_label=bgm_audio_label,
     )
 
-    # 对于超长 volume 表达式（多段解说），使用 -filter_complex_script 避免命令行溢出
-    # 末端整体响度归一：ducking 只管相对平衡，这一步统一成片绝对响度
-    aout_label = "[aout]"
-    final_ln = final_loudnorm_filter()
-    if final_ln:
-        filter_complex += f";[aout]{final_ln}[aoutln]"
-        aout_label = "[aoutln]"
-        log(f"成片响度归一: {final_ln}")
-
     # BGM is input [2:a]; -stream_loop -1 loops it to cover the whole timeline (amix
     # duration=first + -t trim it back to the video length).
     bgm_input = ["-stream_loop", "-1", "-i", str(bgm_path)] if has_bgm else []
 
-    filter_complex_bytes = filter_complex.encode('utf-8')
-    if len(filter_complex_bytes) > 8000:
-        fc_script = Path(work_dir) / ".filter_complex.txt"
-        fc_script.write_text(filter_complex, encoding="utf-8")
-        log(f"使用 filter_complex_script (表达式长度 {len(filter_complex_bytes)} bytes)")
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(input_video),
-            "-i", str(narration_wav),
-            *original_audio_input,
-            *bgm_input,
-            "-filter_complex_script", str(fc_script),
-            "-map", "0:v", "-map", aout_label,
-        ]
-    else:
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(input_video),
-            "-i", str(narration_wav),
-            *original_audio_input,
-            *bgm_input,
-            "-filter_complex", filter_complex,
-            "-map", "0:v", "-map", aout_label,
-        ]
+    # 对于超长 volume 表达式（多段解说），使用 -filter_complex_script 避免命令行溢出
+    # 末端整体响度归一：先测量，再用 measured_* 线性二阶段渲染，避免动态单通道 pumping
+    aout_label = "[aout]"
+    if CONFIG.get("final_loudnorm", True):
+        stats = _measure_loudnorm(input_video, narration_wav, original_audio_input, bgm_input,
+                                  filter_complex, work_dir, video_duration)
+        final_ln = loudnorm_render_filter(stats)
+        filter_complex += f";[aout]{final_ln}[aoutln]"
+        aout_label = "[aoutln]"
+        log(f"成片响度归一（二阶段 linear）: {final_ln}")
+
+    fc_args, fc_script, _filter_complex_len = _filter_complex_args(filter_complex, work_dir)
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(input_video),
+        "-i", str(narration_wav),
+        *original_audio_input,
+        *bgm_input,
+        *fc_args,
+        "-map", "0:v", "-map", aout_label,
+    ]
 
     # Video filter chain: mask source subtitles first (drawbox), then burn our subtitles
     # on top. Either one forces a re-encode; with neither, the video stream is copied.
@@ -1521,25 +1695,37 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
             raise RuntimeError(f"视频组装失败: {result.stderr}")
     finally:
         # 清理临时 filter_complex 脚本（无论 ffmpeg 是否成功）
-        if len(filter_complex_bytes) > 8000:
+        if fc_script:
             fc_script.unlink(missing_ok=True)
 
     log(f"最终视频: {output_path} ({output_path.stat().st_size / 1024 / 1024:.1f}MB)")
     return output_path
 
 
-def _adjust_tts_speed(audio_path, target_duration, work_dir, tts_rate_offset=0.0):
+def _adjust_tts_speed(audio_path, target_duration, work_dir, tts_rate_offset=0.0, return_metadata=False):
     """如果 TTS 音频超过目标时长，用 ffmpeg atempo 温和加速"""
     audio_path = Path(audio_path)
     current_dur = get_video_duration(audio_path)
+    meta = {
+        "action": "unchanged",
+        "original_duration": current_dur,
+        "target_duration": target_duration,
+        "tts_rate_offset": float(tts_rate_offset or 0.0),
+        "effective_atempo_max": _per_segment_atempo_max(tts_rate_offset),
+    }
+
+    def _ret(path, duration, metadata=None):
+        data = meta if metadata is None else metadata
+        return (str(path), duration, data) if return_metadata else (str(path), duration)
+
     if current_dur <= target_duration or current_dur == 0:
-        return str(audio_path), current_dur
+        return _ret(audio_path, current_dur)
 
     ratio = current_dur / target_duration
 
-    # 累积上限：TTS rate × atempo ≤ 1.2x
-    effective_max = 1.2 / (1.0 + tts_rate_offset)
-    effective_max = max(1.0, effective_max)
+    # 累积上限：TTS rate × 全局 narration_speed × 分段 atempo ≤ max_cumulative_narration_tempo
+    effective_max = _per_segment_atempo_max(tts_rate_offset)
+    meta["effective_atempo_max"] = effective_max
 
     if ratio > effective_max:
         # 实际截断到目标时长，加 fade-out 防止爆音
@@ -1553,9 +1739,17 @@ def _adjust_tts_speed(audio_path, target_duration, work_dir, tts_rate_offset=0.0
         if result.returncode == 0:
             new_dur = get_video_duration(truncated_path)
             log(f"  TTS 截断: {current_dur:.1f}s → {new_dur:.1f}s (无法加速到 x{ratio:.2f})")
-            return str(truncated_path), new_dur
+            meta.update({
+                "action": "truncated",
+                "ratio": ratio,
+                "played_duration": new_dur,
+                "cut_duration": max(0.0, current_dur - new_dur),
+                "reason": "exceeds_cumulative_tempo_ceiling",
+            })
+            return _ret(truncated_path, new_dur, meta)
         log(f"  警告: TTS 截断失败，保留原音频 ({current_dur:.1f}s)")
-        return str(audio_path), current_dur
+        meta.update({"action": "truncate_failed", "ratio": ratio, "reason": "ffmpeg_truncate_failed"})
+        return _ret(audio_path, current_dur, meta)
 
     # 温和加速
     tempo = min(ratio, effective_max)
@@ -1567,8 +1761,15 @@ def _adjust_tts_speed(audio_path, target_duration, work_dir, tts_rate_offset=0.0
     if result.returncode == 0:
         new_dur = get_video_duration(adjusted_path)
         log(f"  TTS 温和加速: {current_dur:.1f}s → {new_dur:.1f}s (x{tempo:.2f})")
-        return str(adjusted_path), new_dur
-    return str(audio_path), current_dur
+        meta.update({
+            "action": "speed_adjusted",
+            "ratio": ratio,
+            "tempo": tempo,
+            "played_duration": new_dur,
+        })
+        return _ret(adjusted_path, new_dur, meta)
+    meta.update({"action": "speed_adjust_failed", "ratio": ratio, "tempo": tempo})
+    return _ret(audio_path, current_dur, meta)
 
 
 def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
@@ -1655,10 +1856,20 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         # 根据实际可用空间决定是否加速
         available_samples = end_boundary - actual_start
         available_duration = max(available_samples / sample_rate, 0)
+        adjust_meta = None
         if tts_dur > available_duration > 0:
-            wav_path, _actual_dur = _adjust_tts_speed(wav_path, available_duration, work_dir, tts_rate_offset)
-        else:
-            pass  # tts_dur <= available_duration, no speed adjust needed
+            wav_path, _actual_dur, adjust_meta = _adjust_tts_speed(
+                wav_path, available_duration, work_dir, tts_rate_offset, return_metadata=True)
+            if wav_path != original_wav_path:
+                seg["audio_path"] = wav_path
+                seg["audio_duration"] = _actual_dur
+            if adjust_meta and adjust_meta.get("action") == "truncated":
+                _mark_segment_truncated(
+                    seg,
+                    original_duration=adjust_meta.get("original_duration", tts_dur),
+                    played_duration=adjust_meta.get("played_duration", _actual_dur),
+                    reason=adjust_meta.get("reason", "exceeds_cumulative_tempo_ceiling"),
+                )
 
         # _adjust_tts_speed 输出固定 44100Hz mono 16bit，若文件被替换则无需 resample
         if wav_path != original_wav_path:
@@ -1684,6 +1895,7 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         audio_samples = len(wf_data) // 2
         available = end_boundary - actual_start
         write_samples = min(audio_samples, max(available, 0))
+        pre_boundary_audio_samples = audio_samples
 
         if write_samples <= 0:
             log(f"  跳过: {seg['start']:.1f}s-{seg['end']:.1f}s (无空间)")
@@ -1694,6 +1906,13 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
 
         # 裁剪到写入长度
         wf_data = wf_data[:write_samples * 2]
+        if write_samples < pre_boundary_audio_samples:
+            _mark_segment_truncated(
+                seg,
+                original_duration=pre_boundary_audio_samples / sample_rate,
+                played_duration=write_samples / sample_rate,
+                reason="placement_window_cut",
+            )
 
         # 重叠检测：跳过与前段重叠的部分（在 fade 之前，避免截断后丢失 fade-in）
         if actual_start < last_written_end:
@@ -1707,9 +1926,16 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
                 continue
             log(f"  重叠 {overlap_ms:.0f}ms，截断前部")
             skip_samples = last_written_end - actual_start
+            original_overlap_samples = write_samples
             wf_data = wf_data[skip_samples * 2:]
             write_samples -= skip_samples
             actual_start = last_written_end
+            _mark_segment_truncated(
+                seg,
+                original_duration=original_overlap_samples / sample_rate,
+                played_duration=write_samples / sample_rate,
+                reason="placement_overlap_cut",
+            )
 
         # fade-in / fade-out（在 overlap 裁剪之后应用，确保正确的音频包络）
         fade_len = min(int(CONFIG.get("fade_ms", 300) * sample_rate / 1000), write_samples // 4)
