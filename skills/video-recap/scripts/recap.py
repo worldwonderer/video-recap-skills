@@ -21,6 +21,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import qc_contract
+# Same-skill local QC helper exception: final_qc is imported directly so recap can
+# write report-only post-render QC without subprocess overhead or credential/env
+# expansion. Sibling skills still communicate through subprocess artifacts.
+import final_qc
 from doctor import ffmpeg_has_subtitles_filter
 import materials as material_lib
 
@@ -44,6 +49,113 @@ MULTI_SOURCE_NARRATION_CRAFT_BULLETS = [
     "- Leave deliberate original-audio gaps between blocks for strong source moments; tee up the gap before it plays and react to it after it plays.",
     "- Use the kept-clip map and each source work_dir to retrieve source facts, names, ASR, and per-source brief context when a beat is unclear.",
 ]
+
+
+
+
+def _json_safe(value):
+    """Return a JSON-serializable, secret-redacted copy for local QC metadata."""
+    def convert(item):
+        if isinstance(item, Path):
+            return str(item)
+        if isinstance(item, dict):
+            return {str(k): convert(v) for k, v in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [convert(v) for v in item]
+        return item
+
+    return qc_contract.redact_secrets(convert(value))
+
+
+def _load_preflight_stage_reports(work_dir):
+    path = Path(work_dir) / "preflight_qc.json"
+    if not path.exists():
+        return {}
+    data = _load_json(path)
+    if not isinstance(data, dict):
+        raise qc_contract.QCContractError("preflight_qc.json must be a JSON object")
+    qc_contract.validate_report(data)
+    stages = None
+    metadata = data.get("metadata")
+    if isinstance(metadata, dict) and isinstance(metadata.get("stages"), dict):
+        stages = metadata.get("stages")
+    elif isinstance(data.get("stages"), dict):
+        stages = data.get("stages")
+    if stages is None:
+        return {data["stage"]: data}
+    stage_reports = {}
+    for stage, report in stages.items():
+        if not isinstance(report, dict):
+            raise qc_contract.QCContractError(f"preflight stage report must be an object: {stage}")
+        qc_contract.validate_report(report)
+        if report.get("stage") != stage:
+            raise qc_contract.QCContractError(f"preflight stage key does not match report stage: {stage}")
+        stage_reports[stage] = report
+    return stage_reports
+
+
+def _write_shift_left_stage_qc(work_dir, stage, metadata=None, findings=None):
+    """Write/roll up local shift-left QC for one pipeline stage.
+
+    This is a local contract artifact only: no MiMo/deep eval calls, no repair, and
+    no credential persistence. Any validation/write failure is allowed to raise.
+    """
+    work_dir = Path(work_dir)
+    path = work_dir / "preflight_qc.json"
+    stage_report = qc_contract.build_report(
+        artifact="preflight_qc.json",
+        stage=stage,
+        findings=findings or [],
+        metadata=_json_safe(metadata or {}),
+    )
+    stage_reports = _load_preflight_stage_reports(work_dir)
+    stage_reports[stage] = stage_report
+    aggregate_findings = []
+    for report in stage_reports.values():
+        aggregate_findings.extend(dict(f) for f in report.get("findings", []))
+    top_metadata = dict(stage_report.get("metadata") or {})
+    top_metadata["latest_stage"] = stage
+    top_metadata["stages"] = stage_reports
+    top_report = qc_contract.build_report(
+        artifact="preflight_qc.json",
+        stage=stage,
+        findings=aggregate_findings,
+        metadata=_json_safe(top_metadata),
+    )
+    qc_contract.validate_report(top_report)
+    path.write_text(json.dumps(top_report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    qc_contract.validate_report(_load_json(path))
+    return top_report
+
+
+def _tts_qc_metadata(work_dir):
+    work_dir = Path(work_dir)
+    metadata = {}
+    tts_meta = _load_json(work_dir / "tts_meta.json")
+    if tts_meta is not None:
+        metadata["tts_meta"] = tts_meta
+    tts_dir = work_dir / "tts_segments"
+    if tts_dir.exists() and tts_dir.is_dir():
+        metadata["tts_segments"] = [str(p.relative_to(work_dir)) for p in sorted(tts_dir.iterdir()) if p.is_file()]
+    return metadata
+
+
+def _post_render_qc_metadata(work_dir, final_output):
+    work_dir = Path(work_dir)
+    metadata = {"final_output": str(final_output) if final_output is not None else None}
+    assembly_manifest = _load_json(work_dir / ASSEMBLY_MANIFEST)
+    if assembly_manifest is not None:
+        metadata["assembly_manifest"] = assembly_manifest
+    return metadata
+
+
+def _write_final_qc_reports(work_dir, final_output):
+    """Write report-only final QC artifacts after render.
+
+    final_qc.run converts ffprobe unavailability/failure into deterministic
+    blockers; only unexpected schema/write errors propagate.
+    """
+    return final_qc.run(work_dir, final_output=final_output)
 
 
 def _entry(skill, script):
@@ -919,7 +1031,8 @@ def _run_multi_cut(videos, work_dir, args):
     if getattr(args, "allow_sparse_cut", False):
         crender.append("--allow-sparse-cut")
     _run("video-cut", "cut.py", *crender)
-    _surface_cut_qc(work_dir)
+    cut_qc = _surface_cut_qc(work_dir)
+    _write_shift_left_stage_qc(work_dir, "post_cut", metadata={"cut_qc": cut_qc})
     if not narration_json.exists():
         _write_multi_source_output_brief(work_dir, source_records, work_dir / "clip_plan_validated.json")
         _write_phase_ledger(work_dir, clip_plan_fingerprint=cp_fp, edited_source_rendered=True, multi_source=True)
@@ -941,13 +1054,16 @@ def _run_multi_cut(videos, work_dir, args):
     _run("video-script", "validate.py", "--work-dir", work_dir, "--mode", "cut_output",
          "--output-duration", f"{output_duration:.3f}")
     review_ran = _run_narration_review(work_dir, args, timeline="cut_output")
+    _write_shift_left_stage_qc(work_dir, "pre_tts", metadata={"review_ran": review_ran, "timeline": "cut_output"})
     vargs = ["--work-dir", str(work_dir), "--narration", str(narration_json)]
     if args.mimo_tts_voice:
         vargs += ["--mimo-voice", args.mimo_tts_voice]
     if args.allow_partial_tts:
         vargs.append("--allow-partial-tts")
     _run("video-voiceover", "voiceover.py", *vargs)
-    _write_canonical_visual_overlays(work_dir, narration_json)
+    _write_shift_left_stage_qc(work_dir, "post_tts", metadata=_tts_qc_metadata(work_dir))
+    overlays_path = _write_canonical_visual_overlays(work_dir, narration_json)
+    _write_shift_left_stage_qc(work_dir, "pre_assemble", metadata={"visual_overlays": str(overlays_path)})
 
     recap_stem = f"multi_{videos[0].stem}"
     aargs = [str(edited_source), "--work-dir", str(work_dir), "--recap-stem", recap_stem]
@@ -965,6 +1081,8 @@ def _run_multi_cut(videos, work_dir, args):
 
     final_dir = Path(args.output_dir) if args.output_dir else work_dir.parent
     final_output = _read_assembly_output(work_dir) or (final_dir / ("recap_" + recap_stem + ".mp4"))
+    _write_shift_left_stage_qc(work_dir, "post_render", metadata=_post_render_qc_metadata(work_dir, final_output))
+    _write_final_qc_reports(work_dir, final_output)
     print(f"[video-recap] ✅ 完成: {final_output}")
     _print_narration_review_pointer(work_dir, review_ran=review_ran)
 
@@ -1150,7 +1268,8 @@ def main():
         if getattr(args, "allow_sparse_cut", False):
             crender.append("--allow-sparse-cut")
         _run("video-cut", "cut.py", *crender)
-        _surface_cut_qc(work_dir)
+        cut_qc = _surface_cut_qc(work_dir)
+        _write_shift_left_stage_qc(work_dir, "post_cut", metadata={"cut_qc": cut_qc})
         if not narration_json.exists():
             # PASS 2: rebuild the brief (now an OUTPUT-timeline variant) and pause for narration.
             _rebuild_output_brief()
@@ -1171,13 +1290,20 @@ def main():
         narration_for_tts = narration_json
         assemble_video_path = edited_source
     review_ran = _run_narration_review(work_dir, args, timeline="cut_output" if cut else "source")
+    _write_shift_left_stage_qc(
+        work_dir,
+        "pre_tts",
+        metadata={"review_ran": review_ran, "timeline": "cut_output" if cut else "source"},
+    )
     vargs = ["--work-dir", str(work_dir), "--narration", str(narration_for_tts)]
     if args.mimo_tts_voice:
         vargs += ["--mimo-voice", args.mimo_tts_voice]
     if args.allow_partial_tts:
         vargs.append("--allow-partial-tts")
     _run("video-voiceover", "voiceover.py", *vargs)
-    _write_canonical_visual_overlays(work_dir, narration_for_tts)
+    _write_shift_left_stage_qc(work_dir, "post_tts", metadata=_tts_qc_metadata(work_dir))
+    overlays_path = _write_canonical_visual_overlays(work_dir, narration_for_tts)
+    _write_shift_left_stage_qc(work_dir, "pre_assemble", metadata={"visual_overlays": str(overlays_path)})
 
     aargs = [str(assemble_video_path), "--work-dir", str(work_dir), "--recap-stem", video.stem]
     if args.output_dir:
@@ -1199,6 +1325,8 @@ def main():
 
     final_dir = Path(args.output_dir) if args.output_dir else work_dir.parent
     final_output = _read_assembly_output(work_dir) or (final_dir / ("recap_" + video.stem + ".mp4"))
+    _write_shift_left_stage_qc(work_dir, "post_render", metadata=_post_render_qc_metadata(work_dir, final_output))
+    _write_final_qc_reports(work_dir, final_output)
     print(f"[video-recap] ✅ 完成: {final_output}")
     _print_narration_review_pointer(work_dir, review_ran=review_ran)
 

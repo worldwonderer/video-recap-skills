@@ -463,3 +463,8 @@ Dub 模式下，`dub_script.json` 在 voiceclone **之前**先经过 determinist
 ```
 
 > CLI：`dub.py --stage lint|review`（无需 video）、`dub.py --print-schema` 打印以上全部 dub artifact 契约；`--stage render` 会在克隆前自动写 `dub_lint.json` / `dub_review.json`，lint 非 PASS 即中止。
+## shift-left QC artifacts
+
+`preflight_qc.json`、`final_qc.json`、`golden_eval.json`、`mimo_qc.json` 共用最小 QC 契约；stage 仅允许 `pre_cut` / `post_cut` / `pre_tts` / `post_tts` / `pre_assemble` / `post_render` / `golden`，其中 `mimo_qc.json` 是 artifact 而不是 stage。详见 `shift-left-qc-schema.md` 与 `shift-left-qc-rules.json`。
+
+`recap.py` 渲染后会先更新 `preflight_qc.json` 的 `post_render` stage，再写出 `final_qc.json` 和 `golden_eval.json`。`final_qc.json` 汇总最终 mp4、`assembly_manifest.json`、`assembly_qc.json`、`visual_qc.json`、`preflight_qc.json`、`mimo_qc.json` 的本地元数据；缺失/空成片、ffprobe 不可用或失败、以及 assembly/visual QC 的客观 blocker 会进入 deterministic blockers。`golden_eval.json` 默认要求 `final_qc.json.ok=true`，也可用 golden fixture 做简单的时长、codec 和必需 artifact 断言。二者均为 report-only：不接入网络、不调用 MiMo、不自动修复，也不读取或持久化 API key。所有 QC metadata/evidence 写入前都经过 `qc_contract.redact_secrets`：secret-looking key/value 会被替换，URL userinfo/query/fragment 会被移除，仅保留必要 host/path 诊断信息；non-deterministic blocker allow-list 只有在规则表 `schema_version` 与 `qc_contract.SCHEMA_VERSION` 一致时才生效。
