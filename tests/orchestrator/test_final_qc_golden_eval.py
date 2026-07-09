@@ -40,6 +40,36 @@ def _upstream_blocker(stage="post_render", artifact="assembly_qc.json"):
     return qc.build_report(artifact="final_qc.json", stage=stage, findings=[finding]) | {"artifact": artifact}
 
 
+def test_tail_decode_flags_container_valid_but_undecodable_stream(tmp_path):
+    """Regression: header probing alone passes a container-valid but media-truncated/corrupt
+    render (moov intact + mdat cut). The tail-decode check must flag it as a blocker."""
+    out = tmp_path / "output.mp4"
+    out.write_bytes(b"\x00" * 4096)  # exists + non-empty so we reach the probe/decode branch
+    report = final_qc.build_final_qc(
+        tmp_path,
+        final_output="output.mp4",
+        probe_runner=lambda p: _probe(),                     # header probe passes cleanly
+        decode_runner=lambda p: (False, "Invalid NAL unit size (505 > 107)"),
+    )
+    assert report["ok"] is False
+    assert any(f["code"] == "undecodable_stream" for f in report["findings"])
+
+
+def test_tail_decode_skip_does_not_false_block(tmp_path):
+    """When ffmpeg is unavailable the decode check returns None and must NOT create a blocker."""
+    out = tmp_path / "output.mp4"
+    out.write_bytes(b"\x00" * 4096)
+    report = final_qc.build_final_qc(
+        tmp_path,
+        final_output="output.mp4",
+        probe_runner=lambda p: _probe(),
+        decode_runner=lambda p: (None, "ffmpeg unavailable"),
+    )
+    assert report["ok"] is True
+    assert report["blocker_count"] == 0
+    assert not any(f["code"] == "undecodable_stream" for f in report["findings"])
+
+
 def test_missing_and_empty_final_output_are_valid_blockers(tmp_path):
     missing = tmp_path / "missing.mp4"
     report = final_qc.build_final_qc(tmp_path, final_output=missing, probe_runner=lambda p: (_ for _ in ()).throw(AssertionError("no probe")))

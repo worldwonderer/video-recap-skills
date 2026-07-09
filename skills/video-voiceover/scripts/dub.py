@@ -271,6 +271,20 @@ def _wav_frames(path):
 
 # ── ASR (timed windows) ──────────────────────────────────────────────
 
+def _strip_reasoning_residue(text):
+    """Remove MiMo reasoning-model <think>…</think> leakage from ASR content.
+
+    Thinking-disable is not applied to -asr models (lib._prepare_api_payload), so a reasoning
+    model can leak a <think> block — full, truncated/unclosed, or a leading orphan/residual tag
+    (observed as a bare "think>" prefix) — into the transcript. Strip all shapes; the generic
+    marker strip in _run_asr then handles the remaining "<chinese>"-style tags.
+    """
+    text = re.sub(r"(?is)<think\b.*?</think\s*>", "", text)  # full <think>…</think> block
+    text = re.sub(r"(?is)<think\b.*\Z", "", text)            # unclosed/truncated <think tail
+    text = re.sub(r"(?i)^\s*<?/?think\s*>\s*", "", text)     # leading orphan/residual think tag
+    return text
+
+
 def _run_asr(wav_path, lang="en"):
     raw = Path(wav_path).read_bytes()
     if not raw:
@@ -288,7 +302,7 @@ def _run_asr(wav_path, lang="en"):
         text = str(resp["choices"][0]["message"]["content"] or "").strip()
     except (KeyError, IndexError, TypeError):
         return ""
-    return re.sub(r"<[^>]{1,20}>", "", text).strip()  # strip ASR markers like "<chinese>"
+    return re.sub(r"<[^>]{1,20}>", "", _strip_reasoning_residue(text)).strip()  # strip reasoning + ASR markers like "<chinese>"
 
 
 def _asr_windows(audio_wav, segs_dir, duration, window):

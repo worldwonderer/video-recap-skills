@@ -22,6 +22,20 @@ def _write_deslop_requirements(work_dir, *, owner="video-script.narration", styl
     }, ensure_ascii=False), encoding="utf-8")
 
 
+def test_deslop_qc_ta_pronoun_not_placeholder_but_scaffold_copy_is():
+    """Regression: the gender-neutral pronoun 'TA' (他/她) followed by 要 (idiomatic 解说
+    suspense device) must NOT trip placeholder_leakage and hard-abort the render; only the
+    example scaffolding tokens 【主角】 / the exact phrase 'TA要赌上' should."""
+    legit = analyze_deslop_qc([{"start": 0, "end": 4, "narration": "凶手就在其中，TA要做的下一件事，就是灭口。"}])
+    assert legit["ok"] is True
+    assert legit["blocker_count"] == 0
+    legit2 = analyze_deslop_qc([{"start": 0, "end": 4, "narration": "第二天一早，TA要离开这座城市。"}])
+    assert legit2["ok"] is True
+    scaffold = analyze_deslop_qc([{"start": 0, "end": 5, "narration": "【主角】表面只是旁观者，这一次，TA要赌上全部去查清旧案真相。"}])
+    assert scaffold["ok"] is False
+    assert any(b["code"] == "placeholder_leakage" for b in scaffold["blockers"])
+
+
 def test_deslop_qc_separates_objective_blockers_from_advisories(tmp_path):
     (tmp_path / "style_card.json").write_text('{"voice":"冷静"}', encoding="utf-8")
     report = analyze_deslop_qc([

@@ -2686,20 +2686,33 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
             continue
 
         if audio_samples > available:
-            # Do not cut spoken audio by time alone. Without upstream boundary
-            # metadata, assemble cannot prove which text would remain spoken.
-            over = (audio_samples - available) / sample_rate
-            log(f"  TTS 无安全放置: 段 {seg.get('index', '?')} 超出可用窗口 {over:.2f}s，跳过并交由 QC 阻断")
-            seg["actual_place_start"] = actual_start / sample_rate
-            seg["actual_place_end"] = actual_start / sample_rate
-            seg["placed_audio_duration"] = 0.0
-            seg["fit_status"] = "no_safe_fit"
-            seg["blocking"] = True
-            seg["truncate_reason"] = "no_safe_boundary"
-            prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
-            skipped_count += 1
-            no_safe_fit_count += 1
-            continue
+            over_samples = audio_samples - available
+            # A rounding-level overrun (a few samples of post-atempo tail decay, far under a
+            # syllable) must NOT discard the whole block: the segment was already speed-fit to
+            # `available_duration`, so the sub-frame tail is release/silence, not dropped words.
+            # Trim that tail instead of dropping + QC-blocking; only a real overrun (> tolerance)
+            # is deferred to QC. Fixes whole blocks lost on a 0.00–0.01s miss.
+            trim_tolerance = int(round(0.05 * sample_rate))  # 50ms
+            if over_samples <= trim_tolerance:
+                audio_samples = available
+                write_samples = available
+                wf_data = wf_data[: write_samples * 2]
+                seg["truncate_reason"] = "tail_trim_tolerance"
+            else:
+                # Do not cut spoken audio by time alone. Without upstream boundary
+                # metadata, assemble cannot prove which text would remain spoken.
+                over = over_samples / sample_rate
+                log(f"  TTS 无安全放置: 段 {seg.get('index', '?')} 超出可用窗口 {over:.2f}s，跳过并交由 QC 阻断")
+                seg["actual_place_start"] = actual_start / sample_rate
+                seg["actual_place_end"] = actual_start / sample_rate
+                seg["placed_audio_duration"] = 0.0
+                seg["fit_status"] = "no_safe_fit"
+                seg["blocking"] = True
+                seg["truncate_reason"] = "no_safe_boundary"
+                prev_pause_samples = int(seg_pause_ms * sample_rate / 1000)
+                skipped_count += 1
+                no_safe_fit_count += 1
+                continue
 
         # 重叠检测：跳过与前段重叠的部分（在 fade 之前，避免截断后丢失 fade-in）
         if actual_start < last_written_end:

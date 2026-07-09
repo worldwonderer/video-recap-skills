@@ -31,6 +31,15 @@ def _write_research(work_dir, characters=None, character_details=None):
 
 # ── (a) homophone substitution of a known name is corrected ──
 
+def test_strip_reasoning_residue_removes_think_leakage():
+    """Regression: full-mode ASR must strip leaked MiMo <think> reasoning residue too (parity
+    with video-voiceover/scripts/dub.py); clean transcript text stays untouched."""
+    assert asr._strip_reasoning_residue("think>\n 真相比逃跑更狼。").strip() == "真相比逃跑更狼。"
+    assert asr._strip_reasoning_residue("<think>x\n</think>\n开门的却是个陌生男人").strip() == "开门的却是个陌生男人"
+    assert asr._strip_reasoning_residue("<think>未闭合 后续").strip() == ""
+    assert asr._strip_reasoning_residue("普通转写文本。") == "普通转写文本。"
+
+
 def test_corrects_homophone_substitution_of_known_name(tmp_path):
     _write_research(tmp_path, characters={"叶轻眉": "主角之母"})
     segments = [{"start": 0.0, "end": 3.0, "text": "她叫叶青眉"}]

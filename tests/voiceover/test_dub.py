@@ -9,6 +9,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "skills" / "video-v
 import dub  # noqa: E402
 
 
+def test_strip_reasoning_residue_removes_think_leakage():
+    """Regression: MiMo -asr models are not thinking-disabled, so <think> reasoning can leak
+    into the transcript in several shapes. All must be stripped; clean text is untouched."""
+    s = dub._strip_reasoning_residue
+    assert s("think>\n 真相比逃跑更狼。").strip() == "真相比逃跑更狼。"   # leading orphan residue
+    assert s("think>\n Yeah.").strip() == "Yeah."
+    assert s("<think>推理\n</think>\n开门的却是个陌生男人").strip() == "开门的却是个陌生男人"  # full block
+    assert s("<think>未闭合的推理 后续文字").strip() == ""              # unclosed/truncated
+    assert s("正常一句，没有思考标签。") == "正常一句，没有思考标签。"      # clean text untouched
+
+
 def test_atempo_chain():
     assert dub._atempo_chain(1.3) == "atempo=1.3000"
     assert dub._atempo_chain(3.0).startswith("atempo=2.0,atempo=")  # >2x is chained

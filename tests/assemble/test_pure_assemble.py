@@ -1111,6 +1111,56 @@ def test_p0_build_timed_narration_propagates_no_safe_fit_metadata(monkeypatch, t
     assert seg["narration"] == "原始长文案，不能猜测截断。"
 
 
+def test_p0_build_timed_narration_trims_subframe_overrun_instead_of_dropping(monkeypatch, tmp_path):
+    """Regression: a rounding-level overrun (<=50ms of post-atempo tail) must be trimmed and
+    PLACED, not dropped as no_safe_fit — which would lose the whole narration block and trip
+    final QC. Previously any 0.00-0.01s overrun discarded the block."""
+    import wave
+    wav = tmp_path / "orig.wav"
+    with wave.open(str(wav), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
+        wf.writeframes(b"\x00\x10" * int(2.1 * 44100))  # longer than the 2.0s slot -> triggers fit
+
+    def fake_adjust(path, target_duration, work_dir, tts_rate_offset=0.0, *, return_meta=True):
+        # simulate atempo landing ~10ms over the fit target (real ffmpeg rounding drift)
+        over = tmp_path / "over.wav"
+        n = int((target_duration + 0.010) * 44100)
+        with wave.open(str(over), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(b"\x00\x10" * n)
+        return str(over), target_duration + 0.010, {
+            "fit_status": "tempo_adjusted", "truncate_reason": "none", "blocking": False,
+            "segment_tempo_factor": 1.0, "effective_tempo": 1.2, "global_narration_speed": 1.15,
+        }
+
+    monkeypatch.setitem(CONFIG, "narration_delay_seconds", 0.0)
+    monkeypatch.setitem(CONFIG, "narration_tail_pad_seconds", 0.0)
+    monkeypatch.setitem(CONFIG, "narration_tighten", False)
+    monkeypatch.setattr("assemble._adjust_tts_speed", fake_adjust)
+    seg = {
+        "index": 0,
+        "start": 0.0,
+        "end": 2.0,
+        "narration": "一段刚好超出零点几帧的解说。",
+        "spoken_text": "一段刚好超出零点几帧的解说。",
+        "audio_path": str(wav),
+        "audio_duration": 2.1,
+        "tts_rate_offset": 0.0,
+    }
+
+    _build_timed_narration([seg], tmp_path / "narration.wav", 2.0, tmp_path)
+
+    assert seg["fit_status"] != "no_safe_fit"
+    assert seg.get("blocking") is not True
+    assert seg["truncate_reason"] == "tail_trim_tolerance"
+    assert seg["placed_audio_duration"] > 1.9
+    assert seg["narration"] == "一段刚好超出零点几帧的解说。"  # authored text is preserved, only the tail is trimmed
+
+
 def test_p0_subtitles_use_spoken_text_not_authored_narration(tmp_path):
     segs = [
         {

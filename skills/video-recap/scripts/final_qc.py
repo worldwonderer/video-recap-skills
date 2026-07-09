@@ -204,6 +204,28 @@ def _run_ffprobe(path: Path) -> Mapping[str, Any]:
     return data
 
 
+def _tail_decode_check(path: Path) -> tuple[bool | None, str | None]:
+    """Cheaply verify the final ~2s actually decodes. Returns (ok, detail).
+
+    Header probing (ffprobe -show_format/-show_streams) passes a container-valid but
+    media-truncated/corrupt payload (moov intact + mdat cut — realistic with +faststart on
+    disk-full or partial upload). Decoding the tail catches it. Returns (None, ...) when ffmpeg
+    is unavailable or the probe cannot run, so the caller skips rather than false-blocks.
+    """
+    if shutil.which("ffmpeg") is None:
+        return None, "ffmpeg unavailable"
+    try:
+        res = subprocess.run(
+            ["ffmpeg", "-v", "error", "-xerror", "-sseof", "-2", "-i", str(path), "-f", "null", "-"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"decode probe could not run: {exc}"
+    if res.returncode != 0:
+        return False, (res.stderr or "tail decode failed").strip()[:500]
+    return True, None
+
+
 def _probe_metadata(path: Path, *, probe_fixture: Any = None, probe_runner: ProbeRunner | None = None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Return (probe, error). Existing non-empty media gets deterministic error on failure."""
     if probe_fixture is not None:
@@ -475,7 +497,8 @@ def collect_metadata(work_dir: str | Path, *, final_output: str | Path | None = 
 
 
 def build_final_qc(work_dir: str | Path, final_output: str | Path | None = None,
-                   probe_fixture: Any = None, probe_runner: ProbeRunner | None = None) -> dict[str, Any]:
+                   probe_fixture: Any = None, probe_runner: ProbeRunner | None = None,
+                   decode_runner: Callable[[Path], tuple[bool | None, str | None]] | None = None) -> dict[str, Any]:
     root = Path(work_dir)
     selected = _select_final_output(root, final_output)
     metadata = collect_metadata(root, final_output=final_output, probe_fixture=probe_fixture, probe_runner=probe_runner)
@@ -519,11 +542,28 @@ def build_final_qc(work_dir: str | Path, final_output: str | Path | None = None,
             ))
         else:
             probe = metadata.get("probe")
-            findings.extend(_probe_contract_findings(
+            probe_findings = _probe_contract_findings(
                 probe if isinstance(probe, Mapping) else None,
                 final_meta=final_meta,
                 fingerprints=fps,
-            ))
+            )
+            findings.extend(probe_findings)
+            # Header probing cannot see a container-valid but media-truncated/corrupt payload.
+            # A cheap tail decode catches it; skip for offline fixtures and when ffmpeg is absent
+            # (decode_ok is None). Only add on a definite decode failure to avoid false-blocking.
+            if probe_fixture is None and not probe_findings:
+                decode_ok, decode_detail = (decode_runner or _tail_decode_check)(selected)
+                if decode_ok is False:
+                    findings.append(_finding(
+                        finding_id="final-qc-undecodable-stream",
+                        code="undecodable_stream",
+                        message="final output tail failed to decode (truncated or corrupt media payload)",
+                        category="stream",
+                        source={"artifact": final_meta.get("path")},
+                        evidence={"decode_error": decode_detail},
+                        fingerprints=fps,
+                        next_action="rerender_final_output",
+                    ))
     findings.extend(_upstream_blockers(root, "assembly_qc.json"))
     findings.extend(_upstream_blockers(root, "visual_qc.json"))
     report = qc_contract.build_report(
