@@ -1770,7 +1770,6 @@ def _visual_overlay_filters(work_dir, canvas, video_duration):
     Unsupported types are QC-blocking and deliberately do not silently render.
     """
     overlays, source = _load_visual_overlays(work_dir, with_source=True)
-    width = int((canvas or {}).get("width") or 1280)
     height = int((canvas or {}).get("height") or 720)
     default_top_y = max(24, round(height * 0.05))
     filters = []

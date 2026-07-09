@@ -264,7 +264,7 @@ def build_index_messages(vlm_analysis, asr_result=None, asr_clean=None, backgrou
         f"{INDEX_PROMPT}\n\n"
         f"## 逐场景画面分析（共 {len(lines)} 段）\n" + "\n".join(lines) + "\n\n"
         f"## ASR / cleaned dialogue（共 {len(asr_lines)} 段）\n" + ("\n".join(asr_lines) or "(无)") + "\n\n"
-        f"## Research glossary（clock=null/context_only，不得升级为当前剧情事实）\n" + ("\n".join(glossary_lines) or "(无)")
+        "## Research glossary（clock=null/context_only，不得升级为当前剧情事实）\n" + ("\n".join(glossary_lines) or "(无)")
     )
     return [{"role": "user", "content": user}]
 

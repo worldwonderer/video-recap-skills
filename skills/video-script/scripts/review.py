@@ -550,8 +550,10 @@ def validate_timeline_mapping(clip_spans):
             errors.append(f"clip_spans[{idx}] must be a dict")
             continue
         try:
-            ss = float(span["source_start"]); se = float(span["source_end"])
-            os_ = float(span["output_start"]); oe = float(span["output_end"])
+            ss = float(span["source_start"])
+            se = float(span["source_end"])
+            os_ = float(span["output_start"])
+            oe = float(span["output_end"])
         except (KeyError, TypeError, ValueError):
             errors.append(f"clip_spans[{idx}] has invalid required times")
             continue
