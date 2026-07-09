@@ -117,7 +117,7 @@ def _file_metadata(path: Path | None, work_dir: Path | None = None) -> dict[str,
     display = str(path)
     if work_dir is not None:
         try:
-            display = str(path.relative_to(work_dir))
+            display = path.relative_to(work_dir).as_posix()
         except ValueError:
             pass
     item: dict[str, Any] = {"path": display}

@@ -136,7 +136,7 @@ def _tts_qc_metadata(work_dir):
         metadata["tts_meta"] = tts_meta
     tts_dir = work_dir / "tts_segments"
     if tts_dir.exists() and tts_dir.is_dir():
-        metadata["tts_segments"] = [str(p.relative_to(work_dir)) for p in sorted(tts_dir.iterdir()) if p.is_file()]
+        metadata["tts_segments"] = [p.relative_to(work_dir).as_posix() for p in sorted(tts_dir.iterdir()) if p.is_file()]
     return metadata
 
 
