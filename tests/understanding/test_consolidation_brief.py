@@ -289,3 +289,13 @@ def test_understanding_brief_does_not_leak_hardcoded_example_entities(tmp_path):
 
     for leaked in ["范闲", "监察院", "五竹", "京都"]:
         assert leaked not in text
+
+
+def test_index_prompt_fingerprint_tracks_consolidate_source_of_truth():
+    """Regression guard for the silent index-drop bug (PR #58 review): the provenance
+    fingerprint MUST hash the exact prompt consolidate stamps into
+    understanding_index.json.meta.json. If consolidate.INDEX_PROMPT is edited without
+    updating this byte-parity copy, the guard in _load_consolidation rejects every index
+    and the narration brief silently loses all character/plot grounding."""
+    import consolidate
+    assert _index_prompt_fingerprint() == consolidate._prompt_fingerprint(consolidate.INDEX_PROMPT)

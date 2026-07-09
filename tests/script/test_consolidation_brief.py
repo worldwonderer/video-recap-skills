@@ -16,3 +16,13 @@ def test_narration_brief_noop_without_consolidation(tmp_path):
     assert "Understanding index (from consolidate.py)" not in text
     written = json.loads((tmp_path / "asr_writing_chunks.json").read_text(encoding="utf-8"))
     assert written == _chunk_asr_for_writing(asr, scenes)
+
+
+def test_narration_index_prompt_fingerprint_matches_canonical_index_prompt():
+    """Narration twin of the understanding-side guard (PR #58 review). narration.py cannot
+    import consolidate (cross-skill), so this pins the fingerprint to the canonical md5 of
+    consolidate.INDEX_PROMPT. If you change INDEX_PROMPT, update the embedded copy in BOTH
+    brief.py and narration.py and refresh this hash (the video-understanding guard computes
+    the new value dynamically)."""
+    from narration import _index_prompt_fingerprint
+    assert _index_prompt_fingerprint() == "7fc5856658effc4175d188347d1bc66d"

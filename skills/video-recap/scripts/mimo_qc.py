@@ -229,10 +229,14 @@ def safe_mimo_config(config: Mapping[str, Any] | None = None) -> dict[str, Any]:
     safe = {key: source[key] for key in keep if key in source}
     model = source.get("mimo_video_model") or source.get("mimo_model") or source.get("vlm_model") or "mimo-v2.5"
     safe.setdefault("model", model)
-    safe["api_key_configured"] = bool(
+    key_present = bool(
         source.get("mimo_video_api_key") or source.get("mimo_api_key") or source.get("api_key")
     )
-    return _redact(safe)
+    safe = _redact(safe)
+    # Set AFTER redaction and under a non-secret-matching key so the boolean signal
+    # survives: redact_secrets() would blank any key containing "api_key"/"token"/etc.
+    safe["key_present"] = key_present
+    return safe
 
 
 def build_payload(evidence: Mapping[str, Any], *, stage: str = DEFAULT_STAGE,

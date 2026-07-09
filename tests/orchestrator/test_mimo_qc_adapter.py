@@ -106,7 +106,10 @@ def test_no_secret_persistence_in_report(tmp_path):
     assert "sk-config-secret" not in text
     assert "tp-config-secret" not in text
     assert "tp-video-secret" not in text
-    assert "api_key_configured" in text
+    # key_present must survive redaction as a real boolean (keys ARE configured here);
+    # the old "api_key_configured" name matched the secret-key regex and was blanked to "<redacted>".
+    assert '"key_present": true' in text
+    assert "api_key_configured" not in text
     assert qc.validate_report(json.loads(text)) is True
 
 

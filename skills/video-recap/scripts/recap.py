@@ -158,6 +158,24 @@ def _write_final_qc_reports(work_dir, final_output):
     return final_qc.run(work_dir, final_output=final_output)
 
 
+def _print_final_qc_pointer(result):
+    """Surface a report-only final_qc/golden_eval FAIL so the shift-left QC is
+    not a silent no-op. Advisory only: it never changes the exit status."""
+    if not isinstance(result, dict):
+        return
+    problems = []
+    for key in ("final_qc", "golden_eval"):
+        section = result.get(key)
+        if isinstance(section, dict) and section.get("ok") is False:
+            problems.append(f"{key} blocker_count={section.get('blocker_count', '?')}")
+    if problems:
+        print(
+            "[video-recap] ⚠️  最终 QC 未通过（仅报告，不阻断）: "
+            + "; ".join(problems)
+            + "；详见 final_qc.json / golden_eval.json"
+        )
+
+
 def _entry(skill, script):
     return BUNDLE / skill / "scripts" / script
 
@@ -1082,8 +1100,9 @@ def _run_multi_cut(videos, work_dir, args):
     final_dir = Path(args.output_dir) if args.output_dir else work_dir.parent
     final_output = _read_assembly_output(work_dir) or (final_dir / ("recap_" + recap_stem + ".mp4"))
     _write_shift_left_stage_qc(work_dir, "post_render", metadata=_post_render_qc_metadata(work_dir, final_output))
-    _write_final_qc_reports(work_dir, final_output)
+    final_qc_result = _write_final_qc_reports(work_dir, final_output)
     print(f"[video-recap] ✅ 完成: {final_output}")
+    _print_final_qc_pointer(final_qc_result)
     _print_narration_review_pointer(work_dir, review_ran=review_ran)
 
 
@@ -1326,8 +1345,9 @@ def main():
     final_dir = Path(args.output_dir) if args.output_dir else work_dir.parent
     final_output = _read_assembly_output(work_dir) or (final_dir / ("recap_" + video.stem + ".mp4"))
     _write_shift_left_stage_qc(work_dir, "post_render", metadata=_post_render_qc_metadata(work_dir, final_output))
-    _write_final_qc_reports(work_dir, final_output)
+    final_qc_result = _write_final_qc_reports(work_dir, final_output)
     print(f"[video-recap] ✅ 完成: {final_output}")
+    _print_final_qc_pointer(final_qc_result)
     _print_narration_review_pointer(work_dir, review_ran=review_ran)
 
 

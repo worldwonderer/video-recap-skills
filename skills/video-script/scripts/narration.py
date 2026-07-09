@@ -1137,13 +1137,17 @@ def _clean_asr_prompt_fingerprint():
 
 
 def _index_prompt_fingerprint():
-    prompt = """你在根据逐场景画面分析，为一个视频建立【全局理解索引】，供后续写解说词时保持人物/关系/主线一致。
-只依据给到的画面证据（场景描述 + 帧实动作），不要脑补画面之外的剧情。
+    prompt = """你在根据逐场景画面分析、ASR对白、background_research术语表，为一个视频建立【全局理解索引】，供后续写解说词时保持人物/关系/主线一致。
+规则：
+- visual/asr 是当前视频事实证据；每个人物、关系、剧情节点、物件尽量给 evidence_ids。
+- background_research 只能用于人名/别名/术语/身份消歧，默认 support=context_only；不能把后续剧情或未出现关系升级为当前画面事实。
+- ASR 中出现但画面描述未命名的人名，应进入 characters[*].asr_mentions。
 只返回 JSON：
-{"characters":[{"name":"角色名或外观指代","description":"身份/特征"}],
- "relationships":[{"a":"角色","b":"角色","relation":"关系"}],
- "plot_points":["按时间顺序的关键剧情节点"],
- "entities":["重要物件/地点/线索"]}"""
+{"characters":[{"name":"角色名或外观指代","description":"身份/特征","aliases":[],"visual_descriptions":[],"asr_mentions":[],"research_role":"","evidence_ids":[],"confidence":"high|medium|low"}],
+ "relationships":[{"a":"角色","b":"角色","relation":"关系","evidence_ids":[],"support":"direct|indirect|context_only"}],
+ "plot_points":[{"time":"00:00","text":"按时间顺序的关键剧情节点","evidence_ids":[]}],
+ "entities":[{"name":"重要物件/地点/线索","evidence_ids":[]}],
+ "research_glossary":[{"name":"名字/术语","aliases":[],"role":"说明","support":"context_only"}]}"""
     return hashlib.md5(prompt.encode("utf-8")).hexdigest()
 
 
@@ -1202,10 +1206,14 @@ def _format_consolidation(index):
     plot = index.get("plot_points") or []
     if plot:
         lines.append("- Plot spine:")
-        lines.extend(f"    {i + 1}. {p}" for i, p in enumerate(plot))
+        lines.extend(
+            f"    {i + 1}. {p.get('text', p) if isinstance(p, dict) else p}"
+            for i, p in enumerate(plot)
+        )
     ents = index.get("entities") or []
     if ents:
-        lines.append(f"- Entities: {', '.join(str(e) for e in ents)}")
+        ent_names = [str(e.get("name", e) if isinstance(e, dict) else e) for e in ents]
+        lines.append(f"- Entities: {', '.join(ent_names)}")
     lines.append("")
     return lines
 

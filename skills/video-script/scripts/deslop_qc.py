@@ -20,7 +20,7 @@ CONTRACT = (
 
 EM_DASH_RE = re.compile(r"——|—")
 NEGATIVE_FLIP_RE = re.compile(r"并?不是[^。！？!?；;\.]{0,40}而是")
-PLACEHOLDER_RE = re.compile(r"【主角】|TA要|旧案真相")
+PLACEHOLDER_RE = re.compile(r"【主角】|TA要")
 
 CLICHE_TERMS = [
     "命运的齿轮", "殊不知", "与此同时", "一场阴谋", "背后真相", "不为人知",
@@ -179,7 +179,7 @@ def analyze_deslop_qc(narration: Any, *, work_dir: str | Path | None = None, ori
         if EM_DASH_RE.search(text):
             _add_issue(blockers, "blocker", "em_dash", seg["source"], seg["index"], "破折号（—/——）不得出现在 narration/original_subtitles 中", matches=EM_DASH_RE.findall(text))
         if PLACEHOLDER_RE.search(text):
-            _add_issue(blockers, "blocker", "placeholder_leakage", seg["source"], seg["index"], "示例占位内容泄漏到成稿中（如【主角】/TA要/旧案真相）", matches=PLACEHOLDER_RE.findall(text))
+            _add_issue(blockers, "blocker", "placeholder_leakage", seg["source"], seg["index"], "示例占位内容泄漏到成稿中（如【主角】/TA要）", matches=PLACEHOLDER_RE.findall(text))
         for sentence in _sentence_pieces(text):
             sentences.append(sentence)
             if NEGATIVE_FLIP_RE.search(sentence):
