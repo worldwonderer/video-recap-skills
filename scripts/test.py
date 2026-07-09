@@ -24,7 +24,9 @@ def main(argv):
     for group in groups:
         print(f"== {group} ==", flush=True)
         result = subprocess.run(
-            [sys.executable, "-m", "pytest", str(root / "tests" / group), "-q"],
+            # -rs prints skip reasons so a silently-skipped real-render test (e.g. ffmpeg
+            # missing) is visible in CI output instead of a bare "s".
+            [sys.executable, "-m", "pytest", str(root / "tests" / group), "-q", "-rs"],
             cwd=str(root),
         )
         if result.returncode != 0:

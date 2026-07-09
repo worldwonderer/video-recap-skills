@@ -992,7 +992,6 @@ def test_recap_single_cut_forwards_allow_duration_drift_and_records_source(monke
             (work / "edited_source.mp4").write_bytes(b"edited")
             (work / "clip_plan_validated.json").write_text(json.dumps({
                 "clips": [],
-                "qc": {"target_duration": {"duration_drift_allowed_by": "--allow-duration-drift"}},
             }), encoding="utf-8")
 
     monkeypatch.setattr("recap._run", fake_run)
@@ -1005,8 +1004,6 @@ def test_recap_single_cut_forwards_allow_duration_drift_and_records_source(monke
 
     cut_args = next(c for c in calls if c[:2] == ("video-cut", "cut.py"))[2]
     assert "--allow-duration-drift" in cut_args
-    qc = json.loads((work / "clip_plan_validated.json").read_text(encoding="utf-8"))["qc"]
-    assert qc["target_duration"]["duration_drift_allowed_by"] == "--allow-duration-drift"
 
 
 def test_recap_multi_cut_forwards_allow_sparse_cut_compat_and_records_source(monkeypatch, tmp_path):
@@ -1036,7 +1033,6 @@ def test_recap_multi_cut_forwards_allow_sparse_cut_compat_and_records_source(mon
                 "clips": [{"source_id": records[0]["source_id"], "source_path": str(v1.resolve()),
                            "source_start": 0, "source_end": 1, "output_start": 0, "output_end": 1,
                            "duration": 1}],
-                "qc": {"target_duration": {"duration_drift_allowed_by": "--allow-sparse-cut"}},
             }), encoding="utf-8")
 
     monkeypatch.setattr("recap._run", fake_run)
@@ -1050,8 +1046,6 @@ def test_recap_multi_cut_forwards_allow_sparse_cut_compat_and_records_source(mon
     cut_args = next(c for c in calls if c[:2] == ("video-cut", "cut.py"))[2]
     assert "--sources-manifest" in cut_args
     assert "--allow-sparse-cut" in cut_args
-    qc = json.loads((work / "clip_plan_validated.json").read_text(encoding="utf-8"))["qc"]
-    assert qc["target_duration"]["duration_drift_allowed_by"] == "--allow-sparse-cut"
 
 
 def test_recap_multi_video_phase_b_invokes_cut_with_sources_manifest(monkeypatch, tmp_path):

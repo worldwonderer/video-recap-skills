@@ -15,7 +15,6 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 SCHEMA_VERSION = 1
-schema_version = SCHEMA_VERSION
 
 STAGES = frozenset({
     "pre_cut",
@@ -31,11 +30,6 @@ CONFIDENCES = frozenset({"low", "medium", "high", "objective"})
 SAMPLE_POLICIES = frozenset({"all", "deterministic", "sampled", "semantic", "aesthetic"})
 ARTIFACTS = frozenset({"final_qc.json", "golden_eval.json", "mimo_qc.json", "preflight_qc.json"})
 SUPPORTED_ARTIFACTS = ARTIFACTS
-stage_values = STAGES
-severity_values = SEVERITIES
-confidence_values = CONFIDENCES
-sample_policy_values = SAMPLE_POLICIES
-supported_artifacts = SUPPORTED_ARTIFACTS
 
 DETERMINISTIC_CATEGORIES = frozenset({
     "missing_artifact",

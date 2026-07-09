@@ -1465,9 +1465,15 @@ def build_edited_source_video(input_video, validated_plan, work_dir, output_path
         # segment to one canvas and give every clip an audio segment (real or synthesized
         # silence) so concat always succeeds with a continuous track and no source's audio
         # is dropped just because a sibling source is silent.
-        canvas_w, canvas_h, canvas_fps, geometry_qc = _select_output_geometry(source_paths, clips)
-        qc["output_geometry"] = geometry_qc
-        qc["output_geometry_reason"] = geometry_qc.get("reason")
+        # Reuse the geometry already probed+stored above (guard) or by main() — the
+        # selection is deterministic, so re-probing every source here is wasted ffprobe work.
+        geometry_qc = qc.get("output_geometry")
+        if isinstance(geometry_qc, dict) and all(geometry_qc.get(k) for k in ("width", "height", "fps")):
+            canvas_w, canvas_h, canvas_fps = int(geometry_qc["width"]), int(geometry_qc["height"]), geometry_qc["fps"]
+        else:
+            canvas_w, canvas_h, canvas_fps, geometry_qc = _select_output_geometry(source_paths, clips)
+            qc["output_geometry"] = geometry_qc
+            qc["output_geometry_reason"] = geometry_qc.get("reason")
         vnorm = (f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease,"
                  f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
                  f"fps={canvas_fps},format=yuv420p")

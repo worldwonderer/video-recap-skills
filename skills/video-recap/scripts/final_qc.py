@@ -317,16 +317,10 @@ def _duration_from_probe(probe: Mapping[str, Any] | None) -> float | None:
     return None
 
 
-def _codec_from_probe(probe: Mapping[str, Any] | None, *, stream_type: str = "video") -> str | None:
-    if not isinstance(probe, Mapping):
-        return None
-    streams = probe.get("streams")
-    if not isinstance(streams, list):
-        return None
-    for stream in streams:
-        if isinstance(stream, Mapping) and stream.get("codec_type") == stream_type and stream.get("codec_name"):
-            return str(stream["codec_name"])
-    return None
+def _codec_from_probe(probe: Mapping[str, Any] | None) -> str | None:
+    vs = _first_video_stream(probe)
+    name = vs.get("codec_name") if isinstance(vs, Mapping) else None
+    return str(name) if name else None
 
 
 
@@ -474,9 +468,8 @@ def collect_metadata(work_dir: str | Path, *, final_output: str | Path | None = 
         "artifacts": artifacts,
         "probe": probe,
         "probe_error": probe_error,
-        "mimo_blocking_policy": "mimo_qc.json is advisory metadata only and is not rolled into final blockers",
+        # mimo_qc.json is advisory metadata only and is not rolled into final blockers.
         "auto_repair": False,
-        "network": False,
     }
     return redact_secrets(_json_safe(metadata))
 
@@ -570,7 +563,6 @@ def build_golden_eval(work_dir: str | Path, final_qc_report: Mapping[str, Any] |
         },
         "final_qc_fingerprint": fingerprint_file(root / FINAL_QC_ARTIFACT),
         "auto_repair": False,
-        "network": False,
     }
     findings: list[dict[str, Any]] = []
     expected_ok = fixture.get("expected_final_qc_ok", True)

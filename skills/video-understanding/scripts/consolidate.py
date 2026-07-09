@@ -104,10 +104,6 @@ def _research_source_md5(work_dir):
     return _json_md5_file(work_dir, "background_research.json")
 
 
-def _clip_plan_source_md5(work_dir):
-    return _json_md5_file(work_dir, "clip_plan_validated.json")
-
-
 def _research_glossary_from_context(background_research):
     glossary = []
     if not isinstance(background_research, dict):
@@ -366,11 +362,9 @@ def _write_index_meta(work_dir, vlm_analysis):
     _index_meta_path(work_dir).write_text(json.dumps({
         "schema_version": INDEX_SCHEMA_VERSION,
         "source_md5": _vlm_source_md5(work_dir),
-        "vlm_md5": _vlm_source_md5(work_dir),
         "asr_md5": _asr_source_md5(work_dir),
         "asr_clean_md5": _asr_clean_source_md5(work_dir),
         "research_md5": _research_source_md5(work_dir),
-        "clip_plan_md5": _clip_plan_source_md5(work_dir),
         "scene_count": len([s for s in (vlm_analysis or []) if isinstance(s, dict)]),
         "model": CONFIG.get("vlm_model", ""),
         "prompt_md5": _prompt_fingerprint(INDEX_PROMPT),
@@ -389,11 +383,9 @@ def _index_cache_matches(work_dir, vlm_analysis):
         isinstance(meta, dict)
         and meta.get("schema_version") == INDEX_SCHEMA_VERSION
         and meta.get("source_md5") == _vlm_source_md5(work_dir)
-        and meta.get("vlm_md5", meta.get("source_md5")) == _vlm_source_md5(work_dir)
         and meta.get("asr_md5", "") == _asr_source_md5(work_dir)
         and meta.get("asr_clean_md5", "") == _asr_clean_source_md5(work_dir)
         and meta.get("research_md5", "") == _research_source_md5(work_dir)
-        and meta.get("clip_plan_md5", "") == _clip_plan_source_md5(work_dir)
         and meta.get("scene_count") == len([s for s in (vlm_analysis or []) if isinstance(s, dict)])
         and meta.get("model") == CONFIG.get("vlm_model", "")
         and meta.get("prompt_md5") == _prompt_fingerprint(INDEX_PROMPT)

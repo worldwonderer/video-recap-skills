@@ -25,15 +25,18 @@ def _write_deslop_requirements(work_dir, *, owner="video-script.narration", styl
 def test_deslop_qc_separates_objective_blockers_from_advisories(tmp_path):
     (tmp_path / "style_card.json").write_text('{"voice":"冷静"}', encoding="utf-8")
     report = analyze_deslop_qc([
-        {"start": 0, "end": 4, "narration": "他不是退缩而是在等证据。"},
+        {"start": 0, "end": 4, "narration": "他不是退缩而是在等证据——他早有准备。"},
         {"start": 5, "end": 9, "narration": "因为秘密背后真相牵动命运，所以这意味着一场风暴像棋局一样展开。"},
     ], work_dir=tmp_path)
 
     assert report["ok"] is False
     assert report["contract"].startswith("Local readability/QC report only")
-    assert {item["code"] for item in report["blockers"]} == {"negative_positive_flip"}
+    # em-dash is an objective blocker; the idiomatic 不是…而是 is now advisory-only.
+    assert {item["code"] for item in report["blockers"]} == {"em_dash"}
     assert {item["severity"] for item in report["advisories"]} == {"advisory"}
-    assert "cliche_density" in {item["code"] for item in report["advisories"]}
+    advisory_codes = {item["code"] for item in report["advisories"]}
+    assert "negative_positive_flip" in advisory_codes
+    assert "cliche_density" in advisory_codes
 
 
 def test_lint_narration_embeds_deslop_qc_and_writes_sibling_report(tmp_path):
@@ -79,14 +82,7 @@ def test_script_narration_brief_does_not_leak_hardcoded_example_entities(tmp_pat
 
     assert requirements == {
         "schema_version": 1,
-        "owner": "video-script.narration",
-        "style_card_required": True,
-        "packaging_plan_expected": True,
-        "deslop_qc": {
-            "report_only": True,
-            "aigc_detector": False,
-            "auto_rewrite": False,
-        },
+        "style_card_required": False,
     }
     for leaked in ["范闲", "监察院", "五竹", "京都"]:
         assert leaked not in text
@@ -96,7 +92,7 @@ def test_deslop_qc_is_report_only_with_blocker_advisory_split(tmp_path):
     (tmp_path / "style_card.json").write_text('{"voice":"冷静"}', encoding="utf-8")
 
     report = analyze_deslop_qc([
-        {"start": 0, "end": 4, "narration": "他不是退缩而是在等证据。"},
+        {"start": 0, "end": 4, "narration": "他不是退缩而是在等证据——他早有准备。"},
         {
             "start": 5,
             "end": 9,
@@ -108,10 +104,10 @@ def test_deslop_qc_is_report_only_with_blocker_advisory_split(tmp_path):
     assert "not an AIGC detector" in report["contract"]
     assert "never rewrites text" in report["contract"]
     assert report["style_card_required"] is False
-    assert {item["code"] for item in report["blockers"]} == {"negative_positive_flip"}
+    assert {item["code"] for item in report["blockers"]} == {"em_dash"}
 
     advisory_codes = {item["code"] for item in report["advisories"]}
-    assert {"cliche_density", "abstract_summary", "reasoning_chain", "metaphor_markers"}.issubset(advisory_codes)
+    assert {"negative_positive_flip", "cliche_density", "abstract_summary", "reasoning_chain", "metaphor_markers"}.issubset(advisory_codes)
     assert all(item["severity"] == "advisory" for item in report["advisories"])
     assert not ({item["code"] for item in report["blockers"]} & advisory_codes)
     assert "rewrite" not in report

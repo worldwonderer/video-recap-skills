@@ -110,11 +110,6 @@ def _style_card_requirement(work_dir: Path | None) -> tuple[bool, str]:
     return required, "deslop_qc_requirements.json"
 
 
-def _style_card_required(work_dir: Path | None) -> bool:
-    required, _source = _style_card_requirement(work_dir)
-    return required
-
-
 def _style_card_issue(work_dir: Path | None, required: bool) -> dict[str, Any] | None:
     if work_dir is None:
         return None
@@ -183,7 +178,7 @@ def analyze_deslop_qc(narration: Any, *, work_dir: str | Path | None = None, ori
         for sentence in _sentence_pieces(text):
             sentences.append(sentence)
             if NEGATIVE_FLIP_RE.search(sentence):
-                _add_issue(blockers, "blocker", "negative_positive_flip", seg["source"], seg["index"], "同一句中出现“不是…而是…”模板化转折，请改成更具体的因果/行动表达", sentence=sentence[:120])
+                _add_issue(advisories, "advisory", "negative_positive_flip", seg["source"], seg["index"], "“不是…而是…”模板化转折偏多，建议改成更具体的因果/行动表达", sentence=sentence[:120])
 
     def term_count(terms: list[str]) -> int:
         return sum(all_text.count(term) for term in terms)

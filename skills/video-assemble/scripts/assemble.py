@@ -8,7 +8,7 @@ from pathlib import Path
 from lib import CONFIG
 from lib import log, run_cmd, get_video_duration, narration_tempo_budget
 from timeline import build_timeline, save_timeline
-from audio_automation import coalesce_duck_windows, ducking_expression, duck_ramp_expression
+from audio_automation import coalesce_duck_windows, ducking_expression, default_bridge
 
 SUBTITLE_RENDER_VERSION = 6  # bumped: explicit visual QC/mask/overlay policy joins cache fingerprint
 ASSEMBLY_MANIFEST = "assembly_manifest.json"
@@ -2126,10 +2126,6 @@ def _amix_tail(narr_vol, bgm_chain=""):
     return narr + "[orig][narr]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
 
 
-def _duck_ramp(s, e, fade):
-    """Compatibility wrapper for the canonical pre-roll/hold/post-roll ramp."""
-    return duck_ramp_expression(s, e, fade)
-
 def _placement_windows(tts_segments, level_for):
     """Collect [(start, end, level)] placement windows for the placed beats, using
     `level_for(seg)` to pick each beat's duck level. Skips non-dicts and empty spans."""
@@ -2144,11 +2140,6 @@ def _placement_windows(tts_segments, level_for):
     return windows
 
 
-def _coalesce_duck_windows(windows, bridge):
-    """Compatibility wrapper around the canonical audio automation coalescer."""
-    return coalesce_duck_windows(windows, bridge)
-
-
 def _duck_envelope(tts_segments, idle, speech_vol, quiet_vol, fade, bridge=None):
     """Per-beat ducking automation for the ORIGINAL track.
 
@@ -2159,7 +2150,7 @@ def _duck_envelope(tts_segments, idle, speech_vol, quiet_vol, fade, bridge=None)
     placement info (caller falls back to a constant).
     """
     if bridge is None:
-        bridge = 2 * float(fade or 0)
+        bridge = default_bridge(fade)
     windows = _placement_windows(
         tts_segments, lambda seg: speech_vol if seg.get("overlaps_speech", True) else quiet_vol)
     merged = coalesce_duck_windows(windows, bridge)
@@ -2169,7 +2160,7 @@ def _duck_envelope(tts_segments, idle, speech_vol, quiet_vol, fade, bridge=None)
 def _bgm_envelope(tts_segments, base, duck, fade, bridge=None):
     """Per-beat ducking automation for the BGM track using the shared contract."""
     if bridge is None:
-        bridge = 2 * float(fade or 0)
+        bridge = default_bridge(fade)
     windows = _placement_windows(tts_segments, lambda seg: duck)
     merged = coalesce_duck_windows(windows, bridge)
     return ducking_expression(merged, base, fade)
@@ -2421,7 +2412,6 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
             video_duration,
             output_path=output_path,
             source_has_audio=source_has_audio,
-            loudness_mode=_loudness_mode(loudnorm_measurement),
             loudnorm_measurement=loudnorm_measurement,
             visual_qc=visual_qc,
             render_delivery={

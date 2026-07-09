@@ -34,14 +34,7 @@ def test_brief_noop_without_consolidation(tmp_path):
     requirements = json.loads((tmp_path / "deslop_qc_requirements.json").read_text(encoding="utf-8"))
     assert requirements == {
         "schema_version": 1,
-        "owner": "video-understanding.brief",
-        "style_card_required": True,
-        "packaging_plan_expected": True,
-        "deslop_qc": {
-            "report_only": True,
-            "aigc_detector": False,
-            "auto_rewrite": False,
-        },
+        "style_card_required": False,
     }
     assert "Understanding index (from consolidate.py)" not in text
     written = json.loads((tmp_path / "asr_writing_chunks.json").read_text(encoding="utf-8"))

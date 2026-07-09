@@ -1722,24 +1722,16 @@ def _format_output_clip_list(work_dir):
     return out if len(out) > 2 else []
 
 
-def _deslop_qc_owner():
-    skill_name = Path(__file__).resolve().parents[1].name
-    script_name = Path(__file__).stem
-    return f"{skill_name}.{script_name}"
+def _write_deslop_qc_requirements(work_dir):
+    """Write the stable deslop QC contract consumed by deslop_qc.py.
 
-
-def _write_deslop_qc_requirements(work_dir, *, owner):
-    """Write the stable deslop QC contract consumed by deslop_qc.py."""
+    style_card_required defaults to False (advisory): a missing style_card.json is a
+    warning, not a render-blocking error. A future opt-in run can set it True to make
+    style_card.json a hard requirement — deslop_qc.py reads that field.
+    """
     payload = {
         "schema_version": 1,
-        "owner": owner,
-        "style_card_required": True,
-        "packaging_plan_expected": True,
-        "deslop_qc": {
-            "report_only": True,
-            "aigc_detector": False,
-            "auto_rewrite": False,
-        },
+        "style_card_required": False,
     }
     path = Path(work_dir) / "deslop_qc_requirements.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2018,6 +2010,6 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
 
     brief_path = Path(work_dir) / "agent_narration_brief.md"
     brief_path.write_text("\n".join(lines), encoding="utf-8")
-    _write_deslop_qc_requirements(work_dir, owner=_deslop_qc_owner())
+    _write_deslop_qc_requirements(work_dir)
     log(f"已写入 Agent 解说写作 brief: {brief_path}")
     return brief_path

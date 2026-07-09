@@ -170,9 +170,9 @@ Agent 撰写的解说词。full 模式下使用原视频时间；**orchestrated 
 
 ## deslop_qc_requirements.json（工具/brief 生成的运行契约）
 
-`deslop_qc_requirements.json` 是 tool/brief generated run contract：工具或 brief 生成本次运行的 QC 要求，供 `deslop_qc` 读取，不由 Agent 手写。字段包括 `schema_version`、`owner`、`style_card_required`、`packaging_plan_expected`、`deslop_qc.report_only`、`deslop_qc.aigc_detector`、`deslop_qc.auto_rewrite`。
+`deslop_qc_requirements.json` 是 tool/brief generated run contract：工具或 brief 生成本次运行的 QC 要求，供 `deslop_qc` 读取，不由 Agent 手写。字段为 `schema_version` 与 `style_card_required`。
 
-`deslop_qc` 只根据这个运行契约判断缺少 `style_card.json` 是否是 blocker；它不扫描 `agent_narration_brief.md` 的 prompt wording 来推断 `style_card_required`。如果 requirements 文件缺失或损坏，按 legacy/migration advisory 处理，不作为 hard failure。
+`style_card_required` 默认 `false`（advisory）：缺少 `style_card.json` 只是 warning，不阻断出片。将来的 opt-in 运行可把它设为 `true`，让 `style_card.json` 成为硬性要求——`deslop_qc` 只读这个字段判断缺少 `style_card.json` 是否是 blocker，不扫描 `agent_narration_brief.md` 的 prompt wording 来推断。如果 requirements 文件缺失或损坏，按 legacy/migration advisory 处理，不作为 hard failure。
 
 该契约不改变 `--style`：`--style` 仍是 freeform verbatim guidance，不增加固定风格档位。它也不改变 `deslop_qc` 边界：仍然是 report-only，不是 AIGC detector，不自动改写。
 
@@ -180,15 +180,8 @@ Agent 撰写的解说词。full 模式下使用原视频时间；**orchestrated 
 
 ```json
 {
-  "schema_version": "1.0",
-  "owner": "tool_or_brief",
-  "style_card_required": true,
-  "packaging_plan_expected": true,
-  "deslop_qc": {
-    "report_only": true,
-    "aigc_detector": false,
-    "auto_rewrite": false
-  }
+  "schema_version": 1,
+  "style_card_required": false
 }
 ```
 

@@ -884,7 +884,7 @@ def _cut_qc_summary_lines(qc):
     if not isinstance(qc, dict) or not qc:
         return []
     parts = []
-    for key in ("status", "target_duration_status", "total_duration", "clip_count", "join_fade_ms"):
+    for key in ("target_duration_status", "total_duration", "clip_count", "join_fade_ms"):
         if key in qc:
             parts.append(f"{key}={qc.get(key)}")
     geometry = qc.get("output_geometry")

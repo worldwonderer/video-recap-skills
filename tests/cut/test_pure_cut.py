@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-cut' / 'scripts'))
@@ -7,6 +9,8 @@ import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
 import cut
 from cut import build_edited_source_video, lint_mapped_narration, map_narration_to_clips, normalize_clip_plan, parse_duration_seconds, snap_clip_ends_to_lines, snap_clips_off_shot_changes, source_time_to_output_time
+
+_HAVE_FFMPEG = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
 
 
 def test_lint_mapped_narration_flags_dropped_and_sparse():
@@ -659,15 +663,19 @@ def test_build_edited_source_video_multi_source_uses_multiple_inputs_and_cache_m
     assert cut.should_reuse_edited_source(out, plan, "ignored.mp4") is True
 
 
+@pytest.mark.skipif(
+    not _HAVE_FFMPEG and not os.environ.get("RECAP_REQUIRE_FFMPEG"),
+    reason="ffmpeg/ffprobe required for real render (set RECAP_REQUIRE_FFMPEG=1 to make a missing binary a hard failure instead of a silent skip)",
+)
 def test_build_edited_source_video_multi_resolution_mixed_audio_real_render(tmp_path):
     """Real ffmpeg: heterogeneous sources (different resolution/fps, one silent) must concat
     into ONE playable output with an audio track. This path was previously all-mocked, hiding
     the missing scale/setsar/fps normalization (concat would abort) and the all-or-nothing
-    audio drop."""
-    import shutil
+    audio drop. On a runner where ffmpeg MUST exist, set RECAP_REQUIRE_FFMPEG=1 so a missing
+    binary fails loudly instead of silently skipping this coverage."""
     import subprocess
-    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
-        pytest.skip("ffmpeg/ffprobe required for real render")
+    if not _HAVE_FFMPEG:
+        pytest.fail("RECAP_REQUIRE_FFMPEG is set but ffmpeg/ffprobe is not installed")
     import cut
 
     a = tmp_path / "a_1080_audio.mp4"   # 1920x1080@30, WITH audio

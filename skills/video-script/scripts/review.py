@@ -573,37 +573,10 @@ def build_evidence_bundle(vlm_analysis, asr_result, narration, *, timeline="sour
     clock = "output" if timeline == "cut_output" else "source"
     coverage = coverage_policy_v1(vlm_analysis, asr_result, narration)
     ranges = coverage.get("selected_ranges", [])
-    items = []
-    dropped_scenes = dropped_asr = 0
-    for i, scene in enumerate(vlm_analysis or []):
-        if not isinstance(scene, dict):
-            continue
-        start = _safe_time(scene, "start")
-        end = _safe_time(scene, "end", start)
-        if end <= start or not _in_ranges(start, end, ranges):
-            dropped_scenes += 1
-            continue
-        item = {"id": f"visual:{i}", "source": "visual", "clock": clock, "source_id": str(scene.get("source_id", "0")), "start": round(start, 3), "end": round(end, 3), "text": _scene_evidence_text(scene), "support": "direct", "confidence": "high"}
-        for k in ("source_start", "source_end", "source_clip_id", "output_segment_index"):
-            if k in scene:
-                item[k] = scene.get(k)
-        items.append(item)
-    for i, seg in enumerate(asr_result or []):
-        if not isinstance(seg, dict):
-            continue
-        text = str(seg.get("text", "")).strip()
-        if not text:
-            continue
-        start = _safe_time(seg, "start")
-        end = _safe_time(seg, "end", start)
-        if end <= start or not _in_ranges(start, end, ranges):
-            dropped_asr += 1
-            continue
-        item = {"id": f"asr:{i}", "source": "asr", "clock": clock, "source_id": str(seg.get("source_id", "0")), "start": round(start, 3), "end": round(end, 3), "text": text, "support": "direct", "confidence": "high"}
-        for k in ("source_start", "source_end", "source_clip_id", "output_segment_index"):
-            if k in seg:
-                item[k] = seg.get(k)
-        items.append(item)
+    filtered = filter_evidence_by_ranges(vlm_analysis, asr_result, ranges, timeline=timeline)
+    items = filtered["items"]
+    dropped_scenes = filtered["dropped_visual_count"]
+    dropped_asr = filtered["dropped_asr_count"]
     context_items = _research_context_items(research)
     return {
         "schema_version": EVIDENCE_CONTRACT_VERSION,
