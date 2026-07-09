@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -165,6 +166,20 @@ def transcribe_audio(video_path, work_dir):
     return asr_result
 
 
+def _strip_reasoning_residue(text):
+    """Remove MiMo reasoning-model <think>…</think> leakage from ASR content.
+
+    Thinking-disable is not applied to -asr models (lib._prepare_api_payload), so the reasoning
+    model can leak a <think> block — full, truncated/unclosed, or a leading orphan/residual tag
+    (a bare "think>" prefix) — into the transcript. Independent copy of the same strip in
+    video-voiceover/scripts/dub.py (skills share no code); keep the two in sync.
+    """
+    text = re.sub(r"(?is)<think\b.*?</think\s*>", "", text)  # full <think>…</think> block
+    text = re.sub(r"(?is)<think\b.*\Z", "", text)            # unclosed/truncated <think tail
+    text = re.sub(r"(?i)^\s*<?/?think\s*>\s*", "", text)     # leading orphan/residual think tag
+    return text
+
+
 def _run_asr(wav_path):
     """用 MiMo ASR (mimo-v2.5-asr) 转录单个 wav 文件，返回纯文本。
 
@@ -203,7 +218,7 @@ def _run_asr(wav_path):
     except Exception as e:
         raise RuntimeError(f"MiMo ASR 调用失败: {e}") from e
     try:
-        return str(resp["choices"][0]["message"]["content"] or "").strip()
+        return _strip_reasoning_residue(str(resp["choices"][0]["message"]["content"] or "")).strip()
     except (KeyError, IndexError, TypeError):
         raise RuntimeError(f"MiMo ASR 返回结构异常: {json.dumps(resp, ensure_ascii=False)[:200]}")
 

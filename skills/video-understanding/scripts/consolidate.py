@@ -34,13 +34,19 @@ CLEAN_PROMPT = """你在清洗中文视频的 ASR 逐段转写。对【每一段
 - 只清洗 text，不要增删事实、不要脑补画面。
 只返回 JSON：{"segments":[{"i":0,"text":"清洗后的文本","speaker":"可选说话人"}, ...]}，i 为输入段的下标。"""
 
-INDEX_PROMPT = """你在根据逐场景画面分析，为一个视频建立【全局理解索引】，供后续写解说词时保持人物/关系/主线一致。
-只依据给到的画面证据（场景描述 + 帧实动作），不要脑补画面之外的剧情。
+INDEX_SCHEMA_VERSION = 2
+
+INDEX_PROMPT = """你在根据逐场景画面分析、ASR对白、background_research术语表，为一个视频建立【全局理解索引】，供后续写解说词时保持人物/关系/主线一致。
+规则：
+- visual/asr 是当前视频事实证据；每个人物、关系、剧情节点、物件尽量给 evidence_ids。
+- background_research 只能用于人名/别名/术语/身份消歧，默认 support=context_only；不能把后续剧情或未出现关系升级为当前画面事实。
+- ASR 中出现但画面描述未命名的人名，应进入 characters[*].asr_mentions。
 只返回 JSON：
-{"characters":[{"name":"角色名或外观指代","description":"身份/特征"}],
- "relationships":[{"a":"角色","b":"角色","relation":"关系"}],
- "plot_points":["按时间顺序的关键剧情节点"],
- "entities":["重要物件/地点/线索"]}"""
+{"characters":[{"name":"角色名或外观指代","description":"身份/特征","aliases":[],"visual_descriptions":[],"asr_mentions":[],"research_role":"","evidence_ids":[],"confidence":"high|medium|low"}],
+ "relationships":[{"a":"角色","b":"角色","relation":"关系","evidence_ids":[],"support":"direct|indirect|context_only"}],
+ "plot_points":[{"time":"00:00","text":"按时间顺序的关键剧情节点","evidence_ids":[]}],
+ "entities":[{"name":"重要物件/地点/线索","evidence_ids":[]}],
+ "research_glossary":[{"name":"名字/术语","aliases":[],"role":"说明","support":"context_only"}]}"""
 
 
 # ── pure seams (no I/O; unit-testable) ────────────────────────────────────────
@@ -85,37 +91,190 @@ def parse_clean_response(text, asr_result):
     return out
 
 
-def build_index_messages(vlm_analysis):
+def _json_md5_file(work_dir, name):
+    path = Path(work_dir) / name
+    return hashlib.md5(path.read_bytes()).hexdigest() if path.exists() else ""
+
+
+def _asr_clean_source_md5(work_dir):
+    return _json_md5_file(work_dir, "asr_clean.json")
+
+
+def _research_source_md5(work_dir):
+    return _json_md5_file(work_dir, "background_research.json")
+
+
+def _research_glossary_from_context(background_research):
+    glossary = []
+    if not isinstance(background_research, dict):
+        return glossary
+    chars = background_research.get("characters")
+    if isinstance(chars, dict):
+        for name, role in chars.items():
+            if str(name).strip():
+                glossary.append({"name": str(name).strip(), "aliases": [], "role": str(role).strip(), "support": "context_only"})
+    details = background_research.get("character_details")
+    if isinstance(details, dict):
+        for name, info in details.items():
+            if not isinstance(info, dict):
+                continue
+            aliases = [str(a).strip() for a in (info.get("aliases") or []) if str(a).strip()] if isinstance(info.get("aliases"), list) else []
+            role = str(info.get("role", "")).strip()
+            if str(name).strip() or aliases or role:
+                glossary.append({"name": str(name).strip(), "aliases": aliases, "role": role, "support": "context_only"})
+    return glossary
+
+
+
+
+def _dialogue_segments_for_index(asr_result=None, asr_clean=None):
+    clean_segments = (asr_clean or {}).get("segments") if isinstance(asr_clean, dict) else None
+    source = clean_segments if isinstance(clean_segments, list) else (asr_result or [])
+    out = []
+    for i, seg in enumerate(source or []):
+        if not isinstance(seg, dict):
+            continue
+        text = str(seg.get("text", "")).strip()
+        if not text:
+            continue
+        out.append({
+            "id": f"asr:{i}",
+            "start": seg.get("start"),
+            "end": seg.get("end"),
+            "text": text,
+        })
+    return out
+
+
+def _stable_unique(values):
+    seen = set()
+    out = []
+    for value in values or []:
+        key = json.dumps(value, ensure_ascii=False, sort_keys=True) if isinstance(value, dict) else str(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+    return out
+
+
+def _apply_deterministic_asr_research_fallback(index, asr_result=None, asr_clean=None, background_research=None):
+    """Guarantee ASR/research mentions survive even when the LLM omits them.
+
+    The LLM still owns synthesis, but cacheable deterministic fields make ASR contribution
+    observable: aliases/names from background_research are matched against ASR/asr_clean text
+    and written to characters[*].asr_mentions/evidence_ids without inventing relationships or
+    plot facts. Research remains context_only via research_glossary.
+    """
+    index = dict(index or {})
+    for key in ("characters", "relationships", "plot_points", "entities", "research_glossary"):
+        index.setdefault(key, [])
+    glossary = index.get("research_glossary") or _research_glossary_from_context(background_research)
+    if not glossary:
+        glossary = _research_glossary_from_context(background_research)
+    for item in glossary:
+        if isinstance(item, dict):
+            item["support"] = "context_only"
+    index["research_glossary"] = glossary
+
+    segments = _dialogue_segments_for_index(asr_result=asr_result, asr_clean=asr_clean)
+    char_by_name = {}
+    for c in index.get("characters") or []:
+        if isinstance(c, dict) and str(c.get("name", "")).strip():
+            char_by_name[str(c.get("name")).strip()] = c
+    for g in glossary:
+        if not isinstance(g, dict):
+            continue
+        name = str(g.get("name", "")).strip()
+        aliases = [str(a).strip() for a in (g.get("aliases") or []) if str(a).strip()]
+        terms = [t for t in [name] + aliases if t]
+        if not terms:
+            continue
+        matches = []
+        evidence_ids = []
+        for seg in segments:
+            text = seg["text"]
+            hit_terms = [term for term in terms if term and term in text]
+            if hit_terms:
+                matches.append({"text": text, "evidence_id": seg["id"], "matched_aliases": hit_terms})
+                evidence_ids.append(seg["id"])
+        if not matches:
+            continue
+        char = char_by_name.get(name)
+        if char is None:
+            char = {"name": name or matches[0]["matched_aliases"][0], "description": "", "aliases": aliases, "visual_descriptions": [], "asr_mentions": [], "research_role": str(g.get("role", "")).strip(), "evidence_ids": [], "confidence": "medium"}
+            index["characters"].append(char)
+            char_by_name[char["name"]] = char
+        char.setdefault("aliases", [])
+        char["aliases"] = _stable_unique(list(char.get("aliases") or []) + aliases)
+        char.setdefault("asr_mentions", [])
+        char["asr_mentions"] = _stable_unique(list(char.get("asr_mentions") or []) + matches)
+        char.setdefault("evidence_ids", [])
+        char["evidence_ids"] = _stable_unique(list(char.get("evidence_ids") or []) + evidence_ids)
+        if not char.get("research_role"):
+            char["research_role"] = str(g.get("role", "")).strip()
+        char.setdefault("confidence", "medium")
+    return index
+
+def build_index_messages(vlm_analysis, asr_result=None, asr_clean=None, background_research=None):
     lines = []
-    for scene in (vlm_analysis or []):
+    for i, scene in enumerate(vlm_analysis or []):
         if not isinstance(scene, dict):
             continue
-        sid = scene.get("scene_id", "?")
+        sid = scene.get("scene_id", i)
         start = float(scene.get("start", 0) or 0)
         end = float(scene.get("end", 0) or 0)
         desc = str(scene.get("description", "")).strip().replace("\n", " ")
         facts = scene.get("frame_facts")
         fact_txt = ""
-        if isinstance(facts, dict) and facts:  # frame_facts is a DICT {ts: [actions]}
+        if isinstance(facts, dict) and facts:
             actions = []
-            for ts in sorted(facts.keys(), key=lambda x: float(x)):
+            def fact_key(x):
+                try:
+                    return (0, float(x))
+                except (TypeError, ValueError):
+                    return (1, str(x))
+            for ts in sorted(facts.keys(), key=fact_key):
                 vals = facts[ts]
                 actions.extend(vals if isinstance(vals, list) else [str(vals)])
             if actions:
                 fact_txt = " | 帧实: " + "；".join(a for a in actions[:6] if a)
-        lines.append(f"[场景{sid} {start:.0f}-{end:.0f}s] {desc}{fact_txt}")
-    user = f"{INDEX_PROMPT}\n\n## 逐场景画面分析（共 {len(lines)} 段）\n" + "\n".join(lines)
+        lines.append(f"[visual:{i} 场景{sid} {start:.0f}-{end:.0f}s] {desc}{fact_txt}")
+    asr_lines = []
+    clean_segments = (asr_clean or {}).get("segments") if isinstance(asr_clean, dict) else None
+    source_asr = clean_segments if isinstance(clean_segments, list) else (asr_result or [])
+    for i, seg in enumerate(source_asr or []):
+        if not isinstance(seg, dict):
+            continue
+        text = str(seg.get("text", "")).strip()
+        if not text:
+            continue
+        asr_lines.append(f"[asr:{i} {float(seg.get('start', 0) or 0):.0f}-{float(seg.get('end', 0) or 0):.0f}s] {text}")
+    glossary = _research_glossary_from_context(background_research)
+    glossary_lines = []
+    for i, item in enumerate(glossary[:80]):
+        aliases = "/".join(item.get("aliases") or [])
+        alias_txt = f" aliases={aliases}" if aliases else ""
+        glossary_lines.append(f"[research:{i} support=context_only] {item.get('name','')}{alias_txt}: {item.get('role','')}")
+    user = (
+        f"{INDEX_PROMPT}\n\n"
+        f"## 逐场景画面分析（共 {len(lines)} 段）\n" + "\n".join(lines) + "\n\n"
+        f"## ASR / cleaned dialogue（共 {len(asr_lines)} 段）\n" + ("\n".join(asr_lines) or "(无)") + "\n\n"
+        "## Research glossary（clock=null/context_only，不得升级为当前剧情事实）\n" + ("\n".join(glossary_lines) or "(无)")
+    )
     return [{"role": "user", "content": user}]
-
 
 def parse_index_response(text):
     data = _extract_json(text)
     if not isinstance(data, dict):
-        return {"characters": [], "relationships": [], "plot_points": [], "entities": []}
-    out = {}
-    for key in ("characters", "relationships", "plot_points", "entities"):
+        return {"schema_version": INDEX_SCHEMA_VERSION, "characters": [], "relationships": [], "plot_points": [], "entities": [], "research_glossary": []}
+    out = {"schema_version": INDEX_SCHEMA_VERSION}
+    for key in ("characters", "relationships", "plot_points", "entities", "research_glossary"):
         val = data.get(key)
         out[key] = val if isinstance(val, list) else []
+    for item in out["research_glossary"]:
+        if isinstance(item, dict):
+            item["support"] = "context_only"
     return out
 
 
@@ -142,12 +301,25 @@ def format_index_md(index):
     plot = index.get("plot_points") or []
     if plot:
         out.append("## Plot spine")
-        out.extend(f"{i+1}. {p}" for i, p in enumerate(plot))
+        for i, p in enumerate(plot):
+            out.append(f"{i+1}. {p.get('text', p) if isinstance(p, dict) else p}")
         out.append("")
     ents = index.get("entities") or []
     if ents:
         out.append("## Entities")
-        out.extend(f"- {e}" for e in ents)
+        for e in ents:
+            out.append(f"- {e.get('name', e) if isinstance(e, dict) else e}")
+        out.append("")
+    glossary = index.get("research_glossary") or []
+    if glossary:
+        out.append("## Research glossary (context_only)")
+        for g in glossary:
+            if isinstance(g, dict):
+                aliases = "/".join(g.get("aliases") or [])
+                alias_txt = f" ({aliases})" if aliases else ""
+                out.append(f"- {g.get('name', '?')}{alias_txt}: {g.get('role', '')} [{g.get('support', 'context_only')}]")
+            else:
+                out.append(f"- {g}")
         out.append("")
     return "\n".join(out).rstrip() + "\n"
 
@@ -188,8 +360,11 @@ def _prompt_fingerprint(prompt):
 
 def _write_index_meta(work_dir, vlm_analysis):
     _index_meta_path(work_dir).write_text(json.dumps({
-        "schema_version": 1,
+        "schema_version": INDEX_SCHEMA_VERSION,
         "source_md5": _vlm_source_md5(work_dir),
+        "asr_md5": _asr_source_md5(work_dir),
+        "asr_clean_md5": _asr_clean_source_md5(work_dir),
+        "research_md5": _research_source_md5(work_dir),
         "scene_count": len([s for s in (vlm_analysis or []) if isinstance(s, dict)]),
         "model": CONFIG.get("vlm_model", ""),
         "prompt_md5": _prompt_fingerprint(INDEX_PROMPT),
@@ -206,7 +381,11 @@ def _index_cache_matches(work_dir, vlm_analysis):
         return False
     return (
         isinstance(meta, dict)
+        and meta.get("schema_version") == INDEX_SCHEMA_VERSION
         and meta.get("source_md5") == _vlm_source_md5(work_dir)
+        and meta.get("asr_md5", "") == _asr_source_md5(work_dir)
+        and meta.get("asr_clean_md5", "") == _asr_clean_source_md5(work_dir)
+        and meta.get("research_md5", "") == _research_source_md5(work_dir)
         and meta.get("scene_count") == len([s for s in (vlm_analysis or []) if isinstance(s, dict)])
         and meta.get("model") == CONFIG.get("vlm_model", "")
         and meta.get("prompt_md5") == _prompt_fingerprint(INDEX_PROMPT)
@@ -267,10 +446,15 @@ def consolidate_index(work_dir):
     if _fresh(out_path, work_dir / "vlm_analysis.json") and _index_cache_matches(work_dir, vlm_analysis):
         log("consolidate(index): understanding_index.json 已最新，跳过")
         return _load(work_dir, "understanding_index.json")
+    asr_result = _load(work_dir, "asr_result.json") or []
+    asr_clean = _load(work_dir, "asr_clean.json") or {}
+    background_research = _load(work_dir, "background_research.json") or {}
     resp = api_call({"model": CONFIG.get("vlm_model", ""),
-                     "messages": build_index_messages(vlm_analysis),
-                     "max_tokens": 2500, "temperature": 0.2})
+                     "messages": build_index_messages(vlm_analysis, asr_result=asr_result, asr_clean=asr_clean, background_research=background_research),
+                     "max_tokens": 3000, "temperature": 0.2})
     index = parse_index_response(_response_text(resp))
+    index = _apply_deterministic_asr_research_fallback(
+        index, asr_result=asr_result, asr_clean=asr_clean, background_research=background_research)
     out_path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
     _write_index_meta(work_dir, vlm_analysis)
     (work_dir / "understanding_index.md").write_text(format_index_md(index), encoding="utf-8")

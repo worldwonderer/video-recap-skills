@@ -58,7 +58,7 @@ def test_build_review_messages_includes_bounded_research_context(tmp_path):
         work_dir=tmp_path,
     )[0]["content"]
 
-    assert "背景资料（与画面/对白并列的有效依据：被其支撑的事实不算幻觉，仅与全部证据矛盾才算）" in content
+    assert "背景资料（context-only/advisory" in content
     assert "范闲卷入监察院暗线" in content
     assert "角色0：简介0" in content
     assert "角色12" not in content
@@ -172,20 +172,24 @@ def test_cut_output_review_remaps_grounding_to_output_timeline():
     assert vlm[0]["start"] == 2.0
     assert vlm[0]["end"] == 6.0
     assert vlm[0]["frame_facts"] == {"4.000": ["关键动作"]}
-    assert asr == [{"start": 3.0, "end": 5.0, "text": "这句在成片三到五秒"}]
+    assert asr[0]["start"] == 3.0 and asr[0]["end"] == 5.0 and asr[0]["text"] == "这句在成片三到五秒"
+    assert asr[0]["source_start"] == 13.0 and asr[0]["source_end"] == 15.0
 
 
 def test_review_narration_cut_output_requires_fresh_validated_clip_spans(monkeypatch, tmp_path):
     (tmp_path / "narration.json").write_text(json.dumps([{"start": 1, "end": 2, "narration": "测试。"}]), encoding="utf-8")
     monkeypatch.setattr("review.api_call", lambda payload: {"choices": [{"message": {"content": "{}"}}]})
 
+    # Advisory path fails open but writes warnings/QC; strict evidence blocks.
+    out = review.review_narration(tmp_path, timeline="cut_output")
+    assert out.get("warnings")
     with pytest.raises(SystemExit, match="clip_plan_validated"):
-        review.review_narration(tmp_path, timeline="cut_output")
+        review.review_narration(tmp_path, timeline="cut_output", strict_evidence=True)
 
     raw = [{"start": 10, "end": 20}]
     (tmp_path / "clip_plan.json").write_text(json.dumps(raw), encoding="utf-8")
-    with pytest.raises(SystemExit, match="clip_plan_validated"):
-        review.review_narration(tmp_path, timeline="cut_output")
+    out = review.review_narration(tmp_path, timeline="cut_output")
+    assert out.get("warnings")
 
     stale = {
         "raw_plan_fingerprint": "stale",
@@ -193,7 +197,7 @@ def test_review_narration_cut_output_requires_fresh_validated_clip_spans(monkeyp
     }
     (tmp_path / "clip_plan_validated.json").write_text(json.dumps(stale), encoding="utf-8")
     with pytest.raises(SystemExit, match="clip_plan_validated"):
-        review.review_narration(tmp_path, timeline="cut_output")
+        review.review_narration(tmp_path, timeline="cut_output", strict_evidence=True)
 
 
 def test_review_narration_cut_output_uses_remapped_grounding(monkeypatch, tmp_path):
@@ -218,8 +222,9 @@ def test_review_narration_cut_output_uses_remapped_grounding(monkeypatch, tmp_pa
     review.review_narration(tmp_path, timeline="cut_output")
 
     content = payloads[0]["messages"][0]["content"]
-    assert "[3-5s] 输出三到五秒对白" in content
-    assert "[场景1 2-6s] 保留片段" in content
+    assert "[OUTPUT 3.0-5.0s 对白" in content and "输出三到五秒对白" in content
+    assert "[OUTPUT 2.0-6.0s 画面" in content and "保留片段" in content
+    assert "SOURCE 13.0-15.0s" in content
 
 
 def test_parse_review_scorecard_is_advisory_and_keeps_verdict():
@@ -270,3 +275,265 @@ def test_parse_review_scorecard_marks_unscored_dimensions():
     assert r["scorecard"]["tts_pacing"] is None
     md = review.format_review_md(r)
     assert "未评分" in md and "hook_3s: 5/5" in md
+
+
+def test_coverage_policy_v1_covers_long_video_tail_and_bme():
+    scenes = [{"scene_id": i, "start": i * 10.0, "end": i * 10.0 + 8.0, "description": f"scene{i}"} for i in range(100)]
+    asr = [{"start": i * 5.0, "end": i * 5.0 + 2.0, "text": f"line{i}"} for i in range(200)]
+    narration = [{"start": 850.0, "end": 860.0, "narration": "后段关键反转。"}]
+    cov = review.coverage_policy_v1(scenes, asr, narration)
+    ranges = cov["selected_ranges"]
+    assert cov["coverage_policy_version"] == "coverage_policy_v1"
+    assert any(r["start"] <= 0 <= r["end"] for r in ranges)
+    assert any(r["start"] <= 500 <= r["end"] for r in ranges)
+    assert any(r["start"] <= 990 <= r["end"] for r in ranges)
+    assert any(r["start"] <= 855 <= r["end"] and "narration_window" in r["selection_reason"] for r in ranges)
+    assert review.coverage_policy_v1(scenes, asr, narration)["selected_ranges"] == ranges
+
+
+def test_evidence_bundle_labels_source_output_and_context_only():
+    narration = [{"start": 3, "end": 5, "narration": "测试。"}]
+    vlm = [{"scene_id": 1, "start": 2, "end": 6, "description": "保留", "source_start": 12, "source_end": 16, "output_segment_index": 0}]
+    asr = [{"start": 3, "end": 5, "text": "对白", "source_start": 13, "source_end": 15, "output_segment_index": 0}]
+    research = {"characters": {"叶轻眉": "主角之母"}, "character_details": {"叶轻眉": {"aliases": ["叶青眉"], "role": "背景人物"}}}
+    bundle = review.build_evidence_bundle(vlm, asr, narration, timeline="cut_output", research=research)
+    assert {item["clock"] for item in bundle["items"]} == {"output"}
+    assert all("source_start" in item and "source_end" in item for item in bundle["items"])
+    assert bundle["context_items"] and all(item["clock"] is None and item["support"] == "context_only" for item in bundle["context_items"])
+    rendered = review.render_evidence_bundle(bundle)
+    assert "clock=OUTPUT" in rendered and "SOURCE 12.0-16.0s" in rendered
+    assert "clock=null" in rendered
+
+
+def test_review_narration_cut_output_advisory_writes_warning_qc(monkeypatch, tmp_path):
+    (tmp_path / "narration.json").write_text(json.dumps([{"start": 1, "end": 2, "narration": "测试。"}], ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "vlm_analysis.json").write_text("[]", encoding="utf-8")
+    (tmp_path / "asr_result.json").write_text("[]", encoding="utf-8")
+    monkeypatch.setattr("review.api_call", lambda payload: {"choices": [{"message": {"content": '{"verdict":"PASS","summary":"ok","findings":[]}'}}]})
+    out = review.review_narration(tmp_path, timeline="cut_output")
+    assert out["warnings"]
+    qc = json.loads((tmp_path / "grounding_qc.json").read_text(encoding="utf-8"))
+    assert qc["owner"] == "video-script.review"
+    assert qc["verdict"] == "warn"
+    assert qc["coverage_policy_version"] == "coverage_policy_v1"
+    with pytest.raises(SystemExit):
+        review.review_narration(tmp_path, timeline="cut_output", strict_evidence=True)
+
+
+def test_merge_review_findings_dedup_keeps_highest_severity():
+    merged = review.merge_review_findings([
+        {"findings": [{"segment": 1, "category": "hallucination", "severity": "suggestion", "issue": "X", "fix": "a"}]},
+        {"findings": [{"segment": 1, "category": "hallucination", "severity": "error", "issue": "X", "fix": "b"}]},
+    ])
+    assert len(merged) == 1 and merged[0]["severity"] == "error" and merged[0]["fix"] == "b"
+
+
+def test_parse_review_downgrades_research_assertions_to_context_only():
+    payload = {"verdict": "PASS", "summary": "ok", "grounding_assertions": [{"segment": 0, "assertion": "最终背叛", "source": "research", "risk": "spoiler"}], "findings": []}
+    r = review.parse_review_response(json.dumps(payload, ensure_ascii=False))
+    assert r["grounding_assertions"][0]["support"] == "context_only"
+    assert r["grounding_assertions"][0]["clock"] is None
+
+
+
+def test_parse_review_downgrades_user_context_assertions_to_context_only():
+    payload = {
+        "verdict": "PASS",
+        "summary": "ok",
+        "grounding_assertions": [
+            {"segment": 0, "assertion": "用户说这是兄弟", "source": "user_context", "risk": "from prompt"}
+        ],
+        "findings": [],
+    }
+    r = review.parse_review_response(json.dumps(payload, ensure_ascii=False))
+    assertion = r["grounding_assertions"][0]
+    assert assertion["support"] == "context_only"
+    assert assertion["clock"] is None
+    assert "user_context-only" in assertion["risk"]
+
+
+def test_bundle_fingerprint_failure_is_observable_in_bundle_warning():
+    bundle = {"schema_version": 1, "clock": "source", "items": [], "context_items": []}
+    bundle["coverage"] = bundle  # circular metadata should not be swallowed invisibly
+
+    assert review._bundle_fingerprint(bundle) == ""
+    warning = bundle["metadata"]["evidence_bundle_fingerprint_warning"]
+    assert "fingerprint unavailable" in warning
+
+    chunks = review._chunk_evidence_bundle(bundle)
+    assert chunks[0]["metadata"]["evidence_bundle_fingerprint"] == ""
+    assert warning in chunks[0]["warnings"]
+
+def test_public_grounding_seams_are_api_free(tmp_path):
+    narration = [{"start": 1, "end": 3, "narration": "测试。"}]
+    vlm = [{"scene_id": 1, "start": 0, "end": 4, "description": "门口对峙", "frame_facts": {"1.0": ["男子握拳"]}}]
+    asr = [{"start": 1, "end": 2, "text": "站住"}]
+
+    ranges = review.select_coverage_ranges(vlm, asr, narration)
+    filtered = review.filter_evidence_by_ranges(vlm, asr, ranges)
+    assert [item["source"] for item in filtered["items"]] == ["visual", "asr"]
+
+    bundle = review.build_evidence_bundle(vlm, asr, narration, research={"characters": {"甲": "背景"}})
+    assert review.validate_public_evidence_contract(bundle)["valid"] is True
+    assert review.build_review_coverage_metadata(bundle)["scene_count"] == 1
+    assert "门口对峙" in review.render_evidence_for_review(bundle)
+
+    qc = review.build_grounding_qc(tmp_path, {"findings": []}, bundle)
+    assert qc["verdict"] == "pass"
+    review.write_grounding_qc(tmp_path, qc)
+    assert json.loads((tmp_path / "grounding_qc.json").read_text(encoding="utf-8"))["owner"] == "video-script.review"
+
+
+def test_validate_timeline_mapping_reports_bad_spans():
+    good = review.validate_timeline_mapping([
+        {"source_start": 10, "source_end": 20, "output_start": 0, "output_end": 10},
+        {"source_start": 30, "source_end": 35, "output_start": 10, "output_end": 15},
+    ])
+    bad = review.validate_timeline_mapping([
+        {"source_start": 1, "source_end": 1, "output_start": 0, "output_end": 1},
+    ])
+    assert good["valid"] is True and good["span_count"] == 2
+    assert bad["valid"] is False and bad["errors"]
+
+
+
+def test_review_narration_chunks_large_evidence_and_merges(monkeypatch, tmp_path):
+    narration = [{"start": 0, "end": 980, "narration": "全片复盘。"}]
+    vlm = [{"scene_id": i, "start": i * 10.0, "end": i * 10.0 + 8.0, "description": f"scene{i}"} for i in range(130)]
+    (tmp_path / "narration.json").write_text(json.dumps(narration, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "vlm_analysis.json").write_text(json.dumps(vlm, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "asr_result.json").write_text("[]", encoding="utf-8")
+    payloads = []
+
+    def fake(payload):
+        payloads.append(payload)
+        idx = len(payloads) - 1
+        return {"choices": [{"message": {"content": json.dumps({
+            "verdict": "REVISE",
+            "summary": "chunk",
+            "findings": [{"segment": idx, "severity": "warning", "category": "grounding_risk", "issue": f"issue{idx}", "fix": "fix"}],
+        }, ensure_ascii=False)}}]}
+
+    monkeypatch.setattr("review.api_call", fake)
+    out = review.review_narration(tmp_path)
+    assert len(payloads) > 1
+    assert out["chunked_review"]["chunk_count"] == len(payloads)
+    assert len(out["findings"]) == len(payloads)
+    qc = json.loads((tmp_path / "grounding_qc.json").read_text(encoding="utf-8"))
+    assert qc["review_coverage"]["time_ranges"]
+
+
+def test_duplicate_source_clip_backrefs_remain_distinguishable():
+    vlm = [{"scene_id": 1, "start": 10, "end": 20, "description": "同一源片段"}]
+    asr = [{"start": 12, "end": 14, "text": "同一句对白"}]
+    spans = [
+        {"source_start": 10, "source_end": 20, "output_start": 0, "output_end": 10, "source_id": "0", "source_clip_id": "clip-a", "output_segment_index": 0},
+        {"source_start": 10, "source_end": 20, "output_start": 30, "output_end": 40, "source_id": "0", "source_clip_id": "clip-b", "output_segment_index": 1},
+    ]
+    rv, ra = review.remap_grounding_to_output_timeline(vlm, asr, spans)
+    assert len(rv) == 2 and len(ra) == 2
+    assert {x["source_clip_id"] for x in rv} == {"clip-a", "clip-b"}
+    assert {x["output_segment_index"] for x in ra} == {0, 1}
+    bundle = review.build_evidence_bundle(rv, ra, [{"start": 0, "end": 40, "narration": "测试"}], timeline="cut_output")
+    rendered = review.render_evidence_bundle(bundle)
+    assert "clip#0" in rendered and "clip#1" in rendered
+
+
+def test_research_only_assertion_stays_context_only_not_strong_fact(tmp_path):
+    parsed = review.parse_review_response(json.dumps({
+        "verdict": "PASS",
+        "summary": "ok",
+        "grounding_assertions": [{"segment": 0, "assertion": "角色已背叛", "source": "research", "risk": "spoiler"}],
+        "findings": [],
+    }, ensure_ascii=False))
+    bundle = review.build_evidence_bundle([], [], [{"start": 0, "end": 1, "narration": "他已经背叛。"}], research={"characters": {"甲": "未来剧情"}})
+    qc = review.build_grounding_qc(tmp_path, parsed, bundle)
+    assertion = parsed["grounding_assertions"][0]
+    assert assertion["support"] == "context_only" and assertion["clock"] is None
+    assert qc["research_guardrail"]["spoiler_risk_assertions"] == 1
+
+
+def test_build_review_messages_includes_style_and_deslop_artifacts_fail_open(tmp_path):
+    (tmp_path / "packaging_plan.json").write_text(
+        json.dumps({"viewer_promise": "看到反转"}, ensure_ascii=False), encoding="utf-8"
+    )
+    (tmp_path / "style_card.json").write_text(
+        json.dumps({"tone": "冷静克制", "avoid": ["空泛拔高"]}, ensure_ascii=False), encoding="utf-8"
+    )
+    (tmp_path / "deslop_qc.json").write_text(
+        json.dumps({"flags": [{"type": "template_transition", "text": "然而"}]}, ensure_ascii=False), encoding="utf-8"
+    )
+
+    content = review.build_review_messages(
+        [{"start": 0, "end": 3, "narration": "测试。"}], [], [], work_dir=tmp_path
+    )[0]["content"]
+
+    assert "packaging_plan.json" in content and "看到反转" in content
+    assert "style_card.json" in content and "冷静克制" in content and "空泛拔高" in content
+    assert "deslop_qc.json" in content and "template_transition" in content and "然而" in content
+    assert "可能为空" in content
+
+
+def test_build_review_messages_bad_style_and_deslop_json_keep_context_titles(tmp_path):
+    (tmp_path / "style_card.json").write_text("{bad json", encoding="utf-8")
+    (tmp_path / "deslop_qc.json").write_text("[bad json", encoding="utf-8")
+
+    content = review.build_review_messages(
+        [{"start": 0, "end": 1, "narration": "测试。"}], [], [], work_dir=tmp_path
+    )[0]["content"]
+
+    assert "style_card.json" in content
+    assert "deslop_qc.json" in content
+    assert content.count("(无)") >= 2
+
+
+def test_parse_review_clamps_new_craft_categories_to_warning_but_keeps_factual_errors():
+    craft_categories = [
+        "ai_flavor",
+        "weak_payoff",
+        "style_mismatch",
+        "packaging_mismatch",
+        "example_entity_leak",
+    ]
+    payload = {
+        "verdict": "FAIL",
+        "summary": "s",
+        "findings": [
+            {"segment": 0, "severity": "error", "category": category, "issue": category, "fix": "fix"}
+            for category in craft_categories
+        ] + [
+            {"segment": 1, "severity": "error", "category": "hallucination", "issue": "fact", "fix": "fix"},
+            {"segment": 2, "severity": "error", "category": "incomplete", "issue": "cut", "fix": "fix"},
+        ],
+    }
+
+    parsed = review.parse_review_response(json.dumps(payload, ensure_ascii=False))
+    severities = {item["category"]: item["severity"] for item in parsed["findings"]}
+
+    assert all(severities[category] == "warning" for category in craft_categories)
+    assert severities["hallucination"] == "error"
+    assert severities["incomplete"] == "error"
+
+
+def test_parse_review_scorecard_new_keys_and_omitted_dimensions_stay_none():
+    payload = {
+        "verdict": "PASS",
+        "summary": "ok",
+        "scorecard": {
+            "ending_payoff": 5,
+            "style_consistency": "4",
+            "ai_flavor": 2.2,
+            "packaging_consistency": 0,
+        },
+        "findings": [],
+    }
+
+    parsed = review.parse_review_response(json.dumps(payload, ensure_ascii=False))
+    scorecard = parsed["scorecard"]
+
+    assert scorecard["ending_payoff"] == 5
+    assert scorecard["style_consistency"] == 4
+    assert scorecard["ai_flavor"] == 2
+    assert scorecard["packaging_consistency"] == 1
+    assert scorecard["hook_3s"] is None
+    assert scorecard["tts_pacing"] is None

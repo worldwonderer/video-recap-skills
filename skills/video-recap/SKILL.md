@@ -120,6 +120,8 @@ python3 scripts/recap.py --doctor
 `--skip-asr`, `--mimo-video-overview`, `--consolidate`, `--consolidate-asr`, `--mimo-tts-voice`,
 `--no-burn-subtitles` (burn is on by default), `--output-dir`, `--material-library-dir`, `--use-materials`, `--save-materials`.
 
+`--style` is freeform verbatim guidance for the agent to synthesize with evidence; do not treat it as an option list, preset, switch, or finite style taxonomy.
+
 ## What this skill does NOT do
 - Does NOT write narration.json / clip_plan.json — the agent authors those (see the video-script skill).
 - Does NOT hard-block on the narration review (advisory; validate.py is the hard gate).

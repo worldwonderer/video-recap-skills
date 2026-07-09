@@ -21,6 +21,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import qc_contract
+# Same-skill local QC helper exception: final_qc is imported directly so recap can
+# write report-only post-render QC without subprocess overhead or credential/env
+# expansion. Sibling skills still communicate through subprocess artifacts.
+import final_qc
 from doctor import ffmpeg_has_subtitles_filter
 import materials as material_lib
 
@@ -29,6 +34,146 @@ RUN_MANIFEST = "recap_run_manifest.json"
 ASSEMBLY_MANIFEST = "assembly_manifest.json"
 PHASE_LEDGER = "recap_phase.json"
 MULTI_SOURCE_MANIFEST = "multi_source_manifest.json"
+
+
+CUT_TIMELINE_CRAFT_BULLETS = [
+    "- Build one story spine, not unordered highlights: 0–1 optional cold-open/high-impact clip may come first, then return to setup → turn → payoff in a coherent arc.",
+    "- Use clip `reason` as craft intent where useful: `cold_open`, `setup`, `turn`, or `payoff` plus a concrete why.",
+    "- Prefer causal/reveal/decision/emotional beats; skip credits, ads, repeated static filler, and watermark/无法描述 stretches.",
+    "- End clips on complete spoken lines or quiet windows so original audio does not enter/exit mid-sentence.",
+]
+
+MULTI_SOURCE_NARRATION_CRAFT_BULLETS = [
+    "- Write against the OUTPUT timeline of edited_source.mp4 only; do not use original source timestamps for narration.json.",
+    "- Recap in BLOCKS of 2–4 complete sentences, not isolated caption fragments; each block should advance the same story spine.",
+    "- Leave deliberate original-audio gaps between blocks for strong source moments; tee up the gap before it plays and react to it after it plays.",
+    "- Use the kept-clip map and each source work_dir to retrieve source facts, names, ASR, and per-source brief context when a beat is unclear.",
+]
+
+
+
+
+def _json_safe(value):
+    """Return a JSON-serializable, secret-redacted copy for local QC metadata."""
+    def convert(item):
+        if isinstance(item, Path):
+            return str(item)
+        if isinstance(item, dict):
+            return {str(k): convert(v) for k, v in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [convert(v) for v in item]
+        return item
+
+    return qc_contract.redact_secrets(convert(value))
+
+
+def _load_preflight_stage_reports(work_dir):
+    path = Path(work_dir) / "preflight_qc.json"
+    if not path.exists():
+        return {}
+    data = _load_json(path)
+    if not isinstance(data, dict):
+        raise qc_contract.QCContractError("preflight_qc.json must be a JSON object")
+    qc_contract.validate_report(data)
+    stages = None
+    metadata = data.get("metadata")
+    if isinstance(metadata, dict) and isinstance(metadata.get("stages"), dict):
+        stages = metadata.get("stages")
+    elif isinstance(data.get("stages"), dict):
+        stages = data.get("stages")
+    if stages is None:
+        return {data["stage"]: data}
+    stage_reports = {}
+    for stage, report in stages.items():
+        if not isinstance(report, dict):
+            raise qc_contract.QCContractError(f"preflight stage report must be an object: {stage}")
+        qc_contract.validate_report(report)
+        if report.get("stage") != stage:
+            raise qc_contract.QCContractError(f"preflight stage key does not match report stage: {stage}")
+        stage_reports[stage] = report
+    return stage_reports
+
+
+def _write_shift_left_stage_qc(work_dir, stage, metadata=None, findings=None):
+    """Write/roll up local shift-left QC for one pipeline stage.
+
+    This is a local contract artifact only: no MiMo/deep eval calls, no repair, and
+    no credential persistence. Any validation/write failure is allowed to raise.
+    """
+    work_dir = Path(work_dir)
+    path = work_dir / "preflight_qc.json"
+    stage_report = qc_contract.build_report(
+        artifact="preflight_qc.json",
+        stage=stage,
+        findings=findings or [],
+        metadata=_json_safe(metadata or {}),
+    )
+    stage_reports = _load_preflight_stage_reports(work_dir)
+    stage_reports[stage] = stage_report
+    aggregate_findings = []
+    for report in stage_reports.values():
+        aggregate_findings.extend(dict(f) for f in report.get("findings", []))
+    top_metadata = dict(stage_report.get("metadata") or {})
+    top_metadata["latest_stage"] = stage
+    top_metadata["stages"] = stage_reports
+    top_report = qc_contract.build_report(
+        artifact="preflight_qc.json",
+        stage=stage,
+        findings=aggregate_findings,
+        metadata=_json_safe(top_metadata),
+    )
+    qc_contract.validate_report(top_report)
+    path.write_text(json.dumps(top_report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    qc_contract.validate_report(_load_json(path))
+    return top_report
+
+
+def _tts_qc_metadata(work_dir):
+    work_dir = Path(work_dir)
+    metadata = {}
+    tts_meta = _load_json(work_dir / "tts_meta.json")
+    if tts_meta is not None:
+        metadata["tts_meta"] = tts_meta
+    tts_dir = work_dir / "tts_segments"
+    if tts_dir.exists() and tts_dir.is_dir():
+        metadata["tts_segments"] = [p.relative_to(work_dir).as_posix() for p in sorted(tts_dir.iterdir()) if p.is_file()]
+    return metadata
+
+
+def _post_render_qc_metadata(work_dir, final_output):
+    work_dir = Path(work_dir)
+    metadata = {"final_output": str(final_output) if final_output is not None else None}
+    assembly_manifest = _load_json(work_dir / ASSEMBLY_MANIFEST)
+    if assembly_manifest is not None:
+        metadata["assembly_manifest"] = assembly_manifest
+    return metadata
+
+
+def _write_final_qc_reports(work_dir, final_output):
+    """Write report-only final QC artifacts after render.
+
+    final_qc.run converts ffprobe unavailability/failure into deterministic
+    blockers; only unexpected schema/write errors propagate.
+    """
+    return final_qc.run(work_dir, final_output=final_output)
+
+
+def _print_final_qc_pointer(result):
+    """Surface a report-only final_qc/golden_eval FAIL so the shift-left QC is
+    not a silent no-op. Advisory only: it never changes the exit status."""
+    if not isinstance(result, dict):
+        return
+    problems = []
+    for key in ("final_qc", "golden_eval"):
+        section = result.get(key)
+        if isinstance(section, dict) and section.get("ok") is False:
+            problems.append(f"{key} blocker_count={section.get('blocker_count', '?')}")
+    if problems:
+        print(
+            "[video-recap] ⚠️  最终 QC 未通过（仅报告，不阻断）: "
+            + "; ".join(problems)
+            + "；详见 final_qc.json / golden_eval.json"
+        )
 
 
 def _entry(skill, script):
@@ -131,6 +276,8 @@ def _run_narration_review(work_dir, args, *, timeline="source"):
         # through to review.py's auto-detect (which could flip on stale cut artifacts left in a
         # reused full-mode work_dir).
         rargs = ["--work-dir", work_dir, "--timeline", timeline]
+        if strict and timeline == "cut_output":
+            rargs.append("--strict-evidence")
         _run("video-script", "review.py", *rargs)
     except SystemExit as exc:
         if strict:
@@ -315,12 +462,121 @@ def _preflight_burn_subtitles(args):
             f"  自检：python3 {shlex.quote(str(_entry('video-recap', 'doctor.py')))}")
 
 
+
+
+_ALLOWED_VISUAL_OVERLAY_TYPES = {"top_title", "inline_label_or_callout"}
+_VISUAL_OVERLAYS = "visual_overlays.json"
+
+
+def _finite_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _iter_narration_segments(narration_data):
+    if isinstance(narration_data, list):
+        yield from (item for item in narration_data if isinstance(item, dict))
+        return
+    if not isinstance(narration_data, dict):
+        return
+    for key in ("segments", "narration", "items"):
+        value = narration_data.get(key)
+        if isinstance(value, list):
+            yield from (item for item in value if isinstance(item, dict))
+            return
+
+
+def _canonical_visual_overlay(overlay, segment=None):
+    """Return the first-release assemble overlay contract, or None.
+
+    Recap owns the handoff artifact but does not invent richer overlay semantics. Only the
+    two overlay types implemented by assemble are allowed through; all unknown platform or
+    future types stay out of the canonical first-release file.
+    """
+    if not isinstance(overlay, dict):
+        return None
+    typ = overlay.get("type")
+    if typ not in _ALLOWED_VISUAL_OVERLAY_TYPES:
+        return None
+    text = overlay.get("text")
+    if text is None or str(text) == "":
+        return None
+    seg = segment if isinstance(segment, dict) else {}
+    start = _finite_number(overlay.get("start"))
+    end = _finite_number(overlay.get("end"))
+    if start is None:
+        start = _finite_number(seg.get("start"))
+    if end is None:
+        end = _finite_number(seg.get("end"))
+    if start is None or end is None or end <= start:
+        return None
+
+    item = {"type": typ, "text": str(text), "start": start, "end": end}
+    # Preserve renderer-supported placement hints supplied by upstream facts; do not add new
+    # semantic overlay kinds or infer platform-specific cards/chapters.
+    for key in ("anchor", "x", "y", "max_width", "style"):
+        if key in overlay:
+            item[key] = overlay[key]
+    return item
+
+
+def _extract_visual_overlays_from_narration(narration_path):
+    data = _load_json(narration_path)
+    overlays = []
+    for segment in _iter_narration_segments(data):
+        raw = segment.get("visual_overlays")
+        if not isinstance(raw, list):
+            continue
+        for overlay in raw:
+            item = _canonical_visual_overlay(overlay, segment)
+            if item is not None:
+                overlays.append(item)
+    return overlays
+
+
+def _write_canonical_visual_overlays(work_dir, narration_path):
+    """Write assemble's canonical work_dir/visual_overlays.json recap handoff.
+
+    Direct assemble still supports user-authored/manual visual_overlays.json files. Once
+    recap owns the handoff for a narration, however, the canonical artifact must be a
+    deterministic reflection of the current narration so reused work_dirs cannot render
+    stale overlays from a previous run. Unsupported/future overlay types are filtered out
+    and represented as an explicit empty overlay list.
+    """
+    work_dir = Path(work_dir)
+    path = work_dir / _VISUAL_OVERLAYS
+    overlays = _extract_visual_overlays_from_narration(narration_path)
+    payload = {"schema_version": 1, "overlays": overlays}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[video-recap] 🧩 visual overlays: {len(overlays)} → {path}", flush=True)
+    return path
+
+
+def _print_grounding_qc_pointer(work_dir):
+    qc_path = Path(work_dir) / "grounding_qc.json"
+    if not qc_path.exists():
+        return
+    data = _load_json(qc_path)
+    if isinstance(data, dict):
+        verdict = data.get("verdict", "unknown")
+        ranges = (data.get("review_coverage") or {}).get("time_ranges") or []
+        warnings = data.get("warnings") or []
+        suffix = f" · warnings {len(warnings)}" if warnings else ""
+        print(f"[video-recap] 🧭 Grounding QC: {verdict} · ranges {len(ranges)}{suffix} → {qc_path}", flush=True)
+    else:
+        print(f"[video-recap] 🧭 Grounding QC → {qc_path}", flush=True)
+
+
 def _print_narration_review_pointer(work_dir, *, review_ran=True):
     """Surface the advisory narration review produced by this run, if any.
 
     Review is optional/fail-open. Avoid surfacing a stale narration_review.md from an
     older run when review was disabled or failed before producing fresh artifacts.
     """
+    _print_grounding_qc_pointer(work_dir)
     if not review_ran:
         return
     review_md = Path(work_dir) / "narration_review.md"
@@ -451,6 +707,8 @@ def _continuation_command(video, work_dir, args):
         parts += ["--edit-mode", args.edit_mode]
     if args.target_duration:
         parts += ["--target-duration", args.target_duration]
+    if getattr(args, "allow_duration_drift", False):
+        parts.append("--allow-duration-drift")
     if getattr(args, "allow_sparse_cut", False):
         parts.append("--allow-sparse-cut")
     if args.skip_asr:
@@ -536,6 +794,11 @@ def _write_multi_source_clip_brief(work_dir, source_records, args):
         "- `start`/`end` 是对应 source 原视频时间（秒）。",
         "- 不同 `source_id` 的相同时间段不算重叠；同一 `source_id` 内不要重复/重叠，除非你明确接受稀疏/重复剪辑风险。",
         "- 素材库是文件系统 JSON/MD/JSONL；需要找历史素材时直接 `grep -R \"关键词\" <material-library-dir>`。",
+        "",
+        "## Cut craft",
+        *CUT_TIMELINE_CRAFT_BULLETS,
+        "- For multi-source, choose clips across sources to serve the shared story spine; do not let one source become a disconnected mini-recap unless that is the intended setup/turn/payoff.",
+        "- Use each source work_dir below (`sources/<source_id>`) to retrieve scenes.json, ASR, indexes, and per-source brief context before selecting clips.",
     ]
     if args.target_duration:
         lines.append(f"- 目标时长：`{args.target_duration}`。")
@@ -572,6 +835,10 @@ def _write_multi_source_output_brief(work_dir, source_records, validated_plan_pa
         "",
         "注意：`start`/`end` 是剪后成片时间，不是原视频时间。",
         "",
+        "## Output narration craft",
+        *MULTI_SOURCE_NARRATION_CRAFT_BULLETS,
+        "- Use BLOCK recap style: explain intent, stakes, subtext, relationships, and consequences; do not merely describe pixels.",
+        "",
         "## Kept clips (output → source)",
     ]
     for c in clips:
@@ -587,6 +854,62 @@ def _write_multi_source_output_brief(work_dir, source_records, validated_plan_pa
     for s in source_records:
         lines.append(f"- {s['source_id']}: `{_source_work_dir(work_dir, s)}`")
     (Path(work_dir) / "agent_narration_brief.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def _qc_status_is_blocking(value):
+    if isinstance(value, str):
+        return value.strip().lower() in {"blocking", "blocked", "fail", "failed", "error"}
+    return bool(value) if isinstance(value, bool) else False
+
+
+def _cut_qc_blocking_reasons(qc):
+    if not isinstance(qc, dict):
+        return []
+    reasons = []
+    for key in ("status", "target_duration_status", "duration_status", "boundary_status"):
+        if _qc_status_is_blocking(qc.get(key)):
+            reasons.append(f"{key}={qc.get(key)}")
+    for key in ("blocking", "blocked", "failed", "fail", "errors"):
+        value = qc.get(key)
+        if value:
+            reasons.append(f"{key}={value}")
+    checks = qc.get("checks") if isinstance(qc.get("checks"), list) else []
+    for item in checks:
+        if isinstance(item, dict) and _qc_status_is_blocking(item.get("status")):
+            reasons.append(f"{item.get('name', 'check')}={item.get('status')}")
+    return reasons
+
+
+def _cut_qc_summary_lines(qc):
+    if not isinstance(qc, dict) or not qc:
+        return []
+    parts = []
+    for key in ("target_duration_status", "total_duration", "clip_count", "join_fade_ms"):
+        if key in qc:
+            parts.append(f"{key}={qc.get(key)}")
+    geometry = qc.get("output_geometry")
+    if isinstance(geometry, dict):
+        dims = "x".join(str(geometry.get(k)) for k in ("width", "height") if geometry.get(k) is not None)
+        fps = geometry.get("fps")
+        reason = geometry.get("reason") or qc.get("output_geometry_reason")
+        fps_suffix = f"@{fps}fps" if fps else ""
+        reason_suffix = f" reason={reason}" if reason else ""
+        parts.append(f"output_geometry={dims or geometry}{fps_suffix}{reason_suffix}")
+    warnings = qc.get("warnings")
+    if warnings:
+        parts.append(f"warnings={len(warnings) if isinstance(warnings, list) else warnings}")
+    return ["[video-recap] cut QC: " + "; ".join(parts)] if parts else []
+
+
+def _surface_cut_qc(work_dir):
+    plan = _load_json(Path(work_dir) / "clip_plan_validated.json")
+    qc = plan.get("qc") if isinstance(plan, dict) else None
+    for line in _cut_qc_summary_lines(qc):
+        print(line, flush=True)
+    blocking = _cut_qc_blocking_reasons(qc)
+    if blocking:
+        raise SystemExit("video-cut QC blocking/fail status: " + "; ".join(blocking))
+    return qc
 
 
 def _fmt_range(start, end):
@@ -721,9 +1044,13 @@ def _run_multi_cut(videos, work_dir, args):
     crender = [str(videos[0]), "--work-dir", str(work_dir), "--sources-manifest", str(manifest_path), "--no-narration-map"]
     if args.target_duration:
         crender += ["--target-duration", args.target_duration]
+    if getattr(args, "allow_duration_drift", False):
+        crender.append("--allow-duration-drift")
     if getattr(args, "allow_sparse_cut", False):
         crender.append("--allow-sparse-cut")
     _run("video-cut", "cut.py", *crender)
+    cut_qc = _surface_cut_qc(work_dir)
+    _write_shift_left_stage_qc(work_dir, "post_cut", metadata={"cut_qc": cut_qc})
     if not narration_json.exists():
         _write_multi_source_output_brief(work_dir, source_records, work_dir / "clip_plan_validated.json")
         _write_phase_ledger(work_dir, clip_plan_fingerprint=cp_fp, edited_source_rendered=True, multi_source=True)
@@ -745,12 +1072,16 @@ def _run_multi_cut(videos, work_dir, args):
     _run("video-script", "validate.py", "--work-dir", work_dir, "--mode", "cut_output",
          "--output-duration", f"{output_duration:.3f}")
     review_ran = _run_narration_review(work_dir, args, timeline="cut_output")
+    _write_shift_left_stage_qc(work_dir, "pre_tts", metadata={"review_ran": review_ran, "timeline": "cut_output"})
     vargs = ["--work-dir", str(work_dir), "--narration", str(narration_json)]
     if args.mimo_tts_voice:
         vargs += ["--mimo-voice", args.mimo_tts_voice]
     if args.allow_partial_tts:
         vargs.append("--allow-partial-tts")
     _run("video-voiceover", "voiceover.py", *vargs)
+    _write_shift_left_stage_qc(work_dir, "post_tts", metadata=_tts_qc_metadata(work_dir))
+    overlays_path = _write_canonical_visual_overlays(work_dir, narration_json)
+    _write_shift_left_stage_qc(work_dir, "pre_assemble", metadata={"visual_overlays": str(overlays_path)})
 
     recap_stem = f"multi_{videos[0].stem}"
     aargs = [str(edited_source), "--work-dir", str(work_dir), "--recap-stem", recap_stem]
@@ -768,7 +1099,10 @@ def _run_multi_cut(videos, work_dir, args):
 
     final_dir = Path(args.output_dir) if args.output_dir else work_dir.parent
     final_output = _read_assembly_output(work_dir) or (final_dir / ("recap_" + recap_stem + ".mp4"))
+    _write_shift_left_stage_qc(work_dir, "post_render", metadata=_post_render_qc_metadata(work_dir, final_output))
+    final_qc_result = _write_final_qc_reports(work_dir, final_output)
     print(f"[video-recap] ✅ 完成: {final_output}")
+    _print_final_qc_pointer(final_qc_result)
     _print_narration_review_pointer(work_dir, review_ran=review_ran)
 
 
@@ -781,8 +1115,10 @@ def main():
     ap.add_argument("--style", default="纪录片")
     ap.add_argument("--edit-mode", default=os.environ.get("EDIT_MODE", "full"), choices=["full", "cut", "dub"])
     ap.add_argument("--target-duration", default=os.environ.get("TARGET_DURATION") or None)
+    ap.add_argument("--allow-duration-drift", action="store_true",
+                    help="cut mode: accept clip duration drift from --target-duration (primary override)")
     ap.add_argument("--allow-sparse-cut", action="store_true",
-                    help="cut mode: accept a sparse/heavily-dropped narration mapping instead of failing the cut preflight")
+                    help="compatibility: accept sparse cut mapping and legacy duration drift override")
     ap.add_argument("--skip-asr", action="store_true")
     ap.add_argument("--mimo-video-overview", action="store_true")
     ap.add_argument("--consolidate", action=argparse.BooleanOptionalAction, default=True,
@@ -946,7 +1282,13 @@ def main():
         crender = [str(video), "--work-dir", str(work_dir), "--no-narration-map"]
         if args.target_duration:
             crender += ["--target-duration", args.target_duration]
+        if getattr(args, "allow_duration_drift", False):
+            crender.append("--allow-duration-drift")
+        if getattr(args, "allow_sparse_cut", False):
+            crender.append("--allow-sparse-cut")
         _run("video-cut", "cut.py", *crender)
+        cut_qc = _surface_cut_qc(work_dir)
+        _write_shift_left_stage_qc(work_dir, "post_cut", metadata={"cut_qc": cut_qc})
         if not narration_json.exists():
             # PASS 2: rebuild the brief (now an OUTPUT-timeline variant) and pause for narration.
             _rebuild_output_brief()
@@ -967,12 +1309,20 @@ def main():
         narration_for_tts = narration_json
         assemble_video_path = edited_source
     review_ran = _run_narration_review(work_dir, args, timeline="cut_output" if cut else "source")
+    _write_shift_left_stage_qc(
+        work_dir,
+        "pre_tts",
+        metadata={"review_ran": review_ran, "timeline": "cut_output" if cut else "source"},
+    )
     vargs = ["--work-dir", str(work_dir), "--narration", str(narration_for_tts)]
     if args.mimo_tts_voice:
         vargs += ["--mimo-voice", args.mimo_tts_voice]
     if args.allow_partial_tts:
         vargs.append("--allow-partial-tts")
     _run("video-voiceover", "voiceover.py", *vargs)
+    _write_shift_left_stage_qc(work_dir, "post_tts", metadata=_tts_qc_metadata(work_dir))
+    overlays_path = _write_canonical_visual_overlays(work_dir, narration_for_tts)
+    _write_shift_left_stage_qc(work_dir, "pre_assemble", metadata={"visual_overlays": str(overlays_path)})
 
     aargs = [str(assemble_video_path), "--work-dir", str(work_dir), "--recap-stem", video.stem]
     if args.output_dir:
@@ -994,7 +1344,10 @@ def main():
 
     final_dir = Path(args.output_dir) if args.output_dir else work_dir.parent
     final_output = _read_assembly_output(work_dir) or (final_dir / ("recap_" + video.stem + ".mp4"))
+    _write_shift_left_stage_qc(work_dir, "post_render", metadata=_post_render_qc_metadata(work_dir, final_output))
+    final_qc_result = _write_final_qc_reports(work_dir, final_output)
     print(f"[video-recap] ✅ 完成: {final_output}")
+    _print_final_qc_pointer(final_qc_result)
     _print_narration_review_pointer(work_dir, review_ran=review_ran)
 
 

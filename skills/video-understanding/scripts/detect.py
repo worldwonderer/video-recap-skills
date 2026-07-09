@@ -163,6 +163,75 @@ def _filter_junk_scenes(scenes, video_path):
 
 # ── Step 3.5: 静音检测 ─────────────────────────────────────────────
 
+def annotate_quiet_windows_with_asr(periods, asr_result=None, *, video_duration=None, configured_segment_seconds=None):
+    """Pure helper: annotate quiet windows with ASR-overlap confidence and QC.
+
+    Coarse grid ASR (large synthetic windows from chunking) must not turn every quiet
+    window into speech. The return value is (annotated_periods, qc). Inputs are copied.
+    """
+    out = [dict(p) for p in (periods or []) if isinstance(p, dict)]
+    qc = {"coarse_asr_windows": 0, "low_confidence_speech_flags": 0, "asr_granularity": "none"}
+    for qp in out:
+        qp.setdefault("speech_overlap_ratio", 0.0)
+        qp.setdefault("asr_overlap_seconds", 0.0)
+        qp.setdefault("asr_granularity", "none")
+        qp.setdefault("has_speech", False)
+        qp.setdefault("has_speech_reason", "no_asr_overlap")
+    if not asr_result:
+        return out, qc
+
+    valid_segments = []
+    for seg in asr_result:
+        if not isinstance(seg, dict):
+            continue
+        try:
+            ss, se = float(seg.get("start", 0)), float(seg.get("end", 0))
+        except (TypeError, ValueError):
+            continue
+        if se > ss:
+            valid_segments.append((ss, se))
+    asr_coverage = sum(se - ss for ss, se in valid_segments)
+    avg_seg_dur = asr_coverage / len(valid_segments) if valid_segments else 0
+    if video_duration is None:
+        ends = [float(p.get("end", 0) or 0) for p in out] + [se for _, se in valid_segments]
+        video_duration = max(ends or [0.0])
+    configured = float(configured_segment_seconds if configured_segment_seconds is not None else (CONFIG.get("asr_segment_seconds", 30) or 30))
+    coarse_asr = (
+        (len(valid_segments) <= 5 and asr_coverage > float(video_duration) * 0.8) or
+        asr_coverage > float(video_duration) * 1.5 or
+        avg_seg_dur > max(45.0, configured * 1.5) or
+        (avg_seg_dur >= configured * 0.9 and asr_coverage > float(video_duration) * 0.7)
+    )
+    granularity = "coarse_grid" if coarse_asr else "segment"
+    qc["asr_granularity"] = granularity
+    qc["avg_asr_segment_seconds"] = round(avg_seg_dur, 3)
+    for qp in out:
+        overlap_seconds = 0.0
+        for ss, se in valid_segments:
+            overlap_seconds += max(0.0, min(float(qp["end"]), se) - max(float(qp["start"]), ss))
+        ratio = overlap_seconds / max(0.001, float(qp.get("duration", 0.0) or 0.0))
+        qp["asr_overlap_seconds"] = round(overlap_seconds, 3)
+        qp["speech_overlap_ratio"] = round(ratio, 4)
+        qp["asr_granularity"] = granularity
+        if coarse_asr:
+            qp["has_speech"] = False
+            qp["has_speech_reason"] = "coarse_asr_overlap_ignored" if overlap_seconds > 0 else "coarse_asr_no_overlap"
+            if overlap_seconds > 0:
+                qc["coarse_asr_windows"] += 1
+            continue
+        if ratio >= 0.3:
+            qp["has_speech"] = True
+            qp["has_speech_reason"] = "asr_overlap_high_confidence"
+        elif overlap_seconds > 0:
+            qp["has_speech"] = False
+            qp["has_speech_reason"] = "asr_overlap_low_confidence_quiet"
+            qc["low_confidence_speech_flags"] += 1
+        else:
+            qp["has_speech"] = False
+            qp["has_speech_reason"] = "no_asr_overlap"
+    return out, qc
+
+
 def detect_silence_periods(video_path, work_dir, asr_result=None):
     """用 ffmpeg silencedetect 检测安静时段，作为解说插入的候选窗口"""
     audio_path = work_dir / "audio.wav"
@@ -226,31 +295,16 @@ def detect_silence_periods(video_path, work_dir, asr_result=None):
     quiet_min = CONFIG["quiet_window_min"]
     periods = [p for p in merged if p["duration"] >= quiet_min]
 
-    # 与 ASR 交叉验证：标记有语音的窗口
-    # 跳过条件：ASR 段太粗（无法精确判断语音位置）
-    # 1. 段数少(<=5)且覆盖>80%视频时长 → 时间戳不可靠
-    # 2. 覆盖率>150% → 时间戳明显异常
-    # 3. 平均段长过大 → 粒度太粗，无法判断哪些窗口有语音
-    #    阈值 45s 给默认 ASR 窗口(asr_segment_seconds=30s)留出余量，使交叉验证重新生效；
-    #    粗粒度(如 180s 旧窗口)仍会被正确跳过。
-    if asr_result:
-        video_dur = get_video_duration(str(audio_path))
-        asr_coverage = sum(seg.get("end", 0) - seg.get("start", 0) for seg in asr_result)
-        avg_seg_dur = asr_coverage / len(asr_result) if asr_result else 0
-        skip_cross_check = (
-            (len(asr_result) <= 5 and asr_coverage > video_dur * 0.8) or
-            asr_coverage > video_dur * 1.5 or
-            avg_seg_dur > 45
-        )
-        if not skip_cross_check:
-            for qp in periods:
-                for seg in asr_result:
-                    seg_s = seg.get("start", 0)
-                    seg_e = seg.get("end", 0)
-                    overlap = min(qp["end"], seg_e) - max(qp["start"], seg_s)
-                    if overlap > qp["duration"] * 0.3:
-                        qp["has_speech"] = True
-                        break
+    # 与 ASR 交叉验证：标记有语音的窗口，并记录可观测 confidence/reason。
+    periods, qc = annotate_quiet_windows_with_asr(
+        periods,
+        asr_result,
+        video_duration=get_video_duration(str(audio_path)) if asr_result else None,
+        configured_segment_seconds=CONFIG.get("asr_segment_seconds", 30),
+    )
+
+    (work_dir / "silence_periods.qc.json").write_text(
+        json.dumps(qc, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # 保存
     (work_dir / "silence_periods.json").write_text(

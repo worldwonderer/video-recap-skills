@@ -181,7 +181,7 @@ def test_build_agent_brief_cut_pass2_is_output_timeline(monkeypatch, tmp_path):
     text = build_agent_brief(scenes, [], [], 600.0, tmp_path).read_text(encoding="utf-8")
     assert "step 2 of 2: write `narration.json` in OUTPUT time" in text
     assert "Kept clips on the OUTPUT timeline" in text
-    assert "output 0.0–10.0s ← source 10.0–20.0s" in text
+    assert "OUTPUT 0.0–10.0s ← SOURCE[0] 10.0–20.0s" in text
     assert "step 1 of 2" not in text
 
 

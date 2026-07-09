@@ -9,6 +9,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "skills" / "video-v
 import dub  # noqa: E402
 
 
+def test_strip_reasoning_residue_removes_think_leakage():
+    """Regression: MiMo -asr models are not thinking-disabled, so <think> reasoning can leak
+    into the transcript in several shapes. All must be stripped; clean text is untouched."""
+    s = dub._strip_reasoning_residue
+    assert s("think>\n 真相比逃跑更狼。").strip() == "真相比逃跑更狼。"   # leading orphan residue
+    assert s("think>\n Yeah.").strip() == "Yeah."
+    assert s("<think>推理\n</think>\n开门的却是个陌生男人").strip() == "开门的却是个陌生男人"  # full block
+    assert s("<think>未闭合的推理 后续文字").strip() == ""              # unclosed/truncated
+    assert s("正常一句，没有思考标签。") == "正常一句，没有思考标签。"      # clean text untouched
+
+
 def test_atempo_chain():
     assert dub._atempo_chain(1.3) == "atempo=1.3000"
     assert dub._atempo_chain(3.0).startswith("atempo=2.0,atempo=")  # >2x is chained
@@ -191,3 +202,20 @@ def test_dub_print_schema_includes_new_artifacts(capsys):
     assert "dub_lint.json" in schemas
     assert "dub_review.json" in schemas
     assert "dub_manifest.json" in schemas
+
+
+def test_p0_dub_chars_per_second_ignores_punctuation_for_density():
+    assert dub._chars_per_second("你，好！……", 1.0) == pytest.approx(2.0)
+    assert dub._chars_per_second("Hello, world!", 2.0) == pytest.approx(5.0)
+
+
+def test_p0_dub_lint_warns_near_trim_risk_before_hard_cut():
+    script = [{"start": 0.0, "end": 2.0, "zh": "这是一句中文台词需要稍微压缩"}]  # 14 effective chars / 2s = 7 cps
+    lint = dub.lint_dub_script(script, duration=3.0)
+
+    assert lint["verdict"] == "PASS"
+    codes = {issue["code"] for issue in lint["issues"]}
+    assert "fast_speech" in codes
+    assert "trim_risk" in codes
+    assert lint["summary"]["trim_risk_lines"] == [0]
+    assert lint["summary"]["max_chars_per_second"] == pytest.approx(7.0)

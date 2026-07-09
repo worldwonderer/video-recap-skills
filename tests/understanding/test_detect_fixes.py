@@ -214,3 +214,56 @@ def test_detect_silence_reextracts_audio_when_source_video_changes(monkeypatch, 
 
     assert (tmp_path / "audio.wav").read_bytes() == b"new-audio"
     assert any(any(part.endswith("audio.wav.tmp") for part in cmd) for cmd in calls)
+
+
+def test_detect_silence_records_overlap_and_ignores_coarse_grid_asr(monkeypatch, tmp_path):
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"video")
+    calls = []
+    def fake_run(cmd, **kw):
+        calls.append([str(c) for c in cmd])
+        if any(str(c).endswith("audio.wav.tmp") for c in cmd):
+            (tmp_path / "audio.wav.tmp").write_bytes(b"RIFF")
+            return _ok()
+        return _ok(stderr="silence_start: 5\nsilence_end: 8\nsilence_start: 20\nsilence_end: 24\n")
+    monkeypatch.setattr("detect.run_cmd", fake_run)
+    monkeypatch.setattr("detect.get_video_duration", lambda path: 60.0)
+    monkeypatch.setattr("detect.log", lambda msg: None)
+    asr = [{"start": 0, "end": 30, "text": "a"}, {"start": 30, "end": 60, "text": "b"}]
+    out = detect_silence_periods(video, tmp_path, asr_result=asr)
+    assert out and all(p["has_speech"] is False for p in out)
+    assert all(p["asr_granularity"] == "coarse_grid" for p in out)
+    assert all("speech_overlap_ratio" in p and "has_speech_reason" in p for p in out)
+    qc = __import__('json').loads((tmp_path / "silence_periods.qc.json").read_text(encoding="utf-8"))
+    assert qc["coarse_asr_windows"] == len(out)
+
+
+def test_detect_silence_marks_true_short_asr_overlap(monkeypatch, tmp_path):
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"video")
+    def fake_run(cmd, **kw):
+        if any(str(c).endswith("audio.wav.tmp") for c in cmd):
+            (tmp_path / "audio.wav.tmp").write_bytes(b"RIFF")
+            return _ok()
+        return _ok(stderr="silence_start: 5\nsilence_end: 9\n")
+    monkeypatch.setattr("detect.run_cmd", fake_run)
+    monkeypatch.setattr("detect.get_video_duration", lambda path: 30.0)
+    monkeypatch.setattr("detect.log", lambda msg: None)
+    out = detect_silence_periods(video, tmp_path, asr_result=[{"start": 5.2, "end": 8.8, "text": "real"}])
+    assert out[0]["has_speech"] is True
+    assert out[0]["has_speech_reason"] == "asr_overlap_high_confidence"
+    assert out[0]["speech_overlap_ratio"] >= 0.8
+
+
+def test_annotate_quiet_windows_with_asr_is_pure_helper():
+    periods = [{"start": 5.0, "end": 9.0, "duration": 4.0, "has_speech": False}]
+    annotated, qc = detect.annotate_quiet_windows_with_asr(
+        periods,
+        [{"start": 5.5, "end": 8.5, "text": "real"}],
+        video_duration=30.0,
+        configured_segment_seconds=30,
+    )
+    assert periods[0]["has_speech"] is False
+    assert annotated[0]["has_speech"] is True
+    assert annotated[0]["has_speech_reason"] == "asr_overlap_high_confidence"
+    assert qc["asr_granularity"] == "segment"

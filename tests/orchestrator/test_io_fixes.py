@@ -20,6 +20,8 @@ def _manifest_args(**overrides):
         "consolidate": False,
         "consolidate_asr": False,
         "review_narration": None,
+        "allow_duration_drift": False,
+        "allow_sparse_cut": False,
     }
     defaults.update(overrides)
     return Namespace(**defaults)
@@ -250,6 +252,48 @@ def test_recap_cut_mode_voiceover_uses_output_time_narration(monkeypatch, tmp_pa
 
 
 
+
+def test_recap_strict_cut_output_review_forwards_strict_evidence(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "narration.json").write_text(
+        json.dumps([{"start": 2, "end": 5, "narration": "output。"}]),
+        encoding="utf-8",
+    )
+    (work / "clip_plan.json").write_text(json.dumps([{"start": 10, "end": 12}]), encoding="utf-8")
+    recap._write_run_manifest(work, video.resolve(), _manifest_args(edit_mode="cut"))
+    recap._write_phase_ledger(work, clip_plan_fingerprint=recap._file_md5(work / "clip_plan.json"),
+                              edited_source_rendered=True)
+    calls = []
+
+    def fake_run(skill, script, *cli_args):
+        calls.append((skill, script, [str(arg) for arg in cli_args]))
+        if script == "cut.py":
+            (work / "edited_source.mp4").write_bytes(b"edited")
+        if script == "review.py":
+            (work / "narration_review.json").write_text(json.dumps({"verdict": "PASS", "findings": []}), encoding="utf-8")
+        if script == "assemble.py":
+            (work / "output.mp4").write_bytes(b"mp4")
+            (work / "assembly_manifest.json").write_text(
+                json.dumps({"final_output": str(tmp_path / "recap_video.mp4")}),
+                encoding="utf-8",
+            )
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr("recap._read_video_duration_or_raise", lambda path: 10.0)
+    monkeypatch.setattr(sys, "argv", [
+        "recap.py", str(video), "--work-dir", str(work), "--edit-mode", "cut",
+        "--require-narration-review",
+    ])
+
+    recap.main()
+
+    review_args = next(c for c in calls if c[:2] == ("video-script", "review.py"))[2]
+    assert review_args[review_args.index("--timeline") + 1] == "cut_output"
+    assert "--strict-evidence" in review_args
+
 def test_recap_manifest_fingerprint_detects_middle_only_source_changes(tmp_path):
     first = tmp_path / "a.mp4"
     second = tmp_path / "b.mp4"
@@ -372,11 +416,13 @@ def test_recap_continuation_preserves_phase_b_flags(tmp_path):
     args.jianying_no_bundle_media = False
     args.allow_partial_tts = True
     args.review_narration = False
+    args.allow_duration_drift = True
 
     cmd = recap._continuation_command(video, work, args)
 
     assert "--mimo-tts-voice" in cmd and "冰糖" in cmd
     assert "--allow-partial-tts" in cmd
+    assert "--allow-duration-drift" in cmd
     assert "--burn-subtitles" in cmd
     assert "--output-dir" in cmd and "out dir" in cmd
     assert "--export-jianying" in cmd
@@ -928,6 +974,80 @@ def test_recap_multi_video_phase_a_writes_manifest_and_pauses(monkeypatch, tmp_p
     assert "--material-library-dir" in out and "--save-materials" in out
 
 
+def test_recap_single_cut_forwards_allow_duration_drift_and_records_source(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "clip_plan.json").write_text(json.dumps([{"start": 0, "end": 1}]), encoding="utf-8")
+    recap._write_run_manifest(work, video.resolve(), _manifest_args(edit_mode="cut", target_duration="10m"))
+    calls = []
+
+    def fake_run(skill, script, *cli_args):
+        cli = [str(a) for a in cli_args]
+        calls.append((skill, script, cli))
+        if script == "cut.py":
+            assert "--allow-duration-drift" in cli
+            assert "--allow-sparse-cut" not in cli
+            (work / "edited_source.mp4").write_bytes(b"edited")
+            (work / "clip_plan_validated.json").write_text(json.dumps({
+                "clips": [],
+            }), encoding="utf-8")
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr(sys, "argv", [
+        "recap.py", str(video), "--work-dir", str(work), "--edit-mode", "cut",
+        "--target-duration", "10m", "--allow-duration-drift",
+    ])
+
+    recap.main()
+
+    cut_args = next(c for c in calls if c[:2] == ("video-cut", "cut.py"))[2]
+    assert "--allow-duration-drift" in cut_args
+
+
+def test_recap_multi_cut_forwards_allow_sparse_cut_compat_and_records_source(monkeypatch, tmp_path):
+    v1 = tmp_path / "a.mp4"
+    v2 = tmp_path / "b.mp4"
+    v1.write_bytes(b"a source")
+    v2.write_bytes(b"b source")
+    work = tmp_path / "project"
+    work.mkdir()
+    args = _manifest_args(edit_mode="cut", target_duration="10m")
+    records = recap._build_multi_source_records([v1.resolve(), v2.resolve()], work, args)
+    recap._write_multi_source_manifest(work, records)
+    recap._write_project_run_manifest(work, [v1.resolve(), v2.resolve()], args, records)
+    (work / "clip_plan.json").write_text(json.dumps({
+        "clips": [{"source_id": records[0]["source_id"], "start": 0, "end": 1}]
+    }), encoding="utf-8")
+    calls = []
+
+    def fake_run(skill, script, *cli_args):
+        cli = [str(a) for a in cli_args]
+        calls.append((skill, script, cli))
+        if script == "cut.py":
+            assert "--allow-sparse-cut" in cli
+            assert "--allow-duration-drift" not in cli
+            (work / "edited_source.mp4").write_bytes(b"edited")
+            (work / "clip_plan_validated.json").write_text(json.dumps({
+                "clips": [{"source_id": records[0]["source_id"], "source_path": str(v1.resolve()),
+                           "source_start": 0, "source_end": 1, "output_start": 0, "output_end": 1,
+                           "duration": 1}],
+            }), encoding="utf-8")
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr(sys, "argv", [
+        "recap.py", str(v1), str(v2), "--work-dir", str(work), "--edit-mode", "cut",
+        "--target-duration", "10m", "--allow-sparse-cut",
+    ])
+
+    recap.main()
+
+    cut_args = next(c for c in calls if c[:2] == ("video-cut", "cut.py"))[2]
+    assert "--sources-manifest" in cut_args
+    assert "--allow-sparse-cut" in cut_args
+
+
 def test_recap_multi_video_phase_b_invokes_cut_with_sources_manifest(monkeypatch, tmp_path):
     v1 = tmp_path / "a.mp4"
     v2 = tmp_path / "b.mp4"
@@ -1094,3 +1214,173 @@ def test_recap_single_video_cut_pass2_rebuilds_output_brief_with_materials_enabl
     assert len(understand_calls) == 1
     assert "--brief-only" in understand_calls[0][2]
     assert (work / "agent_narration_brief.md").read_text(encoding="utf-8") == "OUTPUT-TIME BRIEF"
+
+
+def test_multi_source_briefs_include_clip_and_narration_craft(tmp_path):
+    work = tmp_path / "project"
+    work.mkdir()
+    src = work / "sources" / "src_a"
+    src.mkdir(parents=True)
+    (src / "agent_narration_brief.md").write_text("# per-source context\n", encoding="utf-8")
+    records = [{
+        "source_id": "src_a",
+        "source_name": "a.mp4",
+        "source_path": str(tmp_path / "a.mp4"),
+        "source_video_fingerprint": "a" * 64,
+        "source_work_dir": "sources/src_a",
+        "material_id": "mat-a",
+    }]
+    args = _manifest_args(edit_mode="cut", target_duration="1m")
+
+    recap._write_multi_source_clip_brief(work, records, args)
+    clip_text = (work / "agent_narration_brief.md").read_text(encoding="utf-8")
+    assert "cold-open/high-impact" in clip_text
+    assert "story spine" in clip_text
+    assert "cold_open" in clip_text and "setup" in clip_text and "turn" in clip_text and "payoff" in clip_text
+    assert "source work_dir" in clip_text and "sources/<source_id>" in clip_text
+
+    plan = work / "clip_plan_validated.json"
+    plan.write_text(json.dumps({"clips": [{
+        "source_id": "src_a", "source_path": str(tmp_path / "a.mp4"),
+        "source_start": 1, "source_end": 3, "output_start": 0, "output_end": 2,
+        "reason": "cold_open: reveal",
+    }]}), encoding="utf-8")
+    recap._write_multi_source_output_brief(work, records, plan)
+    out_text = (work / "agent_narration_brief.md").read_text(encoding="utf-8")
+    assert "OUTPUT timeline" in out_text
+    assert "BLOCKS" in out_text and "story spine" in out_text
+    assert "original-audio gaps" in out_text
+    assert "source work_dir" in out_text
+
+
+def test_cut_qc_summary_surfaces_and_blocks_failures(tmp_path, capsys):
+    (tmp_path / "clip_plan_validated.json").write_text(json.dumps({
+        "qc": {
+            "status": "warning",
+            "target_duration_status": "under",
+            "total_duration": 42.0,
+            "clip_count": 3,
+            "output_geometry": {"width": 1920, "height": 1080, "fps": 30, "reason": "used_sources"},
+            "warnings": ["short"],
+        }
+    }), encoding="utf-8")
+    qc = recap._surface_cut_qc(tmp_path)
+    assert qc["target_duration_status"] == "under"
+    out = capsys.readouterr().out
+    assert "cut QC" in out and "target_duration_status=under" in out and "1920x1080" in out
+
+    (tmp_path / "clip_plan_validated.json").write_text(json.dumps({
+        "qc": {"target_duration_status": "blocking", "blocking": ["duration"]}
+    }), encoding="utf-8")
+    with pytest.raises(SystemExit, match="QC blocking/fail"):
+        recap._surface_cut_qc(tmp_path)
+
+
+def test_print_narration_review_pointer_surfaces_grounding_qc(capsys, tmp_path):
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-recap' / 'scripts'))
+    import recap
+    (tmp_path / "grounding_qc.json").write_text(json.dumps({
+        "verdict": "warn",
+        "review_coverage": {"time_ranges": [{"start": 0, "end": 1}]},
+        "warnings": ["stale mapping"],
+    }, ensure_ascii=False), encoding="utf-8")
+    recap._print_narration_review_pointer(tmp_path, review_ran=False)
+    out = capsys.readouterr().out
+    assert "Grounding QC" in out and "warn" in out and "warnings 1" in out
+
+
+def test_recap_rewrites_existing_visual_overlays_empty_when_narration_has_no_supported_overlays(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    existing = work / "visual_overlays.json"
+    existing.write_text(json.dumps({
+        "schema_version": 1,
+        "overlays": [{"type": "top_title", "text": "stale", "start": 0.0, "end": 1.0}],
+    }, ensure_ascii=False), encoding="utf-8")
+    narration = work / "narration.json"
+    narration.write_text(json.dumps([{
+        "start": 0.0,
+        "end": 2.0,
+        "narration": "没有受支持的贴片。",
+        "visual_overlays": [
+            {"type": "platform_card", "text": "unsupported", "start": 0.0, "end": 1.0}
+        ],
+    }]), encoding="utf-8")
+
+    assert recap._write_canonical_visual_overlays(work, narration) == existing
+
+    assert json.loads(existing.read_text(encoding="utf-8")) == {"schema_version": 1, "overlays": []}
+
+
+def test_recap_rerun_overwrites_prior_visual_overlays_to_empty_for_current_narration(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    overlays_path = work / "visual_overlays.json"
+    first_narration = work / "narration.first.json"
+    first_narration.write_text(json.dumps([{
+        "start": 0.0,
+        "end": 2.0,
+        "narration": "开场标题。",
+        "visual_overlays": [
+            {"type": "top_title", "text": "上一版标题", "start": 0.0, "end": 2.0}
+        ],
+    }]), encoding="utf-8")
+    second_narration = work / "narration.json"
+    second_narration.write_text(json.dumps([{
+        "start": 0.0,
+        "end": 2.0,
+        "narration": "这一版没有支持的贴片。",
+    }]), encoding="utf-8")
+
+    assert recap._write_canonical_visual_overlays(work, first_narration) == overlays_path
+    assert json.loads(overlays_path.read_text(encoding="utf-8"))["overlays"]
+
+    assert recap._write_canonical_visual_overlays(work, second_narration) == overlays_path
+
+    assert json.loads(overlays_path.read_text(encoding="utf-8")) == {"schema_version": 1, "overlays": []}
+
+
+def test_recap_writes_canonical_visual_overlays_before_assemble(monkeypatch, tmp_path):
+    """Recap/packaging owns the canonical visual_overlays.json input; assemble should not
+    infer overlays from ad-hoc platform artifacts."""
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "narration.json").write_text(json.dumps([{
+        "start": 0.0,
+        "end": 2.0,
+        "narration": "开场标题。",
+        "visual_overlays": [
+            {"type": "top_title", "text": "今日回顾", "start": 0.0, "end": 2.0},
+            {"type": "inline_label_or_callout", "text": "关键人物", "start": 1.0, "end": 2.0, "anchor": "center"},
+        ],
+    }]), encoding="utf-8")
+    recap._write_run_manifest(work, video.resolve(), _manifest_args())
+
+    calls = []
+
+    def fake_run(skill, script, *cli_args):
+        calls.append((skill, script, [str(arg) for arg in cli_args]))
+        if script == "assemble.py":
+            overlays_path = work / "visual_overlays.json"
+            assert overlays_path.exists(), "visual_overlays.json must exist before assemble runs"
+            payload = json.loads(overlays_path.read_text(encoding="utf-8"))
+            assert payload["schema_version"] == 1
+            overlays = payload["overlays"]
+            assert [item["type"] for item in overlays] == ["top_title", "inline_label_or_callout"]
+            (work / "output.mp4").write_bytes(b"mp4")
+            (work / "assembly_manifest.json").write_text(
+                json.dumps({"final_output": str(tmp_path / "recap_video.mp4")}),
+                encoding="utf-8",
+            )
+
+    monkeypatch.setattr("recap._run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--work-dir", str(work)])
+
+    recap.main()
+
+    assemble_call = next(call for call in calls if call[:2] == ("video-assemble", "assemble.py"))
+    assert "--visual-overlays" not in assemble_call[2]  # assemble reads work_dir/visual_overlays.json by contract

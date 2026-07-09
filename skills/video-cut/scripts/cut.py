@@ -9,6 +9,10 @@ from pathlib import Path
 from lib import CONFIG, get_video_duration, log, run_cmd
 
 
+EDITED_SOURCE_RENDER_ALGORITHM_VERSION = "edited-source-render-v3"
+GEOMETRY_RENDER_ALGORITHM_VERSION = "geometry-weighted-orientation-area-fps-v2"
+
+
 def parse_duration_seconds(value):
     """Parse seconds, 10m/1h forms, or HH:MM:SS into seconds."""
     if value is None or value == "":
@@ -96,6 +100,8 @@ def cut_plan_fingerprint(validated_plan):
         payload = dict(validated_plan)
         # Provenance for raw-plan freshness is not part of the edited media bytes.
         payload.pop("raw_plan_fingerprint", None)
+        # QC is observability derived from the media plan, not an input range decision.
+        payload.pop("qc", None)
     else:
         payload = validated_plan
     return value_fingerprint(payload)
@@ -139,6 +145,23 @@ def _source_fingerprints_for_plan(validated_plan, input_video=None):
     return fingerprints
 
 
+def edited_source_render_cache_payload():
+    """Render-affecting settings that invalidate edited_source.mp4 cache reuse.
+
+    Keep this payload limited to inputs/algorithms that can change rendered media bytes.
+    Observational QC produced after validation/render is intentionally excluded.
+    """
+    return {
+        "render_algorithm_version": EDITED_SOURCE_RENDER_ALGORITHM_VERSION,
+        "geometry_render_algorithm_version": GEOMETRY_RENDER_ALGORITHM_VERSION,
+        "clip_join_audio_fade_ms": round(max(0.0, float(CONFIG.get("clip_join_audio_fade_ms", 30.0) or 0.0)), 3),
+    }
+
+
+def edited_source_render_fingerprint():
+    return value_fingerprint(edited_source_render_cache_payload())
+
+
 def _write_edited_source_meta(output_path, validated_plan, input_video=None):
     meta_path = _edited_source_meta_path(output_path)
     source_fingerprints = _source_fingerprints_for_plan(validated_plan, input_video)
@@ -154,11 +177,16 @@ def _write_edited_source_meta(output_path, validated_plan, input_video=None):
     meta = {
         "schema_version": 2,
         "clip_plan_fingerprint": cut_plan_fingerprint(validated_plan),
+        "render_fingerprint": edited_source_render_fingerprint(),
+        "render_cache": edited_source_render_cache_payload(),
         "source_fingerprints": source_fingerprints,
         "edited_source_fingerprint": file_fingerprint(output_path),
         "total_duration": validated_plan.get("total_duration"),
         "clip_count": len(validated_plan.get("clips", [])),
     }
+    delivery_qc = (validated_plan.get("qc") or {}).get("delivery_qc")
+    if delivery_qc:
+        meta["delivery_qc"] = delivery_qc
     # Preserve the legacy key for existing single-source callers/tests/metadata readers.
     if legacy_source_fp is not None:
         meta["source_video_fingerprint"] = legacy_source_fp
@@ -172,6 +200,8 @@ def should_reuse_edited_source(output_path, validated_plan, input_video=None):
         return False
     meta = _load_edited_source_meta(output_path)
     if not meta or meta.get("clip_plan_fingerprint") != cut_plan_fingerprint(validated_plan):
+        return False
+    if meta.get("render_fingerprint") != edited_source_render_fingerprint():
         return False
     expected_sources = _source_fingerprints_for_plan(validated_plan, input_video)
     meta_sources = meta.get("source_fingerprints")
@@ -409,6 +439,151 @@ def normalize_clip_plan(raw_plan, video_duration, target_duration=None, clip_pad
     return plan
 
 
+def _valid_silence_windows(silence_periods):
+    """Return sorted well-formed quiet windows as {start,end} floats."""
+    windows = []
+    for w in silence_periods or []:
+        if not isinstance(w, dict):
+            continue
+        try:
+            start = float(w.get("start"))
+            end = float(w.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if end >= start:
+            windows.append({"start": start, "end": end})
+    return sorted(windows, key=lambda w: (w["start"], w["end"]))
+
+
+def _recompute_clip_timeline(clips):
+    cursor = 0.0
+    for clip in clips:
+        duration = round(float(clip["source_end"]) - float(clip["source_start"]), 3)
+        clip["duration"] = duration
+        clip["output_start"] = round(cursor, 3)
+        clip["output_end"] = round(cursor + duration, 3)
+        cursor += duration
+    return round(cursor, 3)
+
+
+def _candidate_overlaps(clips, idx, new_start, new_end):
+    for j, other in enumerate(clips):
+        if j == idx:
+            continue
+        if new_start < float(other["source_end"]) and new_end > float(other["source_start"]):
+            return True
+    return False
+
+
+def snap_clip_starts_to_lines(plan, silence_periods, video_duration, max_prepend,
+                              max_trim=0.35, min_clip_duration=0.3):
+    """Snap clip starts to natural quiet boundaries, preferring safe prepend over trim.
+
+    Policy:
+    - start already inside a quiet window: keep.
+    - speech start: prepend to nearest prior quiet window end if within max_prepend.
+    - no usable prior quiet: keep and warn, except an extremely near next quiet start
+      (<= max_trim) may trim forward if duration/overlap safety holds.
+    - never overlap/collapse when allow_overlap is false; unsafe attempts keep-and-warn.
+    """
+    silence_periods = _valid_silence_windows(silence_periods)
+    if not silence_periods:
+        return plan
+
+    clips = [dict(c) for c in plan["clips"]]
+    video_duration = max(0.0, float(video_duration or 0.0))
+    max_prepend = max(0.0, float(max_prepend or 0.0))
+    max_trim = max(0.0, float(max_trim or 0.0))
+    min_duration = max(0.05, float(min_clip_duration or 0.05))
+    allow_overlap = bool(plan.get("allow_overlap", False))
+    events = []
+
+    for i, clip in enumerate(clips):
+        original_start = float(clip["source_start"])
+        source_end = float(clip["source_end"])
+        event = {
+            "clip_id": clip.get("clip_id", i),
+            "source_id": clip.get("source_id"),
+            "original_start": round(original_start, 3),
+            "action": "kept",
+        }
+
+        if any(w["start"] <= original_start <= w["end"] for w in silence_periods):
+            event["reason"] = "already_quiet"
+            events.append(event)
+            continue
+
+        prior_ends = [w["end"] for w in silence_periods if w["end"] <= original_start]
+        if prior_ends:
+            candidate_start = max(prior_ends)
+            if original_start - candidate_start <= max_prepend:
+                candidate_start = round(max(0.0, candidate_start), 3)
+                safe = candidate_start < source_end - min_duration + 1e-9
+                if safe and not allow_overlap:
+                    safe = not _candidate_overlaps(clips, i, candidate_start, source_end)
+                if safe:
+                    clip["source_start"] = candidate_start
+                    event.update({
+                        "action": "prepended",
+                        "new_start": candidate_start,
+                        "delta": round(original_start - candidate_start, 3),
+                    })
+                    events.append(event)
+                    continue
+                reason = "overlap_or_collapse"
+            else:
+                reason = "prior_quiet_too_far"
+        else:
+            reason = "no_prior_quiet"
+
+        next_starts = [w["start"] for w in silence_periods if w["start"] >= original_start]
+        if next_starts:
+            candidate_start = min(next_starts)
+            trim_delta = candidate_start - original_start
+            if 0 < trim_delta <= max_trim:
+                candidate_start = round(min(video_duration, candidate_start), 3)
+                safe = source_end - candidate_start >= min_duration
+                if safe and not allow_overlap:
+                    safe = not _candidate_overlaps(clips, i, candidate_start, source_end)
+                if safe:
+                    clip["source_start"] = candidate_start
+                    event.update({
+                        "action": "trimmed",
+                        "new_start": candidate_start,
+                        "delta": round(trim_delta, 3),
+                        "fallback_from": reason,
+                    })
+                    events.append(event)
+                    continue
+                reason = "unsafe_forward_trim"
+
+        event["start_unsnapped_reason"] = reason
+        event["warning_code"] = "clip_start_unsnapped"
+        events.append(event)
+
+    total_duration = _recompute_clip_timeline(clips)
+    result = dict(plan)
+    result["clips"] = clips
+    result["total_duration"] = total_duration
+    qc = dict(result.get("qc") or {})
+    boundary = dict(qc.get("boundary_status") or {})
+    boundary["start_snaps"] = events
+    qc["boundary_status"] = boundary
+    warnings = list(qc.get("warnings") or [])
+    for event in events:
+        if event.get("warning_code"):
+            warnings.append({
+                "code": event["warning_code"],
+                "clip_id": event["clip_id"],
+                "source_id": event.get("source_id"),
+                "start_unsnapped_reason": event.get("start_unsnapped_reason"),
+            })
+    if warnings:
+        qc["warnings"] = warnings
+    result["qc"] = qc
+    return result
+
+
 def snap_clip_ends_to_lines(plan, silence_periods, video_duration, max_extend):
     """Extend each clip's source_end forward to the next natural pause, preventing mid-sentence cuts.
 
@@ -421,11 +596,7 @@ def snap_clip_ends_to_lines(plan, silence_periods, video_duration, max_extend):
     """
     # silence_periods is loaded from disk; tolerate a stale/hand-edited row by keeping only
     # well-formed quiet windows so a single bad entry can't KeyError-abort the whole cut.
-    silence_periods = [
-        w for w in (silence_periods or [])
-        if isinstance(w, dict) and isinstance(w.get("start"), (int, float))
-        and isinstance(w.get("end"), (int, float))
-    ]
+    silence_periods = _valid_silence_windows(silence_periods)
     if not silence_periods:
         return plan
 
@@ -433,25 +604,40 @@ def snap_clip_ends_to_lines(plan, silence_periods, video_duration, max_extend):
     video_duration = float(video_duration)
     max_extend = float(max_extend)
     allow_overlap = bool(plan.get("allow_overlap", False))
+    events = []
 
     for i, clip in enumerate(clips):
         source_end = clip["source_end"]
+        event = {
+            "clip_id": clip.get("clip_id", i),
+            "source_id": clip.get("source_id"),
+            "original_end": round(float(source_end), 3),
+            "action": "kept",
+        }
 
         # Already inside a quiet window → already at a natural pause.
         if any(w["start"] <= source_end <= w["end"] for w in silence_periods):
+            event["reason"] = "already_quiet"
+            events.append(event)
             continue
 
         # Find the next quiet window start at or after source_end.
         candidates = [w["start"] for w in silence_periods if w["start"] >= source_end]
         if not candidates:
+            event["end_unsnapped_reason"] = "no_next_quiet"
+            events.append(event)
             continue
         next_quiet_start = min(candidates)
 
         # Only snap if the next pause is within reach (≤ max_extend away).
         if next_quiet_start > source_end + max_extend:
+            event["end_unsnapped_reason"] = "next_quiet_too_far"
+            events.append(event)
             continue
         candidate_end = min(next_quiet_start, video_duration)
         if candidate_end <= source_end:
+            event["end_unsnapped_reason"] = "non_forward_candidate"
+            events.append(event)
             continue
 
         # When overlaps are forbidden, cap against every other clip's source range.
@@ -464,22 +650,29 @@ def snap_clip_ends_to_lines(plan, silence_periods, video_duration, max_extend):
                 nearest_other_start = min(other_starts)
                 candidate_end = min(candidate_end, nearest_other_start)
             if candidate_end <= source_end:
+                event["end_unsnapped_reason"] = "overlap_or_collapse"
+                events.append(event)
                 continue
 
         clip["source_end"] = round(candidate_end, 3)
+        event.update({
+            "action": "extended",
+            "new_end": clip["source_end"],
+            "delta": round(float(clip["source_end"]) - float(source_end), 3),
+        })
+        events.append(event)
 
     # Recompute output timeline cursor-based (same cursor logic as normalize_clip_plan).
-    cursor = 0.0
-    for clip in clips:
-        duration = round(clip["source_end"] - clip["source_start"], 3)
-        clip["duration"] = duration
-        clip["output_start"] = round(cursor, 3)
-        clip["output_end"] = round(cursor + duration, 3)
-        cursor += duration
+    total_duration = _recompute_clip_timeline(clips)
 
     result = dict(plan)
     result["clips"] = clips
-    result["total_duration"] = round(sum(c["duration"] for c in clips), 3)
+    result["total_duration"] = total_duration
+    qc = dict(result.get("qc") or {})
+    boundary = dict(qc.get("boundary_status") or {})
+    boundary["end_snaps"] = events
+    qc["boundary_status"] = boundary
+    result["qc"] = qc
     return result
 
 
@@ -529,10 +722,19 @@ def snap_clips_off_shot_changes(plan, video, video_duration, margin, threshold, 
         return plan
     clips = [dict(c) for c in plan["clips"]]
     n_start = n_end = 0
-    for clip in clips:
+    events = []
+    for i, clip in enumerate(clips):
         s = float(clip["source_start"])
         e = float(clip["source_end"])
         new_s, new_e = s, e
+        event = {
+            "clip_id": clip.get("clip_id", i),
+            "source_id": clip.get("source_id"),
+            "original_start": round(s, 3),
+            "original_end": round(e, 3),
+            "start_action": "kept",
+            "end_action": "kept",
+        }
         # Opening: a shot-change just AFTER source_start leaves an old-shot sliver before it.
         start_changes = [c for c in _detect_shot_changes(video, s, min(e, s + margin), threshold)
                          if c > s + 1e-3]
@@ -540,6 +742,10 @@ def snap_clips_off_shot_changes(plan, video, video_duration, margin, threshold, 
             cand = max(start_changes)          # open after the last rapid cut in the window
             if cand < e - min_keep:
                 new_s = round(cand, 3)
+                event["start_action"] = "moved_forward"
+                event["new_start"] = new_s
+            else:
+                event["start_unsnapped_reason"] = "collapse"
         # Closing: a shot-change just BEFORE source_end leaves a next-shot sliver after it.
         end_changes = [c for c in _detect_shot_changes(video, max(new_s, e - margin), e, threshold)
                        if c < e - 1e-3]
@@ -547,25 +753,29 @@ def snap_clips_off_shot_changes(plan, video, video_duration, margin, threshold, 
             cand = min(end_changes)            # close before the first rapid cut in the window
             if cand > new_s + min_keep:
                 new_e = round(cand, 3)
+                event["end_action"] = "moved_back"
+                event["new_end"] = new_e
+            else:
+                event["end_unsnapped_reason"] = "collapse"
         n_start += new_s != s
         n_end += new_e != e
         clip["source_start"] = new_s
         clip["source_end"] = new_e
+        events.append(event)
 
     # Recompute output timeline cursor-based (same cursor logic as snap_clip_ends_to_lines).
-    cursor = 0.0
-    for clip in clips:
-        duration = round(clip["source_end"] - clip["source_start"], 3)
-        clip["duration"] = duration
-        clip["output_start"] = round(cursor, 3)
-        clip["output_end"] = round(cursor + duration, 3)
-        cursor += duration
+    total_duration = _recompute_clip_timeline(clips)
 
     if n_start or n_end:
         log(f"避让原片切镜头: {n_start} 个起点前移、{n_end} 个终点回收 (margin={margin}s, 阈值={threshold})")
     result = dict(plan)
     result["clips"] = clips
-    result["total_duration"] = round(sum(c["duration"] for c in clips), 3)
+    result["total_duration"] = total_duration
+    qc = dict(result.get("qc") or {})
+    boundary = dict(qc.get("boundary_status") or {})
+    boundary["shot_snaps"] = events
+    qc["boundary_status"] = boundary
+    result["qc"] = qc
     return result
 
 
@@ -586,7 +796,8 @@ def _load_silence_for_source(work_dir, source_id, source_work_dir=None):
 
 
 def snap_multi_source_clips(plan, sources, work_dir, *, line_max_extend, scene_margin,
-                            scene_threshold, do_line_snap=True, do_scene_snap=True):
+                            scene_threshold, do_line_snap=True, do_scene_snap=True,
+                            start_max_prepend=None, start_max_trim=None):
     """Per-source line/shot snapping for a multi-source validated plan.
 
     Each clip is snapped using ITS OWN source's silence windows / shot changes and duration
@@ -601,6 +812,7 @@ def snap_multi_source_clips(plan, sources, work_dir, *, line_max_extend, scene_m
     groups = {}
     for clip in clips:
         groups.setdefault(str(clip.get("source_id")), []).append(clip)
+    boundary_accum = {"start_snaps": [], "end_snaps": [], "shot_snaps": []}
     for sid, group in groups.items():
         source = sources.get(sid, {}) if isinstance(sources, dict) else {}
         duration = float(source.get("duration") or 0.0) or max(
@@ -608,22 +820,40 @@ def snap_multi_source_clips(plan, sources, work_dir, *, line_max_extend, scene_m
         mini = {"clips": [dict(c) for c in group], "allow_overlap": allow_overlap}
         if do_line_snap:
             silence = _load_silence_for_source(work_dir, sid, source.get("source_work_dir"))
+            if start_max_prepend is not None:
+                mini = snap_clip_starts_to_lines(
+                    mini, silence, duration, start_max_prepend,
+                    max_trim=start_max_trim if start_max_trim is not None else 0.35,
+                )
             mini = snap_clip_ends_to_lines(mini, silence, duration, line_max_extend)
         if do_scene_snap and source.get("source_path"):
             mini = snap_clips_off_shot_changes(mini, source["source_path"], duration,
                                                scene_margin, scene_threshold)
+        mini_boundary = ((mini.get("qc") or {}).get("boundary_status") or {})
+        for key in boundary_accum:
+            boundary_accum[key].extend([e for e in mini_boundary.get(key, []) if isinstance(e, dict)])
         for original, snapped in zip(group, mini["clips"]):
             original["source_start"] = snapped["source_start"]
             original["source_end"] = snapped["source_end"]
     # Recompute the global output timeline cursor-based, in plan order (not group order).
-    cursor = 0.0
-    for clip in clips:
-        duration = round(float(clip["source_end"]) - float(clip["source_start"]), 3)
-        clip["duration"] = duration
-        clip["output_start"] = round(cursor, 3)
-        clip["output_end"] = round(cursor + duration, 3)
-        cursor += duration
-    plan["total_duration"] = round(sum(c["duration"] for c in clips), 3)
+    plan["total_duration"] = _recompute_clip_timeline(clips)
+
+    # Preserve per-source boundary QC as the single validated-plan QC source.
+    if any(boundary_accum.values()):
+        qc = plan.setdefault("qc", {})
+        boundary = qc.setdefault("boundary_status", {})
+        for key, events in boundary_accum.items():
+            if events:
+                boundary.setdefault(key, []).extend(events)
+        warnings = qc.setdefault("warnings", [])
+        for event in boundary_accum["start_snaps"]:
+            if event.get("warning_code"):
+                warnings.append({
+                    "code": event["warning_code"],
+                    "clip_id": event.get("clip_id"),
+                    "source_id": event.get("source_id"),
+                    "start_unsnapped_reason": event.get("start_unsnapped_reason"),
+                })
     return plan
 
 
@@ -765,6 +995,69 @@ def lint_mapped_narration(mapped, original_count, output_duration, *, min_spm=6.
     }
 
 
+def update_cut_qc(plan, *, allow_duration_drift=False, duration_drift_allowed_by=None):
+    """Populate clip_plan_validated.json['qc'] as the single cut QC source."""
+    qc = dict(plan.get("qc") or {})
+    warnings = list(qc.get("warnings") or [])
+    blocking = list(qc.get("blocking") or [])
+    total = float(plan.get("total_duration") or 0.0)
+    target = plan.get("target_duration")
+    if target in (None, ""):
+        target_status = "missing"
+        target_qc = {"status": target_status, "target_duration": None, "total_duration": round(total, 3)}
+    else:
+        target = float(target)
+        ratio = total / target if target > 0 else 0.0
+        if ratio < 0.85:
+            target_status = "under"
+        elif ratio > 1.15:
+            target_status = "over"
+        else:
+            target_status = "ok"
+        severity = None
+        if ratio < 0.60 or ratio > 1.40:
+            severity = "blocking"
+        elif target_status in {"under", "over"}:
+            severity = "warning"
+        target_qc = {
+            "status": target_status,
+            "target_duration": round(target, 3),
+            "total_duration": round(total, 3),
+            "ratio": round(ratio, 3),
+            "warning_thresholds": {"under": 0.85, "over": 1.15},
+            "blocking_thresholds": {"under": 0.60, "over": 1.40},
+        }
+        if severity:
+            warning = {
+                "code": "target_duration_drift",
+                "status": target_status,
+                "severity": "warning" if allow_duration_drift else severity,
+                "target_duration": round(target, 3),
+                "total_duration": round(total, 3),
+                "ratio": round(ratio, 3),
+            }
+            if allow_duration_drift:
+                warning["allowed"] = True
+                warning["duration_drift_allowed_by"] = duration_drift_allowed_by or "--allow-duration-drift"
+                target_qc["duration_drift_allowed_by"] = warning["duration_drift_allowed_by"]
+            warnings.append(warning)
+            if severity == "blocking" and not allow_duration_drift:
+                blocking.append(warning)
+    qc["target_duration_status"] = target_status
+    qc["target_duration"] = target_qc
+    qc.setdefault("boundary_status", {})
+    qc["clip_count"] = len(plan.get("clips") or [])
+    qc["total_duration"] = round(total, 3)
+    if warnings:
+        qc["warnings"] = warnings
+    if blocking:
+        qc["blocking"] = blocking
+    elif "blocking" in qc:
+        qc.pop("blocking", None)
+    plan["qc"] = qc
+    return plan
+
+
 def _has_audio_stream(video_path):
     cmd = [
         "ffprobe", "-v", "error", "-select_streams", "a:0",
@@ -774,49 +1067,370 @@ def _has_audio_stream(video_path):
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
-def _probe_video_geometry(video_path):
-    """Best-effort (width, height, fps) for a source; falls back to a safe even-sized canvas.
+class VideoGeometry(tuple):
+    """Tuple-compatible geometry with probe facts attached for QC callers."""
 
-    Used to normalize heterogeneous multi-source segments to one geometry before concat
-    (ffmpeg's concat filter rejects mismatched width/height/SAR/pixel-format/fps).
+    def __new__(cls, width, height, fps, facts=None):
+        obj = super().__new__(cls, (width, height, fps))
+        obj.facts = facts or {}
+        return obj
+
+
+def _parse_ratio(value):
+    if value in (None, "", "0:1", "0/1", "N/A"):
+        return None
+    text = str(value)
+    sep = ":" if ":" in text else "/" if "/" in text else None
+    if not sep:
+        try:
+            ratio = float(text)
+            return ratio if ratio > 0 else None
+        except ValueError:
+            return None
+    left, _, right = text.partition(sep)
+    try:
+        num, den = float(left), float(right)
+    except ValueError:
+        return None
+    return num / den if den > 0 and num > 0 else None
+
+
+def _stream_rotation(stream):
+    candidates = []
+    tags = stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
+    if "rotate" in tags:
+        candidates.append(tags.get("rotate"))
+    for side_data in stream.get("side_data_list") or []:
+        if isinstance(side_data, dict):
+            candidates.append(side_data.get("rotation"))
+    for value in candidates:
+        try:
+            return int(round(float(value))) % 360
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _fps_from_rate(rate):
+    if not rate or "/" not in str(rate):
+        return 0.0
+    num, _, den = str(rate).partition("/")
+    try:
+        num_f, den_f = float(num), float(den)
+        return num_f / den_f if den_f > 0 else 0.0
+    except ValueError:
+        return 0.0
+
+
+def _geometry_from_stream(stream, *, fallback=False):
+    coded_width = coded_height = 0
+    try:
+        coded_width = int(float(stream.get("width") or 0))
+        coded_height = int(float(stream.get("height") or 0))
+    except (TypeError, ValueError):
+        coded_width = coded_height = 0
+    if coded_width <= 0 or coded_height <= 0:
+        coded_width, coded_height = 1280, 720
+        fallback = True
+
+    parsed_sar = _parse_ratio(stream.get("sample_aspect_ratio"))
+    dar = _parse_ratio(stream.get("display_aspect_ratio"))
+    rotation = _stream_rotation(stream)
+    display_height = float(coded_height)
+    if parsed_sar:
+        sar = parsed_sar
+        display_width = float(coded_width) * sar
+        aspect_source = "sample_aspect_ratio"
+    elif dar:
+        sar = 1.0
+        display_width = display_height * dar
+        aspect_source = "display_aspect_ratio_fallback"
+    else:
+        sar = 1.0
+        display_width = float(coded_width)
+        aspect_source = "square_pixel_fallback"
+    rotation_swaps_axes = rotation in {90, 270}
+    if rotation_swaps_axes:
+        display_width, display_height = display_height, display_width
+
+    width, height = _clamp_even_geometry(round(display_width), round(display_height))
+    fps = _fps_from_rate(stream.get("r_frame_rate")) or _fps_from_rate(stream.get("avg_frame_rate"))
+    if not 0 < fps <= 120:
+        fps = 30.0
+    facts = {
+        "coded_width": coded_width,
+        "coded_height": coded_height,
+        "width": width,
+        "height": height,
+        "fps": round(fps, 3),
+        "sample_aspect_ratio": stream.get("sample_aspect_ratio") or "1:1",
+        "sample_aspect_ratio_float": round(float(sar), 6),
+        "display_aspect_ratio": stream.get("display_aspect_ratio"),
+        "display_aspect_ratio_float": round(float(dar or 0.0), 6),
+        "display_aspect_source": aspect_source,
+        "display_width": width,
+        "display_height": height,
+        "rotation": rotation,
+        "rotation_swaps_axes": rotation_swaps_axes,
+        "fallback": bool(fallback),
+    }
+    return VideoGeometry(width, height, round(fps, 3), facts)
+
+
+def _probe_video_geometry(video_path):
+    """Best-effort iterable (width, height, fps), rotation/SAR/DAR-aware.
+
+    Returned value unpacks like the historical 3-tuple while exposing `.facts`
+    for QC. Used to normalize heterogeneous multi-source segments to one
+    square-pixel geometry before concat (ffmpeg's concat filter rejects
+    mismatched width/height/SAR/pixel-format/fps).
     """
-    width = height = 0
-    fps = 0.0
     cmd = [
         "ffprobe", "-v", "error", "-select_streams", "v:0",
-        "-show_entries", "stream=width,height,r_frame_rate",
-        "-of", "csv=p=0:s=,", str(video_path),
+        "-show_entries",
+        "stream=width,height,r_frame_rate,avg_frame_rate,sample_aspect_ratio,display_aspect_ratio:stream_tags=rotate:stream_side_data=rotation",
+        "-of", "json", str(video_path),
     ]
     try:
         result = run_cmd(cmd)
     except Exception:  # noqa: BLE001 - probing is best-effort; fall back to defaults
         result = None
     if result is not None and getattr(result, "returncode", 1) == 0 and (result.stdout or "").strip():
-        parts = result.stdout.strip().splitlines()[0].split(",")
         try:
-            width, height = int(float(parts[0])), int(float(parts[1]))
-        except (IndexError, ValueError):
-            width = height = 0
-        if len(parts) >= 3 and "/" in parts[2]:
-            num, _, den = parts[2].partition("/")
-            try:
-                num_f, den_f = float(num), float(den)
-                fps = num_f / den_f if den_f > 0 else 0.0
-            except ValueError:
-                fps = 0.0
-    if width <= 0 or height <= 0:
-        width, height = 1280, 720
-    width -= width % 2          # libx264/yuv420p require even dimensions
-    height -= height % 2
-    if not 0 < fps <= 120:
-        fps = 30.0
-    return width, height, round(fps, 3)
+            payload = json.loads(result.stdout)
+            streams = payload.get("streams") or []
+            if streams:
+                return _geometry_from_stream(streams[0])
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+    # Backward-compatible fallback for tests/mocks that still return CSV output.
+    stream = {}
+    if result is not None and (result.stdout or "").strip():
+        parts = result.stdout.strip().splitlines()[0].split(",")
+        if len(parts) >= 2:
+            stream["width"], stream["height"] = parts[0], parts[1]
+        if len(parts) >= 3:
+            stream["r_frame_rate"] = parts[2]
+        if len(parts) >= 4 and parts[3] not in ("", "N/A"):
+            stream["tags"] = {"rotate": parts[3]}
+        if len(parts) >= 5 and parts[4] not in ("", "N/A"):
+            stream["sample_aspect_ratio"] = parts[4]
+        if len(parts) >= 6 and parts[5] not in ("", "N/A"):
+            stream["display_aspect_ratio"] = parts[5]
+    return _geometry_from_stream(stream, fallback=True)
+
+
+def _orientation(width, height):
+    if width > height:
+        return "landscape"
+    if height > width:
+        return "portrait"
+    return "square"
+
+
+def _fps_bucket(fps):
+    if not fps or fps <= 0:
+        return 30.0
+    common = [23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0]
+    nearest = min(common, key=lambda x: abs(float(fps) - x))
+    return nearest if abs(float(fps) - nearest) <= 0.15 else round(float(fps))
+
+
+def _clamp_even_geometry(width, height, max_height=None):
+    width = max(2, int(width) - int(width) % 2)
+    height = max(2, int(height) - int(height) % 2)
+    max_height = int(max_height or 0)
+    if max_height > 0 and height > max_height:
+        scale = max_height / height
+        height = max_height - max_height % 2
+        width = max(2, int(width * scale))
+        width -= width % 2
+    return width, height
+
+
+def _select_output_geometry(source_paths, clips, max_height=None):
+    """Deterministically select canvas/fps from all used sources, not just the first."""
+    used = {}
+    for clip in clips or []:
+        path = str(clip.get("source_path") or "")
+        if not path:
+            continue
+        used[path] = used.get(path, 0.0) + max(0.0, float(clip.get("duration") or 0.0))
+    if not used:
+        for path in source_paths or []:
+            used[str(path)] = 0.0
+    rows = []
+    for path in sorted(used):
+        probed = _probe_video_geometry(path)
+        width, height, fps = probed
+        facts = dict(getattr(probed, "facts", {}) or {})
+        facts.setdefault("width", width)
+        facts.setdefault("height", height)
+        facts.setdefault("fps", fps)
+        facts.setdefault("rotation", 0)
+        facts.setdefault("sample_aspect_ratio", "1:1")
+        rows.append({
+            "path": path,
+            "source_id": next((str(c.get("source_id")) for c in clips or []
+                               if str(c.get("source_path") or "") == path and c.get("source_id") is not None), None),
+            "used_duration": round(used[path], 3),
+            "width": width,
+            "height": height,
+            "coded_width": facts.get("coded_width", width),
+            "coded_height": facts.get("coded_height", height),
+            "display_width": facts.get("display_width", width),
+            "display_height": facts.get("display_height", height),
+            "area": width * height,
+            "fps": fps,
+            "fps_bucket": min(60.0, _fps_bucket(fps)),
+            "orientation": _orientation(width, height),
+            "rotation": facts.get("rotation", 0),
+            "sample_aspect_ratio": facts.get("sample_aspect_ratio", "1:1"),
+            "sample_aspect_ratio_float": facts.get("sample_aspect_ratio_float", 1.0),
+            "display_aspect_ratio": facts.get("display_aspect_ratio"),
+            "rotation_swaps_axes": bool(facts.get("rotation_swaps_axes", False)),
+        })
+    if not rows:
+        return 1280, 720, 30.0, {
+            "width": 1280, "height": 720, "fps": 30.0,
+            "reason": "fallback_no_sources", "source_id": None,
+        }
+
+    orientation_duration = {}
+    for row in rows:
+        orientation_duration[row["orientation"]] = orientation_duration.get(row["orientation"], 0.0) + row["used_duration"]
+    chosen_orientation = sorted(
+        orientation_duration.items(),
+        key=lambda kv: (kv[1], max(r["area"] for r in rows if r["orientation"] == kv[0]), kv[0]),
+        reverse=True,
+    )[0][0]
+    eligible = [r for r in rows if r["orientation"] == chosen_orientation] or rows
+    selected = sorted(
+        eligible,
+        key=lambda r: (-r["area"], str(r.get("source_id") or ""), r["path"]),
+    )[0]
+
+    fps_duration = {}
+    for row in rows:
+        fps_duration[row["fps_bucket"]] = fps_duration.get(row["fps_bucket"], 0.0) + row["used_duration"]
+    fps = sorted(fps_duration.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)[0][0]
+    fps = max(1.0, min(60.0, float(fps or 30.0)))
+
+    width, height = _clamp_even_geometry(selected["width"], selected["height"], max_height=max_height)
+    reason = {
+        "width": width,
+        "height": height,
+        "fps": round(fps, 3),
+        "reason": "weighted_orientation_area_fps",
+        "source_id": selected.get("source_id"),
+        "source_path": selected["path"],
+        "orientation": chosen_orientation,
+        "orientation_used_duration": round(orientation_duration.get(chosen_orientation, 0.0), 3),
+        "fps_bucket_used_duration": round(fps_duration.get(fps, 0.0), 3),
+        "rotation": selected.get("rotation", 0),
+        "sample_aspect_ratio": selected.get("sample_aspect_ratio", "1:1"),
+        "display_aspect_ratio": selected.get("display_aspect_ratio"),
+        "coded_width": selected.get("coded_width"),
+        "coded_height": selected.get("coded_height"),
+        "display_width": selected.get("display_width"),
+        "display_height": selected.get("display_height"),
+        "sources": rows,
+    }
+    return width, height, round(fps, 3), reason
+
+
+def _audio_segment_filter(label_in, label_out, start, end, duration, fade_ms, extra_filters=""):
+    fade = max(0.0, min(float(fade_ms or 0.0) / 1000.0, max(0.0, float(duration or 0.0)) / 2))
+    base = f"{label_in}atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS"
+    if fade > 0:
+        base += f",afade=t=in:st=0:d={fade:.3f},afade=t=out:st={max(0.0, duration - fade):.3f}:d={fade:.3f}"
+    if extra_filters:
+        base += f",{extra_filters}"
+    return f"{base}{label_out}"
 
 
 def _write_filter_script(filter_complex, work_dir):
     script_path = Path(work_dir) / "edit_filter_complex.txt"
     script_path.write_text(filter_complex, encoding="utf-8")
     return script_path
+
+
+def _probe_audio_sample_rate(video_path):
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "a:0",
+        "-show_entries", "stream=sample_rate", "-of", "csv=p=0", str(video_path),
+    ]
+    try:
+        result = run_cmd(cmd)
+    except Exception:  # noqa: BLE001 - delivery QC is observational
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        return int(float((result.stdout or "").strip().splitlines()[0]))
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def _delivery_reencode_reason(source_paths, clips):
+    reasons = ["trim_concat_filter_requires_reencode"]
+    if len(source_paths or []) > 1:
+        reasons.append("multi_source_geometry_audio_normalization")
+    if any(not clip.get("source_path") for clip in clips or []):
+        reasons.append("single_source_filter_concat_no_stream_copy")
+    return "+".join(reasons)
+
+
+def update_delivery_qc(validated_plan, *, source_paths=None, output_path=None, rendered=False):
+    """Attach cut delivery facts to qc.delivery_qc without writing visual_qc."""
+    qc = validated_plan.setdefault("qc", {})
+    clips = validated_plan.get("clips") or []
+    if source_paths is None:
+        source_paths = sorted({
+            str(clip.get("source_path") or "")
+            for clip in clips
+            if str(clip.get("source_path") or "")
+        })
+    target_sample_rate = 48000
+    probed_sample_rate = _probe_audio_sample_rate(output_path) if output_path and Path(output_path).exists() else None
+    output_geometry = qc.get("output_geometry")
+    delivery_qc = {
+        "schema_version": 1,
+        "video_encode_passes": 1,
+        "reencode_reason": _delivery_reencode_reason(source_paths, clips),
+        "stream_copy_risk": {
+            "status": "avoided",
+            "reason": "cut uses trim/concat/filtergraph with explicit libx264/aac encode; no risky stream-copy path",
+        },
+        "audio_sample_rate": {
+            "target": target_sample_rate,
+            "probed": probed_sample_rate,
+        },
+        "final_compat_notes": [
+            "video encoded with libx264/yuv420p-compatible filter path",
+            "audio encoded as AAC with 48000 Hz target for delivery compatibility",
+            "edited_source.mp4 is an intermediate; downstream assembly may perform another intentional encode",
+        ],
+        "output_geometry": output_geometry,
+        "rendered": bool(rendered),
+        "planned": not bool(rendered),
+    }
+    if probed_sample_rate and probed_sample_rate != target_sample_rate:
+        delivery_qc["final_compat_notes"].append(
+            f"probed audio sample rate {probed_sample_rate} differs from target {target_sample_rate}"
+        )
+    qc["delivery_qc"] = delivery_qc
+    return delivery_qc
+
+
+def write_cut_delivery_qc(work_dir, validated_plan):
+    delivery_qc = (validated_plan.get("qc") or {}).get("delivery_qc")
+    if not delivery_qc or not delivery_qc.get("rendered"):
+        return None
+    path = Path(work_dir) / "cut_delivery_qc.json"
+    path.write_text(json.dumps(delivery_qc, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
 
 
 def build_edited_source_video(input_video, validated_plan, work_dir, output_path=None):
@@ -834,6 +1448,13 @@ def build_edited_source_video(input_video, validated_plan, work_dir, output_path
             source_paths.append(source_path)
     source_index = {path: idx for idx, path in enumerate(source_paths)}
     audio_by_input = {path: _has_audio_stream(path) for path in source_paths}
+    join_fade_ms = max(0.0, float(CONFIG.get("clip_join_audio_fade_ms", 30.0) or 0.0))
+    qc = validated_plan.setdefault("qc", {})
+    qc["join_fade_ms"] = round(join_fade_ms, 3)
+    if not qc.get("output_geometry"):
+        _, _, _, geometry_qc = _select_output_geometry(source_paths, clips)
+        qc["output_geometry"] = geometry_qc
+        qc["output_geometry_reason"] = geometry_qc.get("reason")
 
     parts = []
     concat_inputs = []
@@ -844,7 +1465,15 @@ def build_edited_source_video(input_video, validated_plan, work_dir, output_path
         # segment to one canvas and give every clip an audio segment (real or synthesized
         # silence) so concat always succeeds with a continuous track and no source's audio
         # is dropped just because a sibling source is silent.
-        canvas_w, canvas_h, canvas_fps = _probe_video_geometry(source_paths[0])
+        # Reuse the geometry already probed+stored above (guard) or by main() — the
+        # selection is deterministic, so re-probing every source here is wasted ffprobe work.
+        geometry_qc = qc.get("output_geometry")
+        if isinstance(geometry_qc, dict) and all(geometry_qc.get(k) for k in ("width", "height", "fps")):
+            canvas_w, canvas_h, canvas_fps = int(geometry_qc["width"]), int(geometry_qc["height"]), geometry_qc["fps"]
+        else:
+            canvas_w, canvas_h, canvas_fps, geometry_qc = _select_output_geometry(source_paths, clips)
+            qc["output_geometry"] = geometry_qc
+            qc["output_geometry_reason"] = geometry_qc.get("reason")
         vnorm = (f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease,"
                  f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
                  f"fps={canvas_fps},format=yuv420p")
@@ -859,10 +1488,10 @@ def build_edited_source_video(input_video, validated_plan, work_dir, output_path
                 f"[{input_idx}:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS,{vnorm}[v{idx}]"
             )
             if audio_by_input.get(clip_source):
-                parts.append(
-                    f"[{input_idx}:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS,"
-                    f"aresample=48000,aformat=sample_rates=48000:channel_layouts=stereo[a{idx}]"
-                )
+                parts.append(_audio_segment_filter(
+                    f"[{input_idx}:a]", f"[a{idx}]", start, end, dur, join_fade_ms,
+                    extra_filters="aresample=48000,aformat=sample_rates=48000:channel_layouts=stereo",
+                ))
             else:
                 parts.append(
                     f"anullsrc=r=48000:cl=stereo,atrim=duration={dur:.3f},asetpts=PTS-STARTPTS,"
@@ -883,9 +1512,9 @@ def build_edited_source_video(input_video, validated_plan, work_dir, output_path
             )
             concat_inputs.append(f"[v{idx}]")
             if has_audio:
-                parts.append(
-                    f"[{input_idx}:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[a{idx}]"
-                )
+                parts.append(_audio_segment_filter(
+                    f"[{input_idx}:a]", f"[a{idx}]", start, end, max(0.0, float(end) - float(start)), join_fade_ms
+                ))
                 concat_inputs.append(f"[a{idx}]")
 
         if has_audio:
@@ -908,11 +1537,14 @@ def build_edited_source_video(input_video, validated_plan, work_dir, output_path
     for source_path in source_paths:
         input_args.extend(["-i", str(source_path)])
     cmd = ["ffmpeg", "-y", *input_args, *extra_inputs, *filter_args, *maps,
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "192k", str(output_path)]
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+           "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(output_path)]
     result = run_cmd(cmd)
     if result.returncode != 0:
         raise RuntimeError(f"剪辑源视频失败: {result.stderr}")
 
+    update_delivery_qc(validated_plan, source_paths=source_paths, output_path=output_path, rendered=True)
+    write_cut_delivery_qc(work_dir, validated_plan)
     _write_edited_source_meta(output_path, validated_plan, input_video)
     duration = get_video_duration(output_path)
     log(f"剪辑源视频: {output_path} ({duration:.1f}s, {len(clips)} clips)")
@@ -940,6 +1572,8 @@ def main():
                              "(cut-first/narrate-second: narration is authored in OUTPUT time, no mapping)")
     parser.add_argument("--allow-sparse-cut", action="store_true",
                         help="do not block on heavy narration drop / sparse output (e.g. an intentional montage)")
+    parser.add_argument("--allow-duration-drift", action="store_true",
+                        help="do not block when validated clip duration is far from --target-duration")
     args = parser.parse_args()
 
     work_dir = Path(args.work_dir)
@@ -978,6 +1612,13 @@ def main():
                     silence_periods = []
             except (OSError, ValueError):
                 silence_periods = []
+        validated_plan = snap_clip_starts_to_lines(
+            validated_plan,
+            silence_periods,
+            video_duration,
+            CONFIG.get("clip_start_snap_max_prepend", 1.8),
+            max_trim=CONFIG.get("clip_start_snap_max_trim", 0.35),
+        )
         validated_plan = snap_clip_ends_to_lines(
             validated_plan,
             silence_periods,
@@ -1011,13 +1652,46 @@ def main():
             scene_threshold=CONFIG.get("scene_cut_detect_threshold", 0.4),
             do_line_snap=CONFIG.get("snap_clip_line_end", True),
             do_scene_snap=CONFIG.get("scene_cut_snap", True),
+            start_max_prepend=CONFIG.get("clip_start_snap_max_prepend", 1.8),
+            start_max_trim=CONFIG.get("clip_start_snap_max_trim", 0.35),
         )
 
     if isinstance(validated_plan, dict):
         validated_plan["raw_plan_fingerprint"] = value_fingerprint(raw_plan)
+        validated_plan.setdefault("qc", {})["join_fade_ms"] = round(
+            max(0.0, float(CONFIG.get("clip_join_audio_fade_ms", 30.0) or 0.0)), 3
+        )
+        source_paths = []
+        for clip in validated_plan.get("clips", []):
+            source_path = str(clip.get("source_path") or "")
+            if source_path and source_path not in source_paths:
+                source_paths.append(source_path)
+        if not source_paths:
+            source_paths = [str(args.video)]
+        _, _, _, geometry_qc = _select_output_geometry(source_paths, validated_plan.get("clips", []))
+        validated_plan["qc"]["output_geometry"] = geometry_qc
+        validated_plan["qc"]["output_geometry_reason"] = geometry_qc.get("reason")
+        allow_duration_drift = bool(args.allow_duration_drift or args.allow_sparse_cut)
+        drift_source = "--allow-duration-drift" if args.allow_duration_drift else (
+            "--allow-sparse-cut" if args.allow_sparse_cut else None
+        )
+        update_cut_qc(
+            validated_plan,
+            allow_duration_drift=allow_duration_drift,
+            duration_drift_allowed_by=drift_source,
+        )
+        update_delivery_qc(validated_plan, source_paths=source_paths, output_path=work_dir / "edited_source.mp4")
     (work_dir / "clip_plan_validated.json").write_text(
         json.dumps(validated_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    if (validated_plan.get("qc") or {}).get("blocking"):
+        raise SystemExit(
+            "clip_plan duration QC blocking: use --allow-duration-drift to accept current target-duration drift. "
+            "See clip_plan_validated.json['qc']."
+        )
     if args.normalize_only:
+        # normalize-only produces planned delivery facts in clip_plan_validated.json, but no
+        # rendered/reused media exists in this run, so remove any stale final delivery artifact.
+        (work_dir / "cut_delivery_qc.json").unlink(missing_ok=True)
         print(json.dumps({"status": "normalized", "clips": len(validated_plan["clips"]),
                           "total_duration": validated_plan["total_duration"]}, ensure_ascii=False))
         return
@@ -1025,8 +1699,15 @@ def main():
     edited_source_path = work_dir / "edited_source.mp4"
     if should_reuse_edited_source(edited_source_path, validated_plan, args.video):
         log(f"复用剪辑源视频: {edited_source_path}")
+        update_delivery_qc(validated_plan, source_paths=source_paths, output_path=edited_source_path, rendered=True)
+        write_cut_delivery_qc(work_dir, validated_plan)
+        _write_edited_source_meta(edited_source_path, validated_plan, args.video)
+        (work_dir / "clip_plan_validated.json").write_text(
+            json.dumps(validated_plan, ensure_ascii=False, indent=2), encoding="utf-8")
     else:
         build_edited_source_video(args.video, validated_plan, work_dir, edited_source_path)
+        (work_dir / "clip_plan_validated.json").write_text(
+            json.dumps(validated_plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
     narration_path = Path(args.narration) if args.narration else work_dir / "narration.json"
     if narration_path.exists() and not args.no_narration_map:

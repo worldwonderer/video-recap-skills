@@ -1,3 +1,6 @@
+import json
+import os
+import shutil
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-cut' / 'scripts'))
@@ -6,6 +9,8 @@ import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
 import cut
 from cut import build_edited_source_video, lint_mapped_narration, map_narration_to_clips, normalize_clip_plan, parse_duration_seconds, snap_clip_ends_to_lines, snap_clips_off_shot_changes, source_time_to_output_time
+
+_HAVE_FFMPEG = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
 
 
 def test_lint_mapped_narration_flags_dropped_and_sparse():
@@ -75,8 +80,15 @@ def test_cut_main_normalize_only_writes_validated_plan_without_render(monkeypatc
 
     validated = _json.loads((tmp_path / "clip_plan_validated.json").read_text(encoding="utf-8"))
     assert validated["clips"]
+    delivery_qc = validated["qc"]["delivery_qc"]
+    assert delivery_qc["video_encode_passes"] == 1
+    assert delivery_qc["audio_sample_rate"]["target"] == 48000
+    assert delivery_qc["rendered"] is False
+    assert delivery_qc["planned"] is True
+    assert not (tmp_path / "cut_delivery_qc.json").exists()
     assert rendered == []                                   # no render in normalize-only
     assert not (tmp_path / "edited_source.mp4").exists()
+    assert not (tmp_path / "visual_qc.json").exists()
 
 
 def test_cut_main_blocks_on_heavy_drop_unless_allow_sparse(monkeypatch, tmp_path):
@@ -230,6 +242,9 @@ def test_build_edited_source_video_uses_ffmpeg_concat(monkeypatch, tmp_path):
     ffmpeg_cmd = [cmd for cmd in commands if cmd[0] == "ffmpeg"][0]
     assert "trim=start=0.000:end=1.000" in " ".join(ffmpeg_cmd)
     assert "concat=n=2" in " ".join(ffmpeg_cmd)
+    assert ffmpeg_cmd[ffmpeg_cmd.index("-pix_fmt") + 1] == "yuv420p"
+    assert ffmpeg_cmd[ffmpeg_cmd.index("-ar") + 1] == "48000"
+    assert ffmpeg_cmd[ffmpeg_cmd.index("-movflags") + 1] == "+faststart"
 
 
 
@@ -278,6 +293,25 @@ def test_cut_main_does_not_reuse_edited_source_when_normalized_plan_changes(monk
     assert len(calls) == 1
     assert json.loads((work / "clip_plan_validated.json").read_text(encoding="utf-8"))["clips"][0]["source_start"] == 5.0
     assert edited.read_bytes() == b"new-edited"
+
+
+def test_edited_source_cache_fingerprint_includes_render_affecting_config(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    edited = tmp_path / "edited_source.mp4"
+    edited.write_bytes(b"edited")
+    plan = cut.normalize_clip_plan([{"start": 0.0, "end": 1.0}], video_duration=2.0)
+
+    monkeypatch.setattr("cut.CONFIG", {**cut.CONFIG, "clip_join_audio_fade_ms": 30.0})
+    cut._write_edited_source_meta(edited, plan, video)
+    meta = json.loads((tmp_path / "edited_source.mp4.meta.json").read_text(encoding="utf-8"))
+    assert meta["render_cache"]["clip_join_audio_fade_ms"] == 30.0
+    assert meta["render_cache"]["geometry_render_algorithm_version"] == cut.GEOMETRY_RENDER_ALGORITHM_VERSION
+    assert cut.should_reuse_edited_source(edited, plan, video) is True
+
+    monkeypatch.setattr("cut.CONFIG", {**cut.CONFIG, "clip_join_audio_fade_ms": 80.0})
+    assert cut.edited_source_render_fingerprint() != meta["render_fingerprint"]
+    assert cut.should_reuse_edited_source(edited, plan, video) is False
 
 
 def test_cut_main_reuses_edited_source_when_fingerprint_matches(monkeypatch, tmp_path):
@@ -629,15 +663,19 @@ def test_build_edited_source_video_multi_source_uses_multiple_inputs_and_cache_m
     assert cut.should_reuse_edited_source(out, plan, "ignored.mp4") is True
 
 
+@pytest.mark.skipif(
+    not _HAVE_FFMPEG and not os.environ.get("RECAP_REQUIRE_FFMPEG"),
+    reason="ffmpeg/ffprobe required for real render (set RECAP_REQUIRE_FFMPEG=1 to make a missing binary a hard failure instead of a silent skip)",
+)
 def test_build_edited_source_video_multi_resolution_mixed_audio_real_render(tmp_path):
     """Real ffmpeg: heterogeneous sources (different resolution/fps, one silent) must concat
     into ONE playable output with an audio track. This path was previously all-mocked, hiding
     the missing scale/setsar/fps normalization (concat would abort) and the all-or-nothing
-    audio drop."""
-    import shutil
+    audio drop. On a runner where ffmpeg MUST exist, set RECAP_REQUIRE_FFMPEG=1 so a missing
+    binary fails loudly instead of silently skipping this coverage."""
     import subprocess
-    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
-        pytest.skip("ffmpeg/ffprobe required for real render")
+    if not _HAVE_FFMPEG:
+        pytest.fail("RECAP_REQUIRE_FFMPEG is set but ffmpeg/ffprobe is not installed")
     import cut
 
     a = tmp_path / "a_1080_audio.mp4"   # 1920x1080@30, WITH audio
@@ -740,3 +778,315 @@ def test_snap_multi_source_clips_noops_without_silence_or_flags(tmp_path):
                                       do_scene_snap=False)
     assert out["clips"][0]["source_end"] == 4.0
     assert out["total_duration"] == 3.0
+
+
+def test_snap_clip_starts_prepends_to_prior_quiet_end():
+    plan = _make_plan([(10.0, 14.0)])
+    silence = [{"start": 7.5, "end": 8.4}, {"start": 15.0, "end": 16.0}]
+
+    out = cut.snap_clip_starts_to_lines(plan, silence, video_duration=30.0, max_prepend=1.8, max_trim=0.35)
+
+    assert out["clips"][0]["source_start"] == 8.4
+    assert out["clips"][0]["duration"] == 5.6
+    assert out["qc"]["boundary_status"]["start_snaps"][0]["action"] == "prepended"
+
+
+def test_snap_clip_starts_keeps_when_already_quiet():
+    plan = _make_plan([(10.2, 14.0)])
+    silence = [{"start": 10.0, "end": 10.5}]
+
+    out = cut.snap_clip_starts_to_lines(plan, silence, video_duration=30.0, max_prepend=1.8, max_trim=0.35)
+
+    assert out["clips"][0]["source_start"] == 10.2
+    assert out["qc"]["boundary_status"]["start_snaps"][0]["reason"] == "already_quiet"
+
+
+def test_snap_clip_starts_warns_when_prepend_would_overlap():
+    plan = _make_plan([(8.0, 10.0), (10.0, 14.0)])
+    silence = [{"start": 7.5, "end": 8.4}]
+
+    out = cut.snap_clip_starts_to_lines(plan, silence, video_duration=30.0, max_prepend=1.8, max_trim=0.35)
+    second = out["clips"][1]
+
+    assert second["source_start"] == 10.0
+    event = out["qc"]["boundary_status"]["start_snaps"][1]
+    assert event["start_unsnapped_reason"] == "overlap_or_collapse"
+    assert any(w["code"] == "clip_start_unsnapped" for w in out["qc"]["warnings"])
+
+
+def test_snap_clip_starts_no_prior_quiet_keeps_and_warns_by_default():
+    plan = _make_plan([(10.0, 14.0)])
+    silence = [{"start": 12.0, "end": 12.5}]
+
+    out = cut.snap_clip_starts_to_lines(plan, silence, video_duration=30.0, max_prepend=1.8, max_trim=0.35)
+
+    assert out["clips"][0]["source_start"] == 10.0
+    assert out["qc"]["boundary_status"]["start_snaps"][0]["start_unsnapped_reason"] == "no_prior_quiet"
+
+
+def test_snap_clip_starts_allows_tiny_forward_trim_to_next_quiet():
+    plan = _make_plan([(10.0, 14.0)])
+    silence = [{"start": 10.25, "end": 10.8}]
+
+    out = cut.snap_clip_starts_to_lines(plan, silence, video_duration=30.0, max_prepend=1.8, max_trim=0.35)
+
+    assert out["clips"][0]["source_start"] == 10.25
+    assert out["qc"]["boundary_status"]["start_snaps"][0]["action"] == "trimmed"
+
+
+def test_snap_multi_source_clips_start_snaps_each_source_silence(tmp_path):
+    work = tmp_path / "work"
+    (work / "sources" / "a").mkdir(parents=True)
+    (work / "sources" / "b").mkdir(parents=True)
+    (work / "sources" / "a" / "silence_periods.json").write_text(
+        json.dumps([{"start": 1.0, "end": 1.4}]), encoding="utf-8"
+    )
+    (work / "sources" / "b" / "silence_periods.json").write_text(
+        json.dumps([{"start": 5.0, "end": 5.3}]), encoding="utf-8"
+    )
+    plan = {
+        "allow_overlap": False,
+        "clips": [
+            {"clip_id": 0, "source_id": "a", "source_path": "/a.mp4", "source_start": 2.0, "source_end": 4.0,
+             "output_start": 0.0, "output_end": 2.0, "duration": 2.0},
+            {"clip_id": 1, "source_id": "b", "source_path": "/b.mp4", "source_start": 6.0, "source_end": 8.0,
+             "output_start": 2.0, "output_end": 4.0, "duration": 2.0},
+        ],
+        "total_duration": 4.0,
+    }
+    out = cut.snap_multi_source_clips(
+        plan,
+        {"a": {"source_path": "/a.mp4", "duration": 10.0}, "b": {"source_path": "/b.mp4", "duration": 10.0}},
+        work,
+        line_max_extend=0.0,
+        scene_margin=0.0,
+        scene_threshold=0.4,
+        do_scene_snap=False,
+        start_max_prepend=1.8,
+        start_max_trim=0.35,
+    )
+
+    assert out["clips"][0]["source_start"] == 1.4
+    assert out["clips"][1]["source_start"] == 5.3
+    assert out["clips"][1]["output_start"] == 2.6
+
+
+def test_select_output_geometry_uses_all_used_sources_not_first(monkeypatch):
+    probes = {
+        "/low.mp4": (854, 480, 24.0),
+        "/hd.mp4": (1920, 1080, 30.0),
+    }
+    monkeypatch.setattr(cut, "_probe_video_geometry", lambda p: probes[str(p)])
+    clips = [
+        {"source_id": "low", "source_path": "/low.mp4", "duration": 1.0},
+        {"source_id": "hd", "source_path": "/hd.mp4", "duration": 5.0},
+    ]
+
+    w, h, fps, qc = cut._select_output_geometry(["/low.mp4", "/hd.mp4"], clips)
+
+    assert (w, h, fps) == (1920, 1080, 30.0)
+    assert qc["source_id"] == "hd"
+    assert qc["reason"] == "weighted_orientation_area_fps"
+
+
+def test_select_output_geometry_orientation_duration_and_fps_ties(monkeypatch):
+    probes = {
+        "/portrait.mp4": (1080, 1920, 24.0),
+        "/landscape.mp4": (1280, 720, 60.0),
+        "/landscape2.mp4": (1920, 1080, 30.0),
+    }
+    monkeypatch.setattr(cut, "_probe_video_geometry", lambda p: probes[str(p)])
+    clips = [
+        {"source_id": "p", "source_path": "/portrait.mp4", "duration": 2.0},
+        {"source_id": "l1", "source_path": "/landscape.mp4", "duration": 1.0},
+        {"source_id": "l2", "source_path": "/landscape2.mp4", "duration": 2.0},
+    ]
+
+    w, h, fps, qc = cut._select_output_geometry(["/portrait.mp4", "/landscape.mp4", "/landscape2.mp4"], clips)
+
+    assert (w, h) == (1920, 1080)       # landscape wins by total used duration (3s > 2s)
+    assert fps == 30.0                 # 24/30/60 all tie by duration? 30 bucket has 2s, wins
+    assert qc["orientation"] == "landscape"
+
+
+def test_probe_video_geometry_is_iterable_and_rotation_sar_aware(monkeypatch):
+    payload = {
+        "streams": [{
+            "width": 1920,
+            "height": 1080,
+            "r_frame_rate": "30000/1001",
+            "sample_aspect_ratio": "2:1",
+            "display_aspect_ratio": "16:9",
+            "tags": {"rotate": "90"},
+        }]
+    }
+    monkeypatch.setattr(cut, "run_cmd", lambda cmd: CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr=""))
+
+    geometry = cut._probe_video_geometry("/rotated.mp4")
+    width, height, fps = geometry
+
+    assert (width, height) == (1080, 3840)
+    assert fps == 29.97
+    assert geometry.facts["coded_width"] == 1920
+    assert geometry.facts["coded_height"] == 1080
+    assert geometry.facts["rotation"] == 90
+    assert geometry.facts["sample_aspect_ratio"] == "2:1"
+    assert geometry.facts["rotation_swaps_axes"] is True
+    assert geometry.facts["display_aspect_ratio"] == "16:9"
+    assert geometry.facts["display_aspect_source"] == "sample_aspect_ratio"
+
+
+def test_select_output_geometry_qc_exposes_rotation_sar_dar_facts(monkeypatch):
+    probes = {
+        "/rotated.mp4": cut.VideoGeometry(1080, 1920, 30.0, {
+            "coded_width": 1920,
+            "coded_height": 1080,
+            "display_width": 1080,
+            "display_height": 1920,
+            "rotation": 90,
+            "rotation_swaps_axes": True,
+            "sample_aspect_ratio": "1:1",
+            "sample_aspect_ratio_float": 1.0,
+            "display_aspect_ratio": "16:9",
+        }),
+        "/landscape.mp4": (1280, 720, 30.0),
+    }
+    monkeypatch.setattr(cut, "_probe_video_geometry", lambda p: probes[str(p)])
+    clips = [
+        {"source_id": "r", "source_path": "/rotated.mp4", "duration": 5.0},
+        {"source_id": "l", "source_path": "/landscape.mp4", "duration": 1.0},
+    ]
+
+    w, h, fps, qc = cut._select_output_geometry(["/rotated.mp4", "/landscape.mp4"], clips)
+
+    assert (w, h, fps) == (1080, 1920, 30.0)
+    assert qc["orientation"] == "portrait"
+    assert qc["rotation"] == 90
+    assert qc["coded_width"] == 1920
+    assert qc["sources"][0]["rotation"] == 0
+    assert qc["sources"][1]["rotation"] == 90
+    assert qc["sources"][1]["display_aspect_ratio"] == "16:9"
+
+
+def test_build_edited_source_video_writes_delivery_qc_and_meta_without_visual_qc(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake")
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    plan = normalize_clip_plan([{"start": 0, "end": 1}, {"start": 2, "end": 3}], video_duration=4)
+    commands = []
+
+    def fake_run_cmd(cmd):
+        commands.append(cmd)
+        joined = " ".join(cmd)
+        if cmd[0] == "ffprobe" and "-of json" in joined:
+            return CompletedProcess(cmd, 0, stdout=json.dumps({"streams": [{
+                "width": 1280, "height": 720, "r_frame_rate": "30/1", "sample_aspect_ratio": "1:1",
+            }]}), stderr="")
+        if cmd[0] == "ffprobe" and "stream=sample_rate" in joined:
+            return CompletedProcess(cmd, 0, stdout="48000\n", stderr="")
+        if cmd[0] == "ffprobe":
+            return CompletedProcess(cmd, 0, stdout="0\n", stderr="")
+        Path(cmd[-1]).write_bytes(b"mp4")
+        return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("cut.run_cmd", fake_run_cmd)
+    monkeypatch.setattr("cut.get_video_duration", lambda path: 2.0)
+
+    output = build_edited_source_video(video, plan, work_dir)
+
+    delivery = json.loads((work_dir / "cut_delivery_qc.json").read_text(encoding="utf-8"))
+    validated_delivery = plan["qc"]["delivery_qc"]
+    meta = json.loads((work_dir / "edited_source.mp4.meta.json").read_text(encoding="utf-8"))
+    assert output.exists()
+    assert delivery == validated_delivery == meta["delivery_qc"]
+    assert delivery["video_encode_passes"] == 1
+    assert delivery["audio_sample_rate"] == {"target": 48000, "probed": 48000}
+    assert "trim_concat_filter_requires_reencode" in delivery["reencode_reason"]
+    assert delivery["stream_copy_risk"]["status"] == "avoided"
+    assert delivery["output_geometry"]["width"] == 1280
+    assert not (work_dir / "visual_qc.json").exists()
+
+
+def test_audio_join_fade_is_in_filter_graph(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake")
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    plan = normalize_clip_plan([{"start": 0, "end": 1}, {"start": 2, "end": 3}], video_duration=4)
+    commands = []
+
+    def fake_run_cmd(cmd):
+        commands.append(cmd)
+        if cmd[0] == "ffprobe":
+            return CompletedProcess(cmd, 0, stdout="0\n", stderr="")
+        Path(cmd[-1]).write_bytes(b"mp4")
+        return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("cut.run_cmd", fake_run_cmd)
+    monkeypatch.setattr("cut.get_video_duration", lambda path: 2.0)
+    monkeypatch.setattr("cut.CONFIG", {**cut.CONFIG, "clip_join_audio_fade_ms": 30.0})
+
+    build_edited_source_video(video, plan, work_dir)
+
+    joined = " ".join([cmd for cmd in commands if cmd[0] == "ffmpeg"][0])
+    assert "afade=t=in:st=0:d=0.030" in joined
+    assert "afade=t=out:st=0.970:d=0.030" in joined
+
+
+def test_update_cut_qc_duration_status_and_allow_drift():
+    plan = {"clips": [{"duration": 4.0}], "total_duration": 4.0, "target_duration": 10.0}
+
+    cut.update_cut_qc(plan)
+    assert plan["qc"]["target_duration_status"] == "under"
+    assert plan["qc"]["blocking"][0]["code"] == "target_duration_drift"
+
+    allowed_primary = {"clips": [{"duration": 4.0}], "total_duration": 4.0, "target_duration": 10.0}
+    cut.update_cut_qc(allowed_primary, allow_duration_drift=True)
+    assert "blocking" not in allowed_primary["qc"]
+    assert allowed_primary["qc"]["target_duration"]["duration_drift_allowed_by"] == "--allow-duration-drift"
+
+    allowed_compat = {"clips": [{"duration": 4.0}], "total_duration": 4.0, "target_duration": 10.0}
+    cut.update_cut_qc(allowed_compat, allow_duration_drift=True, duration_drift_allowed_by="--allow-sparse-cut")
+    assert "blocking" not in allowed_compat["qc"]
+    assert allowed_compat["qc"]["target_duration"]["duration_drift_allowed_by"] == "--allow-sparse-cut"
+
+
+def test_cut_probe_video_geometry_is_rotation_sar_dar_aware(monkeypatch):
+    """Cut geometry should use display geometry, not raw encoded width/height, so rotated
+    portrait sources and non-square pixels feed the same canvas truth as assemble."""
+    outputs = iter([
+        "1920,1080,30000/1001,90,1:1,9:16\n",
+        "720,576,25/1,0,16:15,4:3\n",
+    ])
+
+    def fake_run_cmd(cmd):
+        return CompletedProcess(cmd, 0, stdout=next(outputs), stderr="")
+
+    monkeypatch.setattr(cut, "run_cmd", fake_run_cmd)
+
+    assert cut._probe_video_geometry("rotated.mp4") == (1080, 1920, 29.97)
+    # 720x576 PAL with SAR 16:15 displays as 768x576 and should stay even.
+    assert cut._probe_video_geometry("pal_4x3.mp4") == (768, 576, 25.0)
+
+
+def test_cut_probe_video_geometry_dar_does_not_override_rotated_sar_axes(monkeypatch):
+    """When SAR is usable, coded dimensions × SAR are rotated; DAR is only observed."""
+    payload = {
+        "streams": [{
+            "width": 1920,
+            "height": 1080,
+            "r_frame_rate": "30/1",
+            "sample_aspect_ratio": "1:1",
+            "display_aspect_ratio": "16:9",
+            "tags": {"rotate": "90"},
+        }]
+    }
+    monkeypatch.setattr(cut, "run_cmd", lambda cmd: CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr=""))
+
+    geometry = cut._probe_video_geometry("rotated_with_dar.mp4")
+
+    assert geometry == (1080, 1920, 30.0)
+    assert geometry.facts["rotation_swaps_axes"] is True
+    assert geometry.facts["display_aspect_ratio"] == "16:9"
+    assert geometry.facts["display_aspect_source"] == "sample_aspect_ratio"
