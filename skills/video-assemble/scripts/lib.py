@@ -246,7 +246,7 @@ CONFIG = {
     "source_subtitle_mask_timing": os.environ.get("SOURCE_SUBTITLE_MASK_TIMING", "narration").strip().lower(),  # all | narration；增强版默认仅解说时遮罩
     "subtitle_mask_opacity": min(1.0, env_float("SUBTITLE_MASK_OPACITY", 0.6, minimum=0.0)),  # 0=透明，1=全黑；增强版默认半透明
     "subtitle_mask_padding": env_int("SUBTITLE_MASK_PADDING", 4, minimum=0),
-    "subtitle_y_top": env_int("SUBTITLE_Y_TOP", -1, minimum=-1),  # 原片像素坐标；top/bot 同时有效时贴合原字幕带
+    "subtitle_y_top": env_int("SUBTITLE_Y_TOP", -1, minimum=-1),  # 自动旋转后的显示画布坐标；top/bot 同时有效时贴合原字幕带
     "subtitle_y_bot": env_int("SUBTITLE_Y_BOT", -1, minimum=-1),
     "narration_delay_seconds": 1.5,  # 解说延迟放置秒数，让画面先出现再解说（仅用于段落起点）
     "narration_tighten": env_bool("NARRATION_TIGHTEN", True),  # 段落内把句子紧贴上一句实际收尾播放，句间间隔稳定≤tight_pause，杜绝"一句解说一段空白"的卡顿

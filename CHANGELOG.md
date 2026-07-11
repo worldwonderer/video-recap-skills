@@ -11,9 +11,15 @@ All notable changes to this project are documented here. This project adheres to
 - **半透明、解说时段遮罩。** 显式启用原字幕遮罩后，默认改为 `SUBTITLE_MASK_OPACITY=0.6`、`SOURCE_SUBTITLE_MASK_TIMING=narration`，原声留白不再常驻黑条；仍可设为 `1` / `all` 恢复全黑全时段效果。
 - **参考音色解说。** recap / voiceover 新增 `--voice-ref`，通过 `mimo-v2.5-tts-voiceclone` 给普通解说克隆音色；新生成时参考音频惰性转码一次、最长取 30 秒，内容与转码版本指纹参与 TTS 缓存校验。
 
+### 修复
+
+- 亮色画面不再把整片背景误并为字幕候选；测量结果按源隔离，失败时保留上一轮成功产物。
+- 校订版原声字幕使用逐窗口全不透明遮罩，避免与原片硬字幕重影；测量坐标拒绝不兼容的非底部 ASS 对齐。
+- voice reference 使用同一不可变快照完成转码和缓存标识，进程内重复调用不再继承上一次音色；CLI 与环境变量统一提前校验。
+
 ### 验证
 
-- 全套 `python3 scripts/test.py` 通过（703 tests）；`ruff`、`compileall`、修改模块 `mypy` clean。
+- 全套 `python3 scripts/test.py` 通过（715 tests）；`ruff`、`compileall`、修改模块 `mypy` clean。
 - 真实 ffmpeg 合成字幕样片验证：测量工具识别 `y=[613,636]`；遮罩像素在留白帧为 `128`、解说帧为 `51`。
 
 

@@ -725,7 +725,7 @@ def _validate_measured_subtitle_coordinate_domain(canvas=None):
 
 
 def _style_for_measured_subtitle_band(style, canvas=None):
-    """Fit the ASS baseline and font into explicit source-frame Y coordinates."""
+    """Fit the ASS baseline and font into explicit auto-rotated display-frame Y coordinates."""
     style = dict(style)
     y_top = int(CONFIG.get("subtitle_y_top", -1))
     y_bot = int(CONFIG.get("subtitle_y_bot", -1))
@@ -739,6 +739,12 @@ def _style_for_measured_subtitle_band(style, canvas=None):
         raise ValueError(
             f"字幕带坐标无效: top={y_top}, bot={y_bot}, 画布高度={canvas_h}；"
             "必须满足 0 <= top < bot <= height"
+        )
+    alignment = int(style.get("alignment", 2))
+    if alignment not in {1, 2, 3}:
+        raise ValueError(
+            "measured subtitle coordinates require a bottom-aligned ASS style "
+            f"(SUBTITLE_ALIGNMENT 1/2/3); got {alignment}"
         )
     scale_y = float(style["play_res_y"]) / canvas_h
     style["margin_v"] = max(0, round((canvas_h - y_bot) * scale_y))
@@ -2140,7 +2146,9 @@ def _apply_narration_speed(tts_segments, work_dir):
     log(f"解说整体提速: atempo={factor:.2f} ({done} 段)")
 
 
-def _source_subtitle_mask_filter(canvas=None, work_dir=None, tts_segments=None):
+def _source_subtitle_mask_filter(
+    canvas=None, work_dir=None, tts_segments=None, video_duration=None
+):
     """Return source-subtitle drawbox filters, optionally scoped to narration windows.
 
     Many source videos (e.g. 庆余年) ship hardcoded subtitles; without this the recap
@@ -2152,8 +2160,6 @@ def _source_subtitle_mask_filter(canvas=None, work_dir=None, tts_segments=None):
     if not policy.get("active"):
         return None
     opacity = max(0.0, min(1.0, float(CONFIG.get("subtitle_mask_opacity", 0.6))))
-    if opacity <= 0:
-        return None
 
     _validate_measured_subtitle_coordinate_domain(canvas)
 
@@ -2184,29 +2190,44 @@ def _source_subtitle_mask_filter(canvas=None, work_dir=None, tts_segments=None):
     timing = str(CONFIG.get("source_subtitle_mask_timing", "narration") or "narration").lower()
     if timing not in {"all", "narration"}:
         timing = "narration"
-    if timing != "narration":
-        return base
-    if not tts_segments:
-        return None
+    filters = []
+    if timing == "all" and opacity > 0:
+        filters.append(base)
+    elif timing == "narration" and opacity > 0:
+        windows = []
+        for seg in tts_segments or []:
+            if not isinstance(seg, dict):
+                continue
+            start, end = _seg_place_window(seg)
+            try:
+                start, end = float(start), float(end)
+            except (TypeError, ValueError):
+                continue
+            if end <= start:
+                continue
+            windows.append((start, end, 0.0))
+        # Avoid overlapping drawboxes: stacking two 60%-black masks would darken the overlap
+        # to 84%. Coalescing also keeps long filter chains smaller.
+        filters.extend(
+            f"{base}:enable='between(t,{start:.3f},{end:.3f})'"
+            for start, end, _ in coalesce_duck_windows(windows, bridge=0.001)
+        )
 
-    windows = []
-    for seg in tts_segments:
-        if not isinstance(seg, dict):
-            continue
-        start, end = _seg_place_window(seg)
-        try:
-            start, end = float(start), float(end)
-        except (TypeError, ValueError):
-            continue
-        if end <= start:
-            continue
-        windows.append((start, end, 0.0))
-    # Avoid overlapping drawboxes: stacking two 60%-black masks would darken the overlap
-    # to 84%. Coalescing also keeps long filter chains smaller.
-    filters = [
-        f"{base}:enable='between(t,{start:.3f},{end:.3f})'"
-        for start, end, _ in coalesce_duck_windows(windows, bridge=0.001)
-    ]
+    # A translucent mask deliberately leaves the source glyphs visible. Whenever we burn a
+    # replacement original-dialogue subtitle into a gap, cover that exact window opaquely first;
+    # otherwise the source hard-sub and replacement text are stacked on top of each other.
+    if video_duration is not None and not (timing == "all" and opacity >= 1.0 - 1e-9):
+        replacement_entries = _original_gap_subtitle_entries(
+            tts_segments or [], work_dir, video_duration
+        )
+        replacement_windows = [
+            (entry["start"], entry["end"], 0.0) for entry in replacement_entries
+        ]
+        opaque = f"drawbox={geometry}:color=black@1.00:t=fill"
+        filters.extend(
+            f"{opaque}:enable='between(t,{start:.3f},{end:.3f})'"
+            for start, end, _ in coalesce_duck_windows(replacement_windows, bridge=0.001)
+        )
     return ",".join(filters) if filters else None
 
 
@@ -2216,7 +2237,7 @@ def _source_subtitle_mask_covers_gaps(work_dir=None):
         return False
     opacity = max(0.0, min(1.0, float(CONFIG.get("subtitle_mask_opacity", 0.6))))
     timing = str(CONFIG.get("source_subtitle_mask_timing", "narration") or "narration").lower()
-    return opacity > 0 and timing == "all"
+    return opacity >= 1.0 - 1e-9 and timing == "all"
 
 
 def _seg_place_window(seg):
@@ -2379,7 +2400,9 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
     _emit_timeline(input_video, tts_segments, work_dir, video_duration, has_bgm)
 
     overlay_filters, overlay_qc = _visual_overlay_filters(work_dir, canvas, video_duration)
-    mask_filter = _source_subtitle_mask_filter(canvas, work_dir, tts_segments)
+    mask_filter = _source_subtitle_mask_filter(
+        canvas, work_dir, tts_segments, video_duration=video_duration
+    )
     visual_qc = _build_visual_qc(
         tts_segments,
         work_dir,

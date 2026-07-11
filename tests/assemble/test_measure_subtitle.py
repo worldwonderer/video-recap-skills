@@ -40,6 +40,30 @@ def test_detect_subtitle_band_rejects_narrow_glint():
     assert measure._detect_subtitle_band(width, height, bytes(pixels)) is None
 
 
+def test_detect_subtitle_band_survives_bright_background():
+    width, height = 1280, 720
+    pixels = bytearray([220] * (width * height))
+    for y in range(610, 640):
+        for x in range(300, 980):
+            pixels[y * width + x] = 20 if y in {610, 611, 638, 639} else 240
+
+    band = measure._detect_subtitle_band(width, height, bytes(pixels))
+
+    assert band is not None
+    assert band[0] <= 612
+    assert band[1] >= 637
+
+
+def test_detect_subtitle_band_rejects_continuous_high_contrast_scenery():
+    width = height = 100
+    pixels = bytearray([120] * (width * height))
+    for y in range(50, 100):
+        for x in range(width):
+            pixels[y * width + x] = 20 if x < 50 else 235
+
+    assert measure._detect_subtitle_band(width, height, bytes(pixels)) is None
+
+
 def test_write_positions_json_is_recap_cli_compatible(tmp_path):
     out = tmp_path / "subtitle_positions.json"
     measure._write_positions(out, 1280, 720, 610, 660)
@@ -49,6 +73,16 @@ def test_write_positions_json_is_recap_cli_compatible(tmp_path):
         "subtitle_y_top": 610,
         "subtitle_y_bot": 660,
     }
+
+
+def test_default_output_dir_is_source_specific(tmp_path):
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+
+    assert measure._default_output_dir(first) != measure._default_output_dir(second)
+    assert measure._default_output_dir(first).parent == tmp_path / ".subtitle_measure"
 
 
 def test_prepare_output_dir_preserves_unrelated_files(tmp_path):
@@ -144,6 +178,8 @@ def test_main_uses_auto_rotated_frame_dimensions_for_canvas(monkeypatch, tmp_pat
 
     positions = json.loads((out / "subtitle_positions.json").read_text(encoding="utf-8"))
     assert positions["canvas"] == {"width": 180, "height": 320}
+    assert positions["source"]["path"] == str(video.resolve())
+    assert positions["source"]["source_id"]
     assert 245 < positions["subtitle_y_top"] < positions["subtitle_y_bot"] < 270
     assert list((out / "frames").iterdir()) == []
 
@@ -163,3 +199,34 @@ def test_main_rejects_non_square_pixel_coordinate_domain(monkeypatch, tmp_path, 
 
     assert "SAR 1:1" in capsys.readouterr().err
     assert not out.exists()
+
+
+def test_failed_measurement_preserves_previous_owned_results(monkeypatch, tmp_path):
+    video = tmp_path / "input.mp4"
+    video.write_bytes(b"video")
+    out = tmp_path / "measure"
+    out.mkdir()
+    (out / measure._OWNER_MARKER).write_text(measure._OWNER_MARKER_CONTENT, encoding="utf-8")
+    (out / "preview").mkdir()
+    old_preview = out / "preview" / "old.png"
+    old_preview.write_bytes(b"old-preview")
+    old_positions = out / "subtitle_positions.json"
+    old_positions.write_text('{"old": true}\n', encoding="utf-8")
+
+    monkeypatch.setattr(measure, "_probe_video", lambda path: (100, 100, 5.0, "1:1"))
+    monkeypatch.setattr(measure, "_sample_times", lambda *args: [1.0])
+
+    def fake_extract(_video, _timestamp, output):
+        output.write_bytes(b"P5\n100 100\n255\n" + bytes([120]) * 10000)
+
+    monkeypatch.setattr(measure, "_extract_gray_frame", fake_extract)
+
+    try:
+        measure.main([str(video), "--out-dir", str(out), "--frames", "1", "--accept-detected"])
+    except SystemExit as exc:
+        assert "未检测到可靠字幕带" in str(exc)
+    else:
+        raise AssertionError("empty detection must fail")
+
+    assert old_preview.read_bytes() == b"old-preview"
+    assert old_positions.read_text(encoding="utf-8") == '{"old": true}\n'

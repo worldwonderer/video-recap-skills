@@ -166,12 +166,14 @@ python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 \
   --subtitle-y-top 610 --subtitle-y-bot 660
 ```
 
-The measurement tool still uses only stdlib + ffmpeg. It writes grid/red-band previews under
-`.subtitle_measure/preview/` plus `subtitle_positions.json`; omit `--accept-detected` to inspect
-and confirm the coordinates interactively. Measured coordinates currently require square-pixel
-(SAR `1:1`) video so filter pixels are not mixed with ASS display coordinates. Tune with
+The measurement tool still uses only stdlib + ffmpeg. For each source it writes grid/red-band
+previews under `.subtitle_measure/<video-source-id>/preview/` plus a source-identified
+`subtitle_positions.json`; omit `--accept-detected` to inspect and confirm the coordinates
+interactively. Coordinates use ffmpeg's auto-rotated display canvas and currently require
+square-pixel (SAR `1:1`) video plus bottom-aligned subtitles (`SUBTITLE_ALIGNMENT=1|2|3`). Tune with
 `SUBTITLE_MASK_OPACITY` (`0..1`) and
-`SOURCE_SUBTITLE_MASK_TIMING=all|narration`.
+`SOURCE_SUBTITLE_MASK_TIMING=all|narration`. Windows containing replacement original-dialogue
+subtitles are masked opaquely so they cannot stack over the source hard subtitles.
 
 Clone an arbitrary reference voice for recap narration (distinct from full-track translation in
 `--edit-mode dub`):

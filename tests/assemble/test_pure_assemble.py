@@ -274,6 +274,36 @@ def test_source_subtitle_mask_can_follow_custom_band_and_narration_windows(monke
     assert "between(t,5.000,6.000)" in filt
 
 
+@pytest.mark.parametrize("configured_opacity", [0.0, 0.6])
+def test_source_subtitle_mask_opaquely_covers_byo_gap_subtitles(
+    monkeypatch, tmp_path, configured_opacity
+):
+    monkeypatch.setitem(CONFIG, "burn_subtitles", True)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", True)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_policy", "opt_in")
+    monkeypatch.setitem(CONFIG, "subtitle_y_top", 610)
+    monkeypatch.setitem(CONFIG, "subtitle_y_bot", 660)
+    monkeypatch.setitem(CONFIG, "subtitle_mask_opacity", configured_opacity)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_timing", "narration")
+    (tmp_path / "user_subtitles.json").write_text(
+        json.dumps([{"start": 1.0, "end": 4.0, "text": "用户校订原声"}]),
+        encoding="utf-8",
+    )
+
+    filt = _source_subtitle_mask_filter(
+        {"width": 1280, "height": 720},
+        tmp_path,
+        [{"actual_place_start": 5.0, "actual_place_end": 8.0, "narration": "解说"}],
+        video_duration=10.0,
+    )
+
+    if configured_opacity > 0:
+        assert "color=black@0.60" in filt
+        assert "between(t,5.000,8.000)" in filt
+    assert "color=black@1.00" in filt
+    assert "between(t,1.000,4.000)" in filt
+
+
 def test_source_subtitle_mask_coalesces_overlaps_to_avoid_double_opacity(monkeypatch):
     monkeypatch.setitem(CONFIG, "burn_subtitles", True)
     monkeypatch.setitem(CONFIG, "mask_source_subtitles", True)
@@ -325,6 +355,19 @@ def test_generate_ass_rejects_measured_band_outside_canvas(monkeypatch, tmp_path
     with pytest.raises(ValueError, match="字幕带坐标无效"):
         _generate_ass(
             [{"start": 0.0, "end": 1.0, "narration": "越界"}],
+            tmp_path,
+            canvas={"width": 1280, "height": 720},
+        )
+
+
+def test_generate_ass_rejects_non_bottom_alignment_for_measured_band(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "subtitle_y_top", 610)
+    monkeypatch.setitem(CONFIG, "subtitle_y_bot", 650)
+    monkeypatch.setitem(CONFIG, "subtitle_alignment", 8)
+
+    with pytest.raises(ValueError, match="bottom-aligned"):
+        _generate_ass(
+            [{"start": 0.0, "end": 1.0, "narration": "不能贴合"}],
             tmp_path,
             canvas={"width": 1280, "height": 720},
         )

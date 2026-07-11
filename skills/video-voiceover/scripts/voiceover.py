@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -189,6 +190,18 @@ def _build_tts_meta(segments, engine, narration_name, failures=None):
 def synthesize_tts(narration, work_dir):
     """合成解说音频（并行）"""
     synthesize_tts.last_failures = []
+    voice_ref = str(CONFIG.get("voice_ref") or "").strip()
+    if voice_ref:
+        # Prepared bytes are invocation-scoped. Re-hash the live source once for the cache-only
+        # probe; if fresh synthesis is needed, a stable snapshot below becomes the one identity
+        # used by both the API request and the final segment cache keys.
+        for key in (
+            "voice_ref_b64",
+            "voice_ref_snapshot_path",
+            "voice_ref_source_signature",
+            "voice_ref_fingerprint",
+        ):
+            CONFIG.pop(key, None)
     tts_dir = work_dir / "tts_segments"
     tts_dir.mkdir(exist_ok=True)
 
@@ -222,6 +235,9 @@ def synthesize_tts(narration, work_dir):
     if engine == "mimo-tts" and not CONFIG.get("mimo_tts_api_key"):
         key_name = CONFIG.get("mimo_tts_api_key_source", "MIMO_API_KEY")
         raise RuntimeError(f"请设置 {key_name} 环境变量用于 MiMo TTS")
+
+    if voice_ref:
+        _cache_prepared_voice_reference(voice_ref)
 
     log(f"TTS 引擎: {engine}")
 
@@ -596,6 +612,13 @@ def _voice_reference_fingerprint(ref_path):
     ref = Path(ref_path).expanduser()
     if not ref.is_file():
         return f"missing:{ref.resolve()}"
+    resolved = str(ref.resolve())
+    if (
+        CONFIG.get("voice_ref_b64")
+        and CONFIG.get("voice_ref_snapshot_path") == resolved
+        and CONFIG.get("voice_ref_fingerprint")
+    ):
+        return CONFIG["voice_ref_fingerprint"]
     signature = _voice_reference_signature(ref)
     if (
         CONFIG.get("voice_ref_source_signature") == signature
@@ -610,16 +633,27 @@ def _voice_reference_fingerprint(ref_path):
 
 def _cache_prepared_voice_reference(ref_path):
     with _VOICE_REFERENCE_LOCK:
-        signature = _voice_reference_signature(ref_path)
+        ref = Path(ref_path).expanduser().resolve()
+        signature = _voice_reference_signature(ref)
         if (
             CONFIG.get("voice_ref_b64")
-            and CONFIG.get("voice_ref_source_signature") == signature
+            and CONFIG.get("voice_ref_snapshot_path") == str(ref)
         ):
             return CONFIG["voice_ref_b64"]
-        encoded = _prepare_voice_reference(ref_path)
+        if not ref.is_file():
+            raise FileNotFoundError(f"参考音频不存在或不是文件: {ref}")
+        # ffmpeg and the cache fingerprint must consume the same immutable bytes. Copy first,
+        # then derive both the normalized WAV and identity from that snapshot rather than reading
+        # a caller-mutable source twice.
+        with tempfile.TemporaryDirectory(prefix="video-recap-voice-ref-snapshot-") as temp_dir:
+            snapshot = Path(temp_dir) / f"source{ref.suffix or '.audio'}"
+            shutil.copyfile(ref, snapshot)
+            fingerprint = file_fingerprint(snapshot)
+            encoded = _prepare_voice_reference(snapshot)
         CONFIG["voice_ref_b64"] = encoded
+        CONFIG["voice_ref_snapshot_path"] = str(ref)
         CONFIG["voice_ref_source_signature"] = signature
-        CONFIG["voice_ref_fingerprint"] = file_fingerprint(Path(ref_path).expanduser())
+        CONFIG["voice_ref_fingerprint"] = fingerprint
         return encoded
 
 
@@ -631,9 +665,16 @@ def _tts_mimo(text, output_path, rate="+0%", pitch="+0Hz", emotion=None):
     voice_ref = str(CONFIG.get("voice_ref") or "").strip()
     voice_ref_b64 = CONFIG.get("voice_ref_b64")
     if voice_ref:
+        resolved = str(Path(voice_ref).expanduser().resolve())
+        snapshot_path = CONFIG.get("voice_ref_snapshot_path")
         cached_signature = CONFIG.get("voice_ref_source_signature")
-        if not voice_ref_b64 or (
-            cached_signature and cached_signature != _voice_reference_signature(voice_ref)
+        legacy_cache_valid = (
+            voice_ref_b64
+            and not snapshot_path
+            and cached_signature == _voice_reference_signature(voice_ref)
+        )
+        if not voice_ref_b64 or not (
+            snapshot_path == resolved or legacy_cache_valid
         ):
             voice_ref_b64 = _cache_prepared_voice_reference(voice_ref)
     payload = {
@@ -684,15 +725,19 @@ def main():
                     help="allow output when some narration segments fail TTS")
     args = ap.parse_args()
     work_dir = Path(args.work_dir)
+    effective_voice_ref = (
+        args.voice_ref if args.voice_ref is not None else os.environ.get("VOICE_REF", "").strip()
+    )
+    CONFIG["voice_ref"] = effective_voice_ref
+    for key in (
+        "voice_ref_b64",
+        "voice_ref_snapshot_path",
+        "voice_ref_fingerprint",
+        "voice_ref_source_signature",
+    ):
+        CONFIG.pop(key, None)
     if args.mimo_voice:
         CONFIG["mimo_tts_voice"] = args.mimo_voice
-    if args.voice_ref:
-        CONFIG["voice_ref"] = args.voice_ref
-        # main() can be called repeatedly in-process by embedders/tests. A new CLI reference
-        # must not inherit prepared bytes or identity from the previous invocation.
-        CONFIG.pop("voice_ref_b64", None)
-        CONFIG.pop("voice_ref_fingerprint", None)
-        CONFIG.pop("voice_ref_source_signature", None)
     if args.mimo_voice and CONFIG.get("voice_ref"):
         ap.error("--mimo-voice and --voice-ref are mutually exclusive")
     # Voice-reference normalization is intentionally lazy: a fully cached rerun should not

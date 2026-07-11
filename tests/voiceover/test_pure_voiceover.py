@@ -1,4 +1,5 @@
 import sys
+import json
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-voiceover' / 'scripts'))
 import pytest  # noqa: F401
@@ -463,6 +464,63 @@ def test_mimo_tts_refreshes_cached_reference_when_source_changes(monkeypatch, tm
 
     assert seen[0]["audio"]["voice"] == "data:audio/wav;base64,ZnJlc2g="
     assert CONFIG["voice_ref_source_signature"] == voiceover._voice_reference_signature(second)
+
+
+def test_main_clears_previous_cli_voice_reference_between_invocations(monkeypatch, tmp_path):
+    narration = tmp_path / "narration.json"
+    narration.write_text("[]", encoding="utf-8")
+    ref = tmp_path / "first.wav"
+    ref.write_bytes(b"reference")
+    seen = []
+
+    def fake_synthesize(_narration, _work_dir):
+        seen.append(CONFIG.get("voice_ref"))
+        fake_synthesize.last_failures = []
+        return [], "mimo-tts"
+
+    monkeypatch.delenv("VOICE_REF", raising=False)
+    monkeypatch.setattr(voiceover, "synthesize_tts", fake_synthesize)
+    monkeypatch.setattr(sys, "argv", [
+        "voiceover.py", "--work-dir", str(tmp_path), "--voice-ref", str(ref),
+    ])
+    voiceover.main()
+    monkeypatch.setattr(sys, "argv", ["voiceover.py", "--work-dir", str(tmp_path)])
+    voiceover.main()
+
+    assert seen == [str(ref), ""]
+
+
+def test_fresh_voiceclone_keys_match_the_prepared_reference_snapshot(monkeypatch, tmp_path):
+    narration = [{"start": 0.0, "end": 2.0, "narration": "快照一致。"}]
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"first-reference")
+    monkeypatch.setitem(CONFIG, "voice_ref", str(ref))
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "tp-test")
+    monkeypatch.setitem(CONFIG, "tts_dynamic_params", False)
+    prepared_fingerprints = []
+
+    def fake_prepare(snapshot):
+        prepared_fingerprints.append(voiceover.file_fingerprint(snapshot))
+        return "c25hcHNob3Q="
+
+    def fake_engine(_engine, _text, output_wav, **_kwargs):
+        output_wav.write_bytes(b"audio")
+
+    monkeypatch.setattr(voiceover, "_prepare_voice_reference", fake_prepare)
+    monkeypatch.setattr(voiceover, "_run_tts_engine", fake_engine)
+    monkeypatch.setattr(voiceover, "_get_audio_duration", lambda path: 1.0)
+    monkeypatch.setattr(voiceover, "_maybe_normalize_tts_wav", lambda path: None)
+
+    segments, _engine = synthesize_tts(narration, tmp_path)
+    cache = voiceover._tts_segment_cache_path(Path(segments[0]["audio_path"]))
+    cache_key = json.loads(cache.read_text(encoding="utf-8"))["cache_key"]
+    expected = voiceover._tts_segment_cache_key(
+        "mimo-tts", 0, narration[0], "快照一致。", "+0%", "+0Hz"
+    )
+
+    assert prepared_fingerprints
+    assert CONFIG["voice_ref_fingerprint"] == prepared_fingerprints[0]
+    assert cache_key == expected
 
 
 def test_mimo_tts_injects_per_beat_emotion(monkeypatch, tmp_path):

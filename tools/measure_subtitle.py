@@ -7,11 +7,13 @@ coordinates can be passed to recap.py with ``--subtitle-y-top/--subtitle-y-bot``
 """
 
 import argparse
+import hashlib
 import json
 import random
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from statistics import median
 
@@ -109,33 +111,47 @@ def _detect_subtitle_band(width, height, pixels):
     """
     lower = height // 2
     min_bright = max(3, round(width * 0.01))
+    max_extreme = max(min_bright, round(width * 0.90))
+    min_height = max(4, round(height * 0.008))
+    max_height = max(12, round(height * 0.09))
     active_rows = []
     for y in range(lower, height):
         row = pixels[y * width:(y + 1) * width]
-        if sum(value >= 210 for value in row) >= min_bright:
+        bright = sum(value >= 210 for value in row)
+        dark = sum(value <= 70 for value in row)
+        # Uniform bright/dark footage is background, not text. Keep rows where a bounded
+        # bright or dark run introduces local contrast; outlined glyphs contribute both, while
+        # white text on a dark scene (and vice versa) contributes one bounded extreme.
+        if min_bright <= bright <= max_extreme or min_bright <= dark <= max_extreme:
             active_rows.append(y)
     if not active_rows:
         return None
 
     groups, start, previous = [], active_rows[0], active_rows[0]
     for y in active_rows[1:]:
-        if y - previous > 3:
+        # A bright fill may be indistinguishable from a bright background between the top and
+        # bottom outline rows. Bridge a real hole only while the entire candidate remains within
+        # the maximum plausible subtitle height. Do not split one continuously active scenic
+        # region into subtitle-sized chunks; leave it oversized so the height gate rejects it.
+        if y - previous > 3 and y - start + 1 > max_height:
             groups.append((start, previous))
             start = y
         previous = y
     groups.append((start, previous))
 
-    min_height = max(4, round(height * 0.008))
-    max_height = max(12, round(height * 0.09))
     best = None
     for top, bottom in groups:
         band_height = bottom - top + 1
         if not min_height <= band_height <= max_height:
             continue
-        # Bright glyph rows usually exclude the dark outline itself; widen slightly so
-        # contrast scoring and returned coordinates include the whole rendered text band.
-        top = max(lower, top - 1)
-        bottom = min(height - 1, bottom + 1)
+        # Bright-only seed rows usually exclude the dark outline itself; widen only when the
+        # boundary row did not already include a meaningful dark outline.
+        top_row = pixels[top * width:(top + 1) * width]
+        bottom_row = pixels[bottom * width:(bottom + 1) * width]
+        if sum(value <= 70 for value in top_row) < min_bright:
+            top = max(lower, top - 1)
+        if sum(value <= 70 for value in bottom_row) < min_bright:
+            bottom = min(height - 1, bottom + 1)
         band_height = bottom - top + 1
         bright_columns = 0
         dark_pixels = 0
@@ -180,12 +196,32 @@ def _write_preview(video, timestamp, output, band):
         raise RuntimeError(result.stderr.strip() or f"preview render failed at {timestamp:.3f}s")
 
 
-def _write_positions(path, width, height, y_top, y_bot):
+def _source_metadata(path):
+    source = Path(path).expanduser().resolve()
+    stat = source.stat()
+    identity_payload = f"{source}\0{stat.st_size}\0{stat.st_mtime_ns}".encode("utf-8")
+    return {
+        "path": str(source),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+        "source_id": hashlib.sha256(identity_payload).hexdigest()[:16],
+    }
+
+
+def _default_output_dir(video):
+    video = Path(video).expanduser().resolve()
+    source_id = _source_metadata(video)["source_id"]
+    return video.parent / ".subtitle_measure" / f"{video.stem}-{source_id}"
+
+
+def _write_positions(path, width, height, y_top, y_bot, source=None):
     payload = {
         "canvas": {"width": int(width), "height": int(height)},
         "subtitle_y_top": int(y_top),
         "subtitle_y_bot": int(y_bot),
     }
+    if source is not None:
+        payload["source"] = _source_metadata(source)
     Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return payload
 
@@ -208,8 +244,8 @@ def _prompt_coordinate(label, suggested):
         return suggested
 
 
-def _prepare_output_dir(out_dir):
-    """Reset only artifacts in a directory previously claimed by this tool."""
+def _claim_output_dir(out_dir):
+    """Claim an empty directory or validate this tool's existing ownership marker."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     marker = out_dir / _OWNER_MARKER
@@ -224,6 +260,12 @@ def _prepare_output_dir(out_dir):
         if any(out_dir.iterdir()):
             raise RuntimeError(f"拒绝认领非空且未标记的输出目录: {out_dir}")
         marker.write_text(_OWNER_MARKER_CONTENT, encoding="utf-8")
+    return out_dir
+
+
+def _prepare_output_dir(out_dir):
+    """Reset only artifacts in a directory previously claimed by this tool."""
+    out_dir = _claim_output_dir(out_dir)
     for name in ("frames", "preview"):
         managed_dir = out_dir / name
         if managed_dir.is_symlink() or managed_dir.is_file():
@@ -237,6 +279,28 @@ def _prepare_output_dir(out_dir):
     frames_dir.mkdir()
     preview_dir.mkdir()
     return frames_dir, preview_dir
+
+
+def _prepare_staged_output(out_dir):
+    """Create an isolated run directory while leaving the last successful result intact."""
+    out_dir = _claim_output_dir(out_dir)
+    staging = Path(tempfile.mkdtemp(prefix=".measure-staging-", dir=out_dir))
+    frames_dir, preview_dir = staging / "frames", staging / "preview"
+    frames_dir.mkdir()
+    preview_dir.mkdir()
+    return staging, frames_dir, preview_dir
+
+
+def _commit_staged_output(out_dir, staging):
+    out_dir, staging = Path(out_dir), Path(staging)
+    for name in ("frames", "preview", "subtitle_positions.json"):
+        source = staging / name
+        target = out_dir / name
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
+        source.replace(target)
 
 
 def main(argv=None):
@@ -259,46 +323,52 @@ def main(argv=None):
         parser.error(
             f"当前坐标测量仅支持方形像素视频 (SAR 1:1)；当前 SAR={sar}"
         )
-    out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else video.parent / ".subtitle_measure"
-    frames_dir, preview_dir = _prepare_output_dir(out_dir)
+    out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else _default_output_dir(video)
+    staging, frames_dir, preview_dir = _prepare_staged_output(out_dir)
 
-    detections = []
-    canvas_width = canvas_height = None
-    for index, timestamp in enumerate(_sample_times(duration, args.frames, args.start_sec)):
-        pgm = frames_dir / f"frame_{index:03d}_{timestamp:.2f}s.pgm"
-        _extract_gray_frame(video, timestamp, pgm)
-        frame_w, frame_h, pixels = _read_pgm(pgm)
-        if canvas_width is None:
-            canvas_width, canvas_height = frame_w, frame_h
-        elif (frame_w, frame_h) != (canvas_width, canvas_height):
-            raise RuntimeError(
-                f"抽帧尺寸不一致: {(frame_w, frame_h)} != {(canvas_width, canvas_height)}"
-            )
-        band = _detect_subtitle_band(frame_w, frame_h, pixels)
-        pgm.unlink(missing_ok=True)
-        if band:
-            preview = preview_dir / f"frame_{index:03d}_{timestamp:.2f}s.png"
-            _write_preview(video, timestamp, preview, band)
-            detections.append(band)
+    try:
+        detections = []
+        canvas_width = canvas_height = None
+        for index, timestamp in enumerate(_sample_times(duration, args.frames, args.start_sec)):
+            pgm = frames_dir / f"frame_{index:03d}_{timestamp:.2f}s.pgm"
+            _extract_gray_frame(video, timestamp, pgm)
+            frame_w, frame_h, pixels = _read_pgm(pgm)
+            if canvas_width is None:
+                canvas_width, canvas_height = frame_w, frame_h
+            elif (frame_w, frame_h) != (canvas_width, canvas_height):
+                raise RuntimeError(
+                    f"抽帧尺寸不一致: {(frame_w, frame_h)} != {(canvas_width, canvas_height)}"
+                )
+            band = _detect_subtitle_band(frame_w, frame_h, pixels)
+            pgm.unlink(missing_ok=True)
+            if band:
+                preview = preview_dir / f"frame_{index:03d}_{timestamp:.2f}s.png"
+                _write_preview(video, timestamp, preview, band)
+                detections.append(band)
 
-    if not detections:
-        raise SystemExit("未检测到可靠字幕带；可增加 --frames 或降低 --start-sec 后重试")
-    suggested_top = round(median(top for top, _ in detections))
-    suggested_bot = round(median(bottom for _, bottom in detections))
-    width, height = int(canvas_width), int(canvas_height)
-    print(f"检测到字幕帧 {len(detections)}/{args.frames}，预览: {preview_dir}")
-    print(f"建议字幕带: y=[{suggested_top}, {suggested_bot}]")
-    if args.accept_detected:
-        y_top, y_bot = suggested_top, suggested_bot
-    else:
-        print("请查看红框预览；直接回车接受建议值。")
-        y_top = _prompt_coordinate("字幕上沿 y_top", suggested_top)
-        y_bot = _prompt_coordinate("字幕下沿 y_bot", suggested_bot)
-    if not 0 <= y_top < y_bot <= height:
-        raise SystemExit(f"坐标无效，必须满足 0 <= top < bot <= {height}")
+        if not detections:
+            raise SystemExit("未检测到可靠字幕带；可增加 --frames 或降低 --start-sec 后重试")
+        suggested_top = round(median(top for top, _ in detections))
+        suggested_bot = round(median(bottom for _, bottom in detections))
+        width, height = int(canvas_width), int(canvas_height)
+        print(f"检测到字幕帧 {len(detections)}/{args.frames}，预览: {out_dir / 'preview'}")
+        print(f"建议字幕带: y=[{suggested_top}, {suggested_bot}]")
+        if args.accept_detected:
+            y_top, y_bot = suggested_top, suggested_bot
+        else:
+            print("请查看红框预览；直接回车接受建议值。")
+            y_top = _prompt_coordinate("字幕上沿 y_top", suggested_top)
+            y_bot = _prompt_coordinate("字幕下沿 y_bot", suggested_bot)
+        if not 0 <= y_top < y_bot <= height:
+            raise SystemExit(f"坐标无效，必须满足 0 <= top < bot <= {height}")
+
+        staged_positions = staging / "subtitle_positions.json"
+        _write_positions(staged_positions, width, height, y_top, y_bot, source=video)
+        _commit_staged_output(out_dir, staging)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
     positions = out_dir / "subtitle_positions.json"
-    _write_positions(positions, width, height, y_top, y_bot)
     print(f"坐标文件: {positions}")
     print(f"使用: python3 skills/video-recap/scripts/recap.py {video} "
           f"--subtitle-y-top {y_top} --subtitle-y-bot {y_bot}")

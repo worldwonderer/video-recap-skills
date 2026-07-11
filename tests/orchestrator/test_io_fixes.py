@@ -975,6 +975,37 @@ def test_recap_rejects_global_subtitle_band_for_multi_source_cut(monkeypatch, tm
     assert "多视频 cut 暂不支持" in capsys.readouterr().err
 
 
+def test_recap_rejects_global_subtitle_band_from_environment_for_multi_source_cut(
+    monkeypatch, tmp_path, capsys
+):
+    videos = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
+    for video in videos:
+        video.write_bytes(b"source")
+    monkeypatch.setenv("SUBTITLE_Y_TOP", "100")
+    monkeypatch.setenv("SUBTITLE_Y_BOT", "130")
+    monkeypatch.setattr(sys, "argv", ["recap.py", *map(str, videos), "--edit-mode", "cut"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        recap.main()
+    assert exc_info.value.code == 2
+    assert "多视频 cut 暂不支持" in capsys.readouterr().err
+
+
+def test_recap_fails_fast_and_absolutizes_voice_reference(monkeypatch, tmp_path, capsys):
+    video = tmp_path / "input.mp4"
+    video.write_bytes(b"source")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("recap._preflight_burn_subtitles", lambda args: None)
+    monkeypatch.setattr("recap._understand_args_for_source", lambda *args: [])
+    monkeypatch.setattr("recap._run_or_restore_understanding", lambda *args: None)
+    monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--voice-ref", "missing.wav"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        recap.main()
+    assert exc_info.value.code == 2
+    assert "reference audio does not exist" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "effect_args, message",
     [

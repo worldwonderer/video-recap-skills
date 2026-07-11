@@ -13,7 +13,7 @@ def _burn_on(monkeypatch):
     monkeypatch.setitem(assemble.CONFIG, "mask_source_subtitles", True)
     monkeypatch.setitem(assemble.CONFIG, "source_subtitle_mask_policy", "opt_in")
     monkeypatch.setitem(assemble.CONFIG, "source_subtitle_mask_timing", "all")
-    monkeypatch.setitem(assemble.CONFIG, "subtitle_mask_opacity", 0.6)
+    monkeypatch.setitem(assemble.CONFIG, "subtitle_mask_opacity", 1.0)
     monkeypatch.setitem(assemble.CONFIG, "subtitle_original_in_gaps", True)
 
 
@@ -144,6 +144,19 @@ def test_original_gap_entries_suppressed_when_mask_is_transparent(monkeypatch, t
     monkeypatch.setitem(assemble.CONFIG, "subtitle_mask_opacity", 0.0)
     (tmp_path / "asr_result.json").write_text(
         json.dumps([{"start": 1.0, "end": 4.0, "text": "原声已自带硬字幕"}]), encoding="utf-8"
+    )
+
+    assert assemble._original_gap_subtitle_entries([], tmp_path, 10.0) == []
+
+
+def test_original_gap_entries_suppressed_when_full_timeline_mask_is_translucent(
+    monkeypatch, tmp_path
+):
+    _burn_on(monkeypatch)
+    monkeypatch.setitem(assemble.CONFIG, "subtitle_mask_opacity", 0.6)
+    (tmp_path / "asr_result.json").write_text(
+        json.dumps([{"start": 1.0, "end": 4.0, "text": "原声仍透过遮罩可见"}]),
+        encoding="utf-8",
     )
 
     assert assemble._original_gap_subtitle_entries([], tmp_path, 10.0) == []

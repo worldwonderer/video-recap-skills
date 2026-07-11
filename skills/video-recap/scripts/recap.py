@@ -195,6 +195,17 @@ def _env_bool(name, default=False):
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _optional_env_int(name):
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer; got {raw!r}") from exc
+    return None if value == -1 else value
+
+
 def _read_video_duration_or_raise(path):
     """Return media duration via ffprobe, or hard-fail before downstream TTS/render."""
     path = Path(path)
@@ -1182,9 +1193,9 @@ def main():
     ap.add_argument("--burn-subtitles", action=argparse.BooleanOptionalAction, default=None,
                     help="burn narration subtitles into the video (default on; --no-burn-subtitles to disable)")
     ap.add_argument("--subtitle-y-top", type=int, default=None,
-                    help="source-frame pixel Y at the top of the measured subtitle band")
+                    help="auto-rotated display-frame Y at the top of the measured subtitle band")
     ap.add_argument("--subtitle-y-bot", type=int, default=None,
-                    help="source-frame pixel Y at the bottom of the measured subtitle band")
+                    help="auto-rotated display-frame Y at the bottom of the measured subtitle band")
     ap.add_argument("--review-narration", action=argparse.BooleanOptionalAction, default=None,
                     help="run advisory narration quality review before TTS (default on; fail-open)")
     ap.add_argument("--require-narration-review", action="store_true",
@@ -1210,7 +1221,19 @@ def main():
         return
     if not args.video:
         ap.error("video is required (unless --doctor)")
-    if args.mimo_tts_voice and args.voice_ref:
+
+    if args.voice_ref is None:
+        args.voice_ref = os.environ.get("VOICE_REF", "").strip() or None
+    try:
+        if args.subtitle_y_top is None:
+            args.subtitle_y_top = _optional_env_int("SUBTITLE_Y_TOP")
+        if args.subtitle_y_bot is None:
+            args.subtitle_y_bot = _optional_env_int("SUBTITLE_Y_BOT")
+    except ValueError as exc:
+        ap.error(str(exc))
+
+    explicit_mimo_voice = args.mimo_tts_voice or os.environ.get("MIMO_TTS_VOICE", "").strip()
+    if explicit_mimo_voice and args.voice_ref:
         ap.error("--mimo-tts-voice and --voice-ref are mutually exclusive")
     if args.edit_mode == "dub" and args.voice_ref:
         ap.error("--voice-ref is only supported in full/cut modes; dub clones the source voice automatically")
@@ -1240,6 +1263,11 @@ def main():
         # that band. This keeps the visual safety policy explicit without extra CLI ceremony.
         os.environ["MASK_SOURCE_SUBTITLES"] = "1"
         os.environ["SOURCE_SUBTITLE_MASK_POLICY"] = "opt_in"
+    if args.voice_ref:
+        voice_ref = Path(args.voice_ref).expanduser().resolve()
+        if not voice_ref.is_file():
+            ap.error(f"reference audio does not exist or is not a file: {voice_ref}")
+        args.voice_ref = str(voice_ref)
 
     # Fail fast before any expensive understanding/VLM/ASR/TTS work if the run will burn
     # subtitles but this ffmpeg can't (otherwise it only blows up at the final render).

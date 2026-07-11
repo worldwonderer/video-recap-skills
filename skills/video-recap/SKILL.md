@@ -85,7 +85,8 @@ assembles `recap_<name>.mp4`.
 
 For source-pinned subtitles, first run `python3 tools/measure_subtitle.py <video>` from the repo
 root, then pass the measured `--subtitle-y-top/--subtitle-y-bot`; this explicitly enables a 60%
-opaque narration-window mask for that band. For cloned recap narration, pass
+opacity narration-window mask for that band. Coordinates use ffmpeg's auto-rotated display canvas
+and require a bottom-aligned ASS style. For cloned recap narration, pass
 `--voice-ref <audio>` (distinct from dub mode).
 
 ### Dub mode — English→Chinese, original voice (`--edit-mode dub`)
