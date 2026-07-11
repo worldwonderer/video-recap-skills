@@ -3,6 +3,19 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### 新增
+
+- **贴合原片字幕带。** `tools/measure_subtitle.py` 用 stdlib + ffmpeg 抽帧、检测并输出红框预览；`--subtitle-y-top/--subtitle-y-bot` 把新字幕基线与字号适配到测得坐标，并显式启用该区域遮罩。
+- **半透明、解说时段遮罩。** 显式启用原字幕遮罩后，默认改为 `SUBTITLE_MASK_OPACITY=0.6`、`SOURCE_SUBTITLE_MASK_TIMING=narration`，原声留白不再常驻黑条；仍可设为 `1` / `all` 恢复全黑全时段效果。
+- **参考音色解说。** recap / voiceover 新增 `--voice-ref`，通过 `mimo-v2.5-tts-voiceclone` 给普通解说克隆音色；新生成时参考音频惰性转码一次、最长取 30 秒，内容与转码版本指纹参与 TTS 缓存校验。
+
+### 验证
+
+- 全套 `python3 scripts/test.py` 通过（703 tests）；`ruff`、`compileall`、修改模块 `mypy` clean。
+- 真实 ffmpeg 合成字幕样片验证：测量工具识别 `y=[613,636]`；遮罩像素在留白帧为 `128`、解说帧为 `51`。
+
 
 ## [0.3.3] - 2026-06-28
 

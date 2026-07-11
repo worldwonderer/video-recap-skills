@@ -220,6 +220,7 @@ def test_source_subtitle_mask_filter_toggles_with_effective_burn_policy(monkeypa
     monkeypatch.setitem(CONFIG, "mask_source_subtitles", True)
     monkeypatch.setitem(CONFIG, "source_subtitle_mask_policy", "opt_in")
     monkeypatch.setitem(CONFIG, "source_subtitle_mask_ratio", 0.15)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_timing", "all")
     assert _source_subtitle_mask_filter() is None
 
     monkeypatch.setitem(CONFIG, "burn_subtitles", True)
@@ -228,6 +229,122 @@ def test_source_subtitle_mask_filter_toggles_with_effective_burn_policy(monkeypa
 
     monkeypatch.setitem(CONFIG, "source_subtitle_mask_ratio", 0.0)  # ratio 0 still allowed if style band requires it
     assert _source_subtitle_mask_filter() is not None
+
+
+def test_source_subtitle_mask_can_restore_opaque_full_timeline_mode(monkeypatch):
+    """The enhanced default stays reversible for projects that need the old mask look."""
+    monkeypatch.setitem(CONFIG, "burn_subtitles", True)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", True)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_policy", "opt_in")
+    monkeypatch.setitem(CONFIG, "subtitle_mask_opacity", 1.0)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_timing", "all")
+
+    filt = _source_subtitle_mask_filter(
+        {"width": 1280, "height": 720},
+        tts_segments=[{"actual_place_start": 1.0, "actual_place_end": 2.0}],
+    )
+
+    assert "color=black@1.00" in filt
+    assert "enable=" not in filt
+
+
+def test_source_subtitle_mask_can_follow_custom_band_and_narration_windows(monkeypatch):
+    monkeypatch.setitem(CONFIG, "burn_subtitles", True)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", True)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_policy", "opt_in")
+    monkeypatch.setitem(CONFIG, "subtitle_y_top", 610)
+    monkeypatch.setitem(CONFIG, "subtitle_y_bot", 660)
+    monkeypatch.setitem(CONFIG, "subtitle_mask_padding", 4)
+    monkeypatch.setitem(CONFIG, "subtitle_mask_opacity", 0.6)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_timing", "narration")
+
+    filt = _source_subtitle_mask_filter(
+        {"width": 1280, "height": 720},
+        tts_segments=[
+            {"actual_place_start": 1.25, "actual_place_end": 2.5},
+            {"actual_place_start": 4.0, "actual_place_end": 4.0},
+            {"start": 5.0, "end": 6.0},
+        ],
+    )
+
+    assert filt.count("drawbox=") == 2
+    assert "y=606:w=iw:h=58" in filt
+    assert filt.count("color=black@0.60") == 2
+    assert "between(t,1.250,2.500)" in filt
+    assert "between(t,5.000,6.000)" in filt
+
+
+def test_source_subtitle_mask_coalesces_overlaps_to_avoid_double_opacity(monkeypatch):
+    monkeypatch.setitem(CONFIG, "burn_subtitles", True)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", True)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_policy", "opt_in")
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_timing", "narration")
+
+    filt = _source_subtitle_mask_filter(
+        {"width": 1280, "height": 720},
+        tts_segments=[
+            {"actual_place_start": 1.0, "actual_place_end": 2.0},
+            {"actual_place_start": 1.5, "actual_place_end": 3.0},
+        ],
+    )
+
+    assert filt.count("drawbox=") == 1
+    assert "between(t,1.000,3.000)" in filt
+
+
+def test_narration_timed_source_mask_without_narration_draws_nothing(monkeypatch):
+    monkeypatch.setitem(CONFIG, "burn_subtitles", True)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", True)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_policy", "opt_in")
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_timing", "narration")
+
+    assert _source_subtitle_mask_filter(
+        {"width": 1280, "height": 720}, tts_segments=[]
+    ) is None
+
+
+def test_generate_ass_places_subtitle_bottom_on_measured_y(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "subtitle_y_top", 610)
+    monkeypatch.setitem(CONFIG, "subtitle_y_bot", 650)
+
+    ass = _generate_ass(
+        [{"start": 0.0, "end": 1.0, "narration": "贴合原字幕"}],
+        tmp_path,
+        canvas={"width": 1280, "height": 720},
+    ).read_text(encoding="utf-8")
+
+    style_line = next(line for line in ass.splitlines() if line.startswith("Style: Default,"))
+    assert style_line.split(",")[-2] == "70"  # 720 - measured y_bot 650
+    assert style_line.split(",")[2] == "36"  # fit the 42px default into a measured 40px band
+
+
+def test_generate_ass_rejects_measured_band_outside_canvas(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "subtitle_y_top", 700)
+    monkeypatch.setitem(CONFIG, "subtitle_y_bot", 760)
+
+    with pytest.raises(ValueError, match="字幕带坐标无效"):
+        _generate_ass(
+            [{"start": 0.0, "end": 1.0, "narration": "越界"}],
+            tmp_path,
+            canvas={"width": 1280, "height": 720},
+        )
+
+
+def test_measured_band_rejects_non_square_pixel_canvas_from_env_route(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "subtitle_y_top", 300)
+    monkeypatch.setitem(CONFIG, "subtitle_y_bot", 340)
+    canvas = {
+        "width": 720,
+        "height": 1280,
+        "sample_aspect_ratio": "2:1",
+    }
+
+    with pytest.raises(ValueError, match="SAR 1:1"):
+        _generate_ass(
+            [{"start": 0.0, "end": 1.0, "narration": "非方形像素"}],
+            tmp_path,
+            canvas=canvas,
+        )
 
 
 def test_mask_band_stays_one_line_small_when_burning(monkeypatch):
@@ -241,6 +358,7 @@ def test_mask_band_stays_one_line_small_when_burning(monkeypatch):
     monkeypatch.setitem(CONFIG, "subtitle_margin_v", 30)
     monkeypatch.setitem(CONFIG, "subtitle_play_res_y", 720)
     monkeypatch.setitem(CONFIG, "burn_subtitles", True)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_timing", "all")
     import re
     ratio_on = float(re.search(r"ih-ih\*([0-9.]+)", _source_subtitle_mask_filter()).group(1))
     one_line = (30 + 42 * 1.25 + 10) / 720

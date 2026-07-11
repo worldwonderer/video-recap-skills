@@ -10,7 +10,7 @@ from lib import log, run_cmd, get_video_duration, narration_tempo_budget
 from timeline import build_timeline, save_timeline
 from audio_automation import coalesce_duck_windows, ducking_expression, default_bridge
 
-SUBTITLE_RENDER_VERSION = 6  # bumped: explicit visual QC/mask/overlay policy joins cache fingerprint
+SUBTITLE_RENDER_VERSION = 7  # measured subtitle placement + opt-in timed/translucent mask
 ASSEMBLY_MANIFEST = "assembly_manifest.json"
 ASSEMBLY_QC = "assembly_qc.json"
 VISUAL_QC = "visual_qc.json"
@@ -712,6 +712,46 @@ def _subtitle_style_config(canvas=None):
     return style
 
 
+def _validate_measured_subtitle_coordinate_domain(canvas=None):
+    y_top = int(CONFIG.get("subtitle_y_top", -1))
+    y_bot = int(CONFIG.get("subtitle_y_bot", -1))
+    if y_top < 0 and y_bot < 0:
+        return
+    sar_text = str((canvas or {}).get("sample_aspect_ratio") or "1:1")
+    if abs(_ratio_to_float(sar_text, 0.0) - 1.0) >= 1e-9:
+        raise ValueError(
+            f"字幕带坐标仅支持方形像素画布 (SAR 1:1)；当前 SAR={sar_text}"
+        )
+
+
+def _style_for_measured_subtitle_band(style, canvas=None):
+    """Fit the ASS baseline and font into explicit source-frame Y coordinates."""
+    style = dict(style)
+    y_top = int(CONFIG.get("subtitle_y_top", -1))
+    y_bot = int(CONFIG.get("subtitle_y_bot", -1))
+    canvas_h = int((canvas or {}).get("height", 0) or 0)
+    if y_top < 0 and y_bot < 0:
+        return style
+    _validate_measured_subtitle_coordinate_domain(canvas)
+    if canvas_h <= 0:
+        return style
+    if not 0 <= y_top < y_bot <= canvas_h:
+        raise ValueError(
+            f"字幕带坐标无效: top={y_top}, bot={y_bot}, 画布高度={canvas_h}；"
+            "必须满足 0 <= top < bot <= height"
+        )
+    scale_y = float(style["play_res_y"]) / canvas_h
+    style["margin_v"] = max(0, round((canvas_h - y_bot) * scale_y))
+    current_font = max(1, int(style["font_size"]))
+    fitted_font = min(current_font, max(8, round((y_bot - y_top) * scale_y * 0.9)))
+    if fitted_font < current_font:
+        scale = fitted_font / current_font
+        style["font_size"] = fitted_font
+        style["outline"] = max(1, round(float(style["outline"]) * scale))
+        style["shadow"] = max(0, round(float(style["shadow"]) * scale))
+    return style
+
+
 def _has_user_subtitles(work_dir):
     """True when the user dropped a bring-your-own original-subtitle file into work_dir."""
     return work_dir is not None and any(
@@ -767,7 +807,11 @@ def _source_subtitle_mask_policy(work_dir=None):
         "policy": raw_policy,
         "declared": bool(declared and raw_policy in allowed),
         "active": bool(active),
-        "scope": "bottom_source_subtitle_band" if active else "none",
+        "scope": (
+            "measured_source_subtitle_band"
+            if active and 0 <= int(CONFIG.get("subtitle_y_top", -1)) < int(CONFIG.get("subtitle_y_bot", -1))
+            else ("bottom_source_subtitle_band" if active else "none")
+        ),
         "trigger": trigger,
         "reason": reason,
         "burn_subtitles": burn,
@@ -810,6 +854,17 @@ def assembly_settings_fingerprint(work_dir=None):
             "source_subtitle_mask_ratio": (
                 CONFIG.get("source_subtitle_mask_ratio", 0.14) if mask_source_subtitles else None
             ),
+            "source_subtitle_mask_timing": (
+                CONFIG.get("source_subtitle_mask_timing", "narration") if mask_source_subtitles else None
+            ),
+            "subtitle_mask_opacity": (
+                CONFIG.get("subtitle_mask_opacity", 0.6) if mask_source_subtitles else None
+            ),
+            "subtitle_mask_padding": (
+                CONFIG.get("subtitle_mask_padding", 4) if mask_source_subtitles else None
+            ),
+            "subtitle_y_top": CONFIG.get("subtitle_y_top", -1),
+            "subtitle_y_bot": CONFIG.get("subtitle_y_bot", -1),
             "visual_overlays": {
                 "artifact": VISUAL_OVERLAYS,
                 "present": bool(overlay_path and overlay_path.exists()),
@@ -1321,10 +1376,10 @@ def _original_gap_subtitle_entries(tts_segments, work_dir, video_duration):
     # the original dialogue shown, e.g. a clean/foreign source with mask OFF (no burned subs to
     # double). Without a user file we keep the mask requirement so we don't double the source's own
     # visible subs. subtitle_original_in_gaps is the explicit override either way.
-    mask_policy = _source_subtitle_mask_policy(work_dir)
+    mask_covers_gaps = _source_subtitle_mask_covers_gaps(work_dir)
     if not (CONFIG.get("burn_subtitles", False)
             and CONFIG.get("subtitle_original_in_gaps", True)
-            and (mask_policy.get("active") or _has_user_subtitles(work_dir))):
+            and (mask_covers_gaps or _has_user_subtitles(work_dir))):
         return []
     gaps = _narration_gap_windows(tts_segments, video_duration)
     if not gaps:
@@ -1508,7 +1563,7 @@ def _generate_ass(narration, work_dir, video_duration=None, canvas=None):
     """Generate an ASS subtitle file for readable hard-sub rendering. video_duration given ⇒ also
     burn the original dialogue (from ASR) during the original-audio gaps. canvas ({"width","height"})
     scales the style to the real frame so portrait/竖屏 subtitles are not stretched."""
-    style = _subtitle_style_config(canvas)
+    style = _style_for_measured_subtitle_band(_subtitle_style_config(canvas), canvas)
     ass_lines = [
         "[Script Info]",
         "ScriptType: v4.00+",
@@ -1846,7 +1901,7 @@ def _visual_qc_has_forbidden_delivery_facts(value):
 
 def _build_visual_qc(tts_segments, work_dir, video_duration, canvas, *, overlay_qc=None, mask_filter=None):
     entries = _combined_subtitle_entries(tts_segments, work_dir, video_duration)
-    style = _subtitle_style_config(canvas)
+    style = _style_for_measured_subtitle_band(_subtitle_style_config(canvas), canvas)
     subtitle_layout = _subtitle_layout_qc(entries, canvas, style)
     mask = _source_subtitle_mask_policy(work_dir)
     ratio = None
@@ -1855,6 +1910,10 @@ def _build_visual_qc(tts_segments, work_dir, video_duration, canvas, *, overlay_
     mask.update({
         "ratio": ratio,
         "filter": "drawbox" if mask_filter else None,
+        "opacity": float(CONFIG.get("subtitle_mask_opacity", 0.6)),
+        "timing": str(CONFIG.get("source_subtitle_mask_timing", "narration")),
+        "subtitle_y_top": int(CONFIG.get("subtitle_y_top", -1)),
+        "subtitle_y_bot": int(CONFIG.get("subtitle_y_bot", -1)),
     })
     overlay_qc = overlay_qc or _visual_overlay_filters(work_dir, canvas, video_duration)[1]
     blocking_codes = []
@@ -2081,33 +2140,83 @@ def _apply_narration_speed(tts_segments, work_dir):
     log(f"解说整体提速: atempo={factor:.2f} ({done} 段)")
 
 
-def _source_subtitle_mask_filter(canvas=None, work_dir=None):
-    """ffmpeg drawbox that masks burned-in source subtitles along the bottom, or None.
+def _source_subtitle_mask_filter(canvas=None, work_dir=None, tts_segments=None):
+    """Return source-subtitle drawbox filters, optionally scoped to narration windows.
 
     Many source videos (e.g. 庆余年) ship hardcoded subtitles; without this the recap
-    shows the original subs AND our narration subs stacked. Covers the bottom band with
-    an opaque box; our subtitles render on top of it. canvas ({"width","height"}) makes the
-    single-line band sizing match the canvas-scaled subtitle style.
+    shows the original subs AND our narration subs stacked. Once masking is explicitly enabled,
+    the enhanced default is a measured, translucent narration-only band; opacity and timing
+    remain configurable.
     """
     policy = _source_subtitle_mask_policy(work_dir)
     if not policy.get("active"):
         return None
-    ratio = max(0.0, min(0.5, float(CONFIG.get("source_subtitle_mask_ratio", 0.14) or 0.0)))
-    # When we burn our OWN subtitle the band must sit behind it, but our subtitles are split into
-    # short ONE-LINE chunks (see _subtitle_entries), so the band only needs to cover a single line
-    # plus its bottom margin — never two. Sizing for one line keeps the black bar small so it does
-    # not compress the picture (a 2-line band ate ~23% of the height). Take the larger of the raw
-    # ratio and this single-line need.
-    if CONFIG.get("burn_subtitles", False):
+    opacity = max(0.0, min(1.0, float(CONFIG.get("subtitle_mask_opacity", 0.6))))
+    if opacity <= 0:
+        return None
+
+    _validate_measured_subtitle_coordinate_domain(canvas)
+
+    canvas_h = int((canvas or {}).get("height", 0) or 0)
+    y_top = int(CONFIG.get("subtitle_y_top", -1))
+    y_bot = int(CONFIG.get("subtitle_y_bot", -1))
+    custom_band = canvas_h > 0 and 0 <= y_top < y_bot <= canvas_h
+    if custom_band:
+        padding = int(CONFIG.get("subtitle_mask_padding", 4) or 0)
+        mask_top = max(0, y_top - padding)
+        mask_bot = min(canvas_h, y_bot + padding)
+        geometry = f"x=0:y={mask_top}:w=iw:h={mask_bot - mask_top}"
+    else:
+        ratio = max(0.0, min(0.5, float(CONFIG.get("source_subtitle_mask_ratio", 0.14) or 0.0)))
+        # Our subtitle cues are one line. Keep the mask large enough for that line and its
+        # margin, but never regress to the old two-line bar that hid ~23% of the image.
         style = _subtitle_style_config(canvas)
         play_res_y = max(1.0, float(style["play_res_y"]))
         line_h = float(style["font_size"]) * 1.25
-        pad = 10.0 * play_res_y / SUBTITLE_STYLE_REF_H  # keep the band pad proportional to the canvas
+        pad = 10.0 * play_res_y / SUBTITLE_STYLE_REF_H
         sub_band = (float(style["margin_v"]) + line_h + pad) / play_res_y
         ratio = min(0.5, max(ratio, sub_band))
-    if ratio <= 0:
+        if ratio <= 0:
+            return None
+        geometry = f"x=0:y=ih-ih*{ratio:.3f}:w=iw:h=ih*{ratio:.3f}"
+
+    base = f"drawbox={geometry}:color=black@{opacity:.2f}:t=fill"
+    timing = str(CONFIG.get("source_subtitle_mask_timing", "narration") or "narration").lower()
+    if timing not in {"all", "narration"}:
+        timing = "narration"
+    if timing != "narration":
+        return base
+    if not tts_segments:
         return None
-    return f"drawbox=x=0:y=ih-ih*{ratio:.3f}:w=iw:h=ih*{ratio:.3f}:color=black@1.0:t=fill"
+
+    windows = []
+    for seg in tts_segments:
+        if not isinstance(seg, dict):
+            continue
+        start, end = _seg_place_window(seg)
+        try:
+            start, end = float(start), float(end)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        windows.append((start, end, 0.0))
+    # Avoid overlapping drawboxes: stacking two 60%-black masks would darken the overlap
+    # to 84%. Coalescing also keeps long filter chains smaller.
+    filters = [
+        f"{base}:enable='between(t,{start:.3f},{end:.3f})'"
+        for start, end, _ in coalesce_duck_windows(windows, bridge=0.001)
+    ]
+    return ",".join(filters) if filters else None
+
+
+def _source_subtitle_mask_covers_gaps(work_dir=None):
+    """Whether the effective source mask hides hardcoded subtitles outside narration."""
+    if not _source_subtitle_mask_policy(work_dir).get("active"):
+        return False
+    opacity = max(0.0, min(1.0, float(CONFIG.get("subtitle_mask_opacity", 0.6))))
+    timing = str(CONFIG.get("source_subtitle_mask_timing", "narration") or "narration").lower()
+    return opacity > 0 and timing == "all"
 
 
 def _seg_place_window(seg):
@@ -2270,7 +2379,7 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
     _emit_timeline(input_video, tts_segments, work_dir, video_duration, has_bgm)
 
     overlay_filters, overlay_qc = _visual_overlay_filters(work_dir, canvas, video_duration)
-    mask_filter = _source_subtitle_mask_filter(canvas, work_dir)
+    mask_filter = _source_subtitle_mask_filter(canvas, work_dir, tts_segments)
     visual_qc = _build_visual_qc(
         tts_segments,
         work_dir,

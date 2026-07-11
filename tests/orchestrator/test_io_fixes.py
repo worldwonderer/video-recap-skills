@@ -938,6 +938,64 @@ def test_recap_rejects_multi_video_non_cut(monkeypatch, tmp_path):
         recap.main()
 
 
+def test_probe_display_height_accounts_for_rotation_and_sar(monkeypatch):
+    payload = {
+        "streams": [{
+            "width": 320,
+            "height": 180,
+            "sample_aspect_ratio": "2:1",
+            "side_data_list": [{"rotation": 90}],
+        }]
+    }
+    monkeypatch.setattr(
+        recap.subprocess,
+        "run",
+        lambda *args, **kwargs: type("Result", (), {
+            "returncode": 0, "stdout": json.dumps(payload), "stderr": ""
+        })(),
+    )
+
+    assert recap._probe_display_height_or_raise("rotated.mp4") == 640
+    with pytest.raises(SystemExit, match="require square-pixel video"):
+        recap._probe_display_height_or_raise("rotated.mp4", require_square_pixels=True)
+
+
+def test_recap_rejects_global_subtitle_band_for_multi_source_cut(monkeypatch, tmp_path, capsys):
+    videos = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
+    for video in videos:
+        video.write_bytes(b"source")
+    monkeypatch.setattr(sys, "argv", [
+        "recap.py", *map(str, videos), "--edit-mode", "cut",
+        "--subtitle-y-top", "100", "--subtitle-y-bot", "130",
+    ])
+
+    with pytest.raises(SystemExit) as exc_info:
+        recap.main()
+    assert exc_info.value.code == 2
+    assert "多视频 cut 暂不支持" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "effect_args, message",
+    [
+        (["--voice-ref", "voice.wav"], "--voice-ref is only supported in full/cut modes"),
+        (["--subtitle-y-top", "610", "--subtitle-y-bot", "660"],
+         "--subtitle-y-top/--subtitle-y-bot are only supported in full/cut modes"),
+    ],
+)
+def test_recap_rejects_plus_effect_flags_ignored_by_dub(
+    monkeypatch, tmp_path, capsys, effect_args, message
+):
+    video = tmp_path / "input.mp4"
+    video.write_bytes(b"source")
+    monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--edit-mode", "dub", *effect_args])
+
+    with pytest.raises(SystemExit) as exc_info:
+        recap.main()
+    assert exc_info.value.code == 2
+    assert message in capsys.readouterr().err
+
+
 def test_recap_multi_video_phase_a_writes_manifest_and_pauses(monkeypatch, tmp_path, capsys):
     v1 = tmp_path / "a.mp4"
     v2 = tmp_path / "b.mp4"
@@ -1108,6 +1166,31 @@ def test_continuation_command_preserves_multi_videos_and_material_flags(tmp_path
     assert "--material-library-dir" in cmd
     assert "--use-materials" in cmd
     assert "--save-materials" in cmd
+
+
+def test_continuation_command_preserves_plus_effect_flags(tmp_path):
+    args = _manifest_args()
+    args.mimo_tts_voice = None
+    args.allow_partial_tts = False
+    args.burn_subtitles = True
+    args.output_dir = None
+    args.export_jianying = False
+    args.jianying_bundle_media = False
+    args.jianying_no_bundle_media = False
+    args.review_narration = None
+    args.require_narration_review = False
+    args.material_library_dir = None
+    args.use_materials = False
+    args.save_materials = False
+    args.voice_ref = str(tmp_path / "voice ref.wav")
+    args.subtitle_y_top = 610
+    args.subtitle_y_bot = 660
+
+    cmd = recap._continuation_command(tmp_path / "in.mp4", tmp_path / "work", args)
+
+    assert "--voice-ref" in cmd and "voice ref.wav" in cmd
+    assert "--subtitle-y-top 610" in cmd
+    assert "--subtitle-y-bot 660" in cmd
 
 
 def test_recap_single_video_phase_a_can_save_materials(monkeypatch, tmp_path):

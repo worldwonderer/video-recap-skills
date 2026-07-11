@@ -215,6 +215,48 @@ def _read_video_duration_or_raise(path):
     return duration
 
 
+def _probe_display_height_or_raise(path, *, require_square_pixels=False):
+    """Return ffmpeg's display-coordinate height, accounting for rotation and SAR."""
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries",
+        "stream=width,height,sample_aspect_ratio:stream_tags=rotate:stream_side_data=rotation",
+        "-of", "json", str(path),
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        stream = (json.loads(res.stdout or "{}").get("streams") or [])[0]
+        width, height = int(stream["width"]), int(stream["height"])
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        detail = (res.stderr or res.stdout or "ffprobe failed").strip()
+        raise SystemExit(f"无法读取视频画布: {path} ({detail})")
+    sar = str(stream.get("sample_aspect_ratio") or "1:1")
+    try:
+        num, den = sar.split(":", 1)
+        sar_ratio = float(num) / float(den)
+        display_width = max(1, int(round(width * sar_ratio)))
+    except (TypeError, ValueError, ZeroDivisionError):
+        sar_ratio = math.nan
+        display_width = width
+    if require_square_pixels and (not math.isfinite(sar_ratio) or abs(sar_ratio - 1.0) >= 1e-9):
+        raise SystemExit(
+            f"subtitle Y coordinates currently require square-pixel video (SAR 1:1); got {sar}"
+        )
+    rotation_values = [
+        (stream.get("tags") or {}).get("rotate"),
+        *(item.get("rotation") for item in stream.get("side_data_list") or [] if isinstance(item, dict)),
+    ]
+    rotation = 0
+    for value in rotation_values:
+        if value not in (None, ""):
+            try:
+                rotation = int(round(float(value))) % 360
+                break
+            except (TypeError, ValueError):
+                pass
+    return display_width if rotation in {90, 270} else height
+
+
 def _review_narration_enabled(args):
     if getattr(args, "review_narration", None) is not None:
         return bool(args.review_narration)
@@ -721,10 +763,16 @@ def _continuation_command(video, work_dir, args):
         parts.append("--consolidate-asr")
     if getattr(args, "mimo_tts_voice", None):
         parts += ["--mimo-tts-voice", args.mimo_tts_voice]
+    if getattr(args, "voice_ref", None):
+        parts += ["--voice-ref", args.voice_ref]
     if getattr(args, "allow_partial_tts", False):
         parts.append("--allow-partial-tts")
     if getattr(args, "burn_subtitles", None) is not None:
         parts.append("--burn-subtitles" if args.burn_subtitles else "--no-burn-subtitles")
+    if getattr(args, "subtitle_y_top", None) is not None:
+        parts += ["--subtitle-y-top", str(args.subtitle_y_top)]
+    if getattr(args, "subtitle_y_bot", None) is not None:
+        parts += ["--subtitle-y-bot", str(args.subtitle_y_bot)]
     if getattr(args, "output_dir", None):
         parts += ["--output-dir", args.output_dir]
     if getattr(args, "export_jianying", False):
@@ -1076,6 +1124,8 @@ def _run_multi_cut(videos, work_dir, args):
     vargs = ["--work-dir", str(work_dir), "--narration", str(narration_json)]
     if args.mimo_tts_voice:
         vargs += ["--mimo-voice", args.mimo_tts_voice]
+    if args.voice_ref:
+        vargs += ["--voice-ref", args.voice_ref]
     if args.allow_partial_tts:
         vargs.append("--allow-partial-tts")
     _run("video-voiceover", "voiceover.py", *vargs)
@@ -1125,10 +1175,16 @@ def main():
                     help="build the understanding story index (Pass B); default ON, --no-consolidate to skip")
     ap.add_argument("--consolidate-asr", action="store_true", help="also clean ASR (Pass A)")
     ap.add_argument("--mimo-tts-voice", default=None, help="MiMo TTS voice")
+    ap.add_argument("--voice-ref", default=None,
+                    help="reference audio for cloned narration voice (mimo-v2.5-tts-voiceclone)")
     ap.add_argument("--allow-partial-tts", action="store_true",
                     help="allow video-voiceover to continue when some narration segments fail TTS")
     ap.add_argument("--burn-subtitles", action=argparse.BooleanOptionalAction, default=None,
                     help="burn narration subtitles into the video (default on; --no-burn-subtitles to disable)")
+    ap.add_argument("--subtitle-y-top", type=int, default=None,
+                    help="source-frame pixel Y at the top of the measured subtitle band")
+    ap.add_argument("--subtitle-y-bot", type=int, default=None,
+                    help="source-frame pixel Y at the bottom of the measured subtitle band")
     ap.add_argument("--review-narration", action=argparse.BooleanOptionalAction, default=None,
                     help="run advisory narration quality review before TTS (default on; fail-open)")
     ap.add_argument("--require-narration-review", action="store_true",
@@ -1154,10 +1210,36 @@ def main():
         return
     if not args.video:
         ap.error("video is required (unless --doctor)")
+    if args.mimo_tts_voice and args.voice_ref:
+        ap.error("--mimo-tts-voice and --voice-ref are mutually exclusive")
+    if args.edit_mode == "dub" and args.voice_ref:
+        ap.error("--voice-ref is only supported in full/cut modes; dub clones the source voice automatically")
+    if args.edit_mode == "dub" and args.subtitle_y_top is not None:
+        ap.error("--subtitle-y-top/--subtitle-y-bot are only supported in full/cut modes")
+    if (args.subtitle_y_top is None) != (args.subtitle_y_bot is None):
+        ap.error("--subtitle-y-top and --subtitle-y-bot must be provided together")
+    if args.subtitle_y_top is not None:
+        if args.subtitle_y_top < 0 or args.subtitle_y_bot <= args.subtitle_y_top:
+            ap.error("subtitle Y coordinates must satisfy 0 <= top < bot")
 
     videos = _coerce_videos(args.video)
     if len(videos) > 1 and args.edit_mode != "cut":
         raise SystemExit("多视频输入当前 MVP 只支持 --edit-mode cut；full/dub 请一次输入一个视频。")
+    if len(videos) > 1 and args.subtitle_y_top is not None:
+        ap.error("多视频 cut 暂不支持全局 subtitle Y 坐标；各源字幕带可能不同")
+    if args.subtitle_y_top is not None:
+        canvas_height = _probe_display_height_or_raise(videos[0], require_square_pixels=True)
+        if args.subtitle_y_bot > canvas_height:
+            ap.error(
+                f"subtitle Y coordinates exceed display canvas height {canvas_height}: "
+                f"bot={args.subtitle_y_bot}"
+            )
+        os.environ["SUBTITLE_Y_TOP"] = str(args.subtitle_y_top)
+        os.environ["SUBTITLE_Y_BOT"] = str(args.subtitle_y_bot)
+        # Supplying a measured source-subtitle band is itself an explicit opt-in to mask
+        # that band. This keeps the visual safety policy explicit without extra CLI ceremony.
+        os.environ["MASK_SOURCE_SUBTITLES"] = "1"
+        os.environ["SOURCE_SUBTITLE_MASK_POLICY"] = "opt_in"
 
     # Fail fast before any expensive understanding/VLM/ASR/TTS work if the run will burn
     # subtitles but this ffmpeg can't (otherwise it only blows up at the final render).
@@ -1317,6 +1399,8 @@ def main():
     vargs = ["--work-dir", str(work_dir), "--narration", str(narration_for_tts)]
     if args.mimo_tts_voice:
         vargs += ["--mimo-voice", args.mimo_tts_voice]
+    if args.voice_ref:
+        vargs += ["--voice-ref", args.voice_ref]
     if args.allow_partial_tts:
         vargs.append("--allow-partial-tts")
     _run("video-voiceover", "voiceover.py", *vargs)

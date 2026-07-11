@@ -167,6 +167,7 @@ CONFIG = {
     "mimo_tts_model_source": "env" if os.environ.get("MIMO_TTS_MODEL") else "default",
     "mimo_tts_voice": os.environ.get("MIMO_TTS_VOICE", "冰糖"),
     "mimo_tts_voice_source": "env" if os.environ.get("MIMO_TTS_VOICE") else "default",
+    "voice_ref": os.environ.get("VOICE_REF", "").strip(),  # optional arbitrary reference audio for narration voice clone
     "mimo_tts_style": os.environ.get(
         "MIMO_TTS_STYLE",
         "自然、清晰、有感染力，像在给观众讲故事；随剧情起伏，该紧张时紧张、该动情时动情，不平铺直叙。",

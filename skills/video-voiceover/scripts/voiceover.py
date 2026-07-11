@@ -2,17 +2,21 @@ import base64
 import json
 import os
 import re
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Lock
 
 from lib import CONFIG
-from lib import log, mimo_tts_api_call, get_video_duration, narration_tempo_budget
+from lib import log, mimo_tts_api_call, get_video_duration, narration_tempo_budget, run_cmd
 from lib import _truncate_at_sentence, _text_char_count, stable_hash, file_fingerprint
 
 SUPPORTED_TTS_ENGINES = {"mimo-tts"}
 SEGMENT_AUDIO_SCHEMA_VERSION = 1
 TTS_CACHE_VERSION = 2
+VOICE_REFERENCE_PREP_VERSION = 1
+_VOICE_REFERENCE_LOCK = Lock()
 
 
 def _parse_rate_offset(rate_str):
@@ -519,7 +523,7 @@ def resolve_tts_engine(prefer_existing=None):
 def tts_settings_fingerprint(engine=None):
     """Return non-secret TTS settings that materially affect generated audio."""
     resolved = engine or resolve_tts_engine()
-    return {
+    settings = {
         "engine": resolved,
         "tts_dynamic_params": bool(CONFIG.get("tts_dynamic_params", True)),
         "mimo_tts_api_url": CONFIG.get("mimo_tts_api_url"),
@@ -534,6 +538,16 @@ def tts_settings_fingerprint(engine=None):
         "tts_segment_target_rms_dbfs": float(CONFIG.get("tts_segment_target_rms_dbfs", -20.0) or -20.0),
         "tts_segment_peak_limit": float(CONFIG.get("tts_segment_peak_limit", 0.98) or 0.98),
     }
+    voice_ref = str(CONFIG.get("voice_ref") or "").strip()
+    if voice_ref:
+        ref_path = Path(voice_ref).expanduser()
+        settings.pop("mimo_tts_voice", None)  # ignored by the voiceclone API
+        settings["voice_ref_fingerprint"] = _voice_reference_fingerprint(ref_path)
+        settings["voice_ref_preparation"] = (
+            f"pcm_s16le:24000hz:mono:30s:v{VOICE_REFERENCE_PREP_VERSION}"
+        )
+        settings["mimo_tts_model"] = "mimo-v2.5-tts-voiceclone"
+    return settings
 
 
 def _mimo_tts_style_instruction(rate="+0%", pitch="+0Hz", emotion=None):
@@ -554,20 +568,86 @@ def _mimo_tts_style_instruction(rate="+0%", pitch="+0Hz", emotion=None):
     return f"{style} {tone} {speed} {pitch_hint}"
 
 
+def _prepare_voice_reference(ref_path):
+    """Normalize arbitrary reference audio to MiMo voiceclone's 24 kHz mono WAV."""
+    ref = Path(ref_path).expanduser()
+    if not ref.is_file():
+        raise FileNotFoundError(f"参考音频不存在或不是文件: {ref}")
+    with tempfile.TemporaryDirectory(prefix="video-recap-voice-ref-") as temp_dir:
+        normalized = Path(temp_dir) / "voice_ref.wav"
+        result = run_cmd([
+            "ffmpeg", "-y", "-i", str(ref), "-vn", "-ar", "24000", "-ac", "1",
+            "-t", "30", "-acodec", "pcm_s16le", str(normalized),
+        ])
+        if result.returncode != 0 or not normalized.is_file() or normalized.stat().st_size <= 44:
+            detail = (result.stderr or "").strip()
+            raise RuntimeError(f"参考音频转码失败: {detail or ref}")
+        return base64.b64encode(normalized.read_bytes()).decode("ascii")
+
+
+def _voice_reference_signature(ref_path):
+    """Cheaply identify the prepared source so a reused process cannot serve stale audio."""
+    ref = Path(ref_path).expanduser().resolve()
+    stat = ref.stat()
+    return f"{ref}:{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def _voice_reference_fingerprint(ref_path):
+    ref = Path(ref_path).expanduser()
+    if not ref.is_file():
+        return f"missing:{ref.resolve()}"
+    signature = _voice_reference_signature(ref)
+    if (
+        CONFIG.get("voice_ref_source_signature") == signature
+        and CONFIG.get("voice_ref_fingerprint")
+    ):
+        return CONFIG["voice_ref_fingerprint"]
+    fingerprint = file_fingerprint(ref)
+    CONFIG["voice_ref_source_signature"] = signature
+    CONFIG["voice_ref_fingerprint"] = fingerprint
+    return fingerprint
+
+
+def _cache_prepared_voice_reference(ref_path):
+    with _VOICE_REFERENCE_LOCK:
+        signature = _voice_reference_signature(ref_path)
+        if (
+            CONFIG.get("voice_ref_b64")
+            and CONFIG.get("voice_ref_source_signature") == signature
+        ):
+            return CONFIG["voice_ref_b64"]
+        encoded = _prepare_voice_reference(ref_path)
+        CONFIG["voice_ref_b64"] = encoded
+        CONFIG["voice_ref_source_signature"] = signature
+        CONFIG["voice_ref_fingerprint"] = file_fingerprint(Path(ref_path).expanduser())
+        return encoded
+
+
 def _tts_mimo(text, output_path, rate="+0%", pitch="+0Hz", emotion=None):
-    """使用 Xiaomi MiMo-V2.5-TTS 合成，返回 wav 音频。
+    """使用 Xiaomi MiMo-V2.5-TTS 合成，按需用参考音频克隆音色。
 
     MiMo-v2.5-tts 是 instruct-TTS：user 消息里的自然语言指令控制整句的情绪/语气/语速。
     每段 narration 的 `emotion` 标签即写进该指令，让解说有起伏、不机械。"""
+    voice_ref = str(CONFIG.get("voice_ref") or "").strip()
+    voice_ref_b64 = CONFIG.get("voice_ref_b64")
+    if voice_ref:
+        cached_signature = CONFIG.get("voice_ref_source_signature")
+        if not voice_ref_b64 or (
+            cached_signature and cached_signature != _voice_reference_signature(voice_ref)
+        ):
+            voice_ref_b64 = _cache_prepared_voice_reference(voice_ref)
     payload = {
-        "model": CONFIG.get("mimo_tts_model", "mimo-v2.5-tts"),
+        "model": "mimo-v2.5-tts-voiceclone" if voice_ref else CONFIG.get("mimo_tts_model", "mimo-v2.5-tts"),
         "messages": [
             {"role": "user", "content": _mimo_tts_style_instruction(rate, pitch, emotion)},
             {"role": "assistant", "content": text},
         ],
         "audio": {
             "format": "wav",
-            "voice": CONFIG.get("mimo_tts_voice", "mimo_default"),
+            "voice": (
+                f"data:audio/wav;base64,{voice_ref_b64}"
+                if voice_ref else CONFIG.get("mimo_tts_voice", "mimo_default")
+            ),
         },
     }
     resp = mimo_tts_api_call(payload)
@@ -598,12 +678,26 @@ def main():
     ap.add_argument("--narration", default=None,
                     help="narration json (default: <work-dir>/narration.json; pass narration_mapped.json explicitly for legacy cut runs)")
     ap.add_argument("--mimo-voice", default=None, help="MiMo TTS voice name")
+    ap.add_argument("--voice-ref", default=None,
+                    help="reference audio (wav/mp3/etc.) for mimo-v2.5-tts-voiceclone")
     ap.add_argument("--allow-partial-tts", action="store_true",
                     help="allow output when some narration segments fail TTS")
     args = ap.parse_args()
     work_dir = Path(args.work_dir)
     if args.mimo_voice:
         CONFIG["mimo_tts_voice"] = args.mimo_voice
+    if args.voice_ref:
+        CONFIG["voice_ref"] = args.voice_ref
+        # main() can be called repeatedly in-process by embedders/tests. A new CLI reference
+        # must not inherit prepared bytes or identity from the previous invocation.
+        CONFIG.pop("voice_ref_b64", None)
+        CONFIG.pop("voice_ref_fingerprint", None)
+        CONFIG.pop("voice_ref_source_signature", None)
+    if args.mimo_voice and CONFIG.get("voice_ref"):
+        ap.error("--mimo-voice and --voice-ref are mutually exclusive")
+    # Voice-reference normalization is intentionally lazy: a fully cached rerun should not
+    # invoke ffmpeg. _tts_mimo uses a process-wide lock so a fresh parallel run still converts
+    # the reference exactly once.
     if args.allow_partial_tts:
         CONFIG["allow_partial_tts"] = True
     if args.narration:

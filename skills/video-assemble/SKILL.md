@@ -46,6 +46,9 @@ python3 scripts/assemble.py <video> --work-dir <work_dir> \
 - Audio is mixed as tracks (like a cut-software timeline): the original audio, an optional BGM bed, and the narration.
 - Optional 剪映/JianYing export: `--export-jianying` (or `EXPORT_JIANYING=1`) turns `timeline.json` into an editable 剪映 draft — original clips, separate audio tracks, and volume keyframes for the ducking. Fully decoupled and lazy-imported: the ffmpeg render never depends on it, and 剪映 need not be installed. In cut mode pass `--source-video <orig>` so the draft references the real clips. Point `--jianying-out` at 剪映's drafts root to open it in-app. If a draft folder with the same name already has files, export writes a numbered sibling instead of overwriting it. Media is bundled into the draft folder by default (`--jianying-no-bundle-media` to reference in place) — this is **required on macOS**, where 剪映 is sandboxed and cannot read external paths. Note: the draft references the un-burned original, so the source's hardcoded subtitles are visible there (mask them in 剪映 if needed).
 - Subtitle look: `SUBTITLE_FONT_SIZE`, `SUBTITLE_MARGIN_V`, `SUBTITLE_MAX_CHARS`, etc.
+- Source-pinned subtitle look: `SUBTITLE_Y_TOP/BOT` places the ASS baseline on a measured source
+  band. With an explicit mask policy, the band defaults to `SUBTITLE_MASK_OPACITY=0.6` and
+  `SOURCE_SUBTITLE_MASK_TIMING=narration`; `SUBTITLE_MASK_PADDING` controls pixel padding.
 - Ducking / loudness: the original swells to `IDLE_ORIG_VOLUME` in the gaps and ducks to `SPEECH_DUCKING_VOLUME` under narration (`DUCK_FADE_SECONDS` smooths the transition); also `DUCKING_MODE`, `ZONE_DUCKING_VOLUME`, `FINAL_LOUDNORM`, `TARGET_LUFS`.
 - BGM (optional): set `BGM_PATH` to any audio file; it loops to length and ducks under narration (`BGM_VOLUME` / `BGM_DUCKING_VOLUME`).
 - Burning subtitles requires an ffmpeg with `subtitles`/libass support; assemble (and the

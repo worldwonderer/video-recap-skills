@@ -167,6 +167,34 @@ def test_synthesize_tts_reuses_complete_cache_without_mimo_key(monkeypatch, tmp_
     assert segments[0]["narration"] == "离线复用。"
 
 
+def test_synthesize_tts_voiceclone_cache_does_not_transcode_reference(monkeypatch, tmp_path):
+    narration = [{"start": 0.0, "end": 2.0, "narration": "克隆缓存复用。"}]
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"reference")
+    tts_dir = tmp_path / "tts_segments"
+    tts_dir.mkdir()
+    monkeypatch.setitem(CONFIG, "voice_ref", str(ref))
+    monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "")
+    monkeypatch.setitem(CONFIG, "tts_dynamic_params", False)
+    monkeypatch.setattr("voiceover._get_audio_duration", lambda path: 1.0 if Path(path).exists() else 0.0)
+
+    wav = tts_dir / "narr_000.wav"
+    wav.write_bytes(b"cached-clone")
+    prepared = voiceover._prepare_tts_segment(0, narration[0], narration, tts_dir, "mimo-tts")
+    text, _output_wav, rate, _pitch, cache_key = prepared
+    voiceover._write_tts_segment_cache(wav, cache_key, text, 1.0, _parse_rate_offset(rate))
+    monkeypatch.setattr(
+        voiceover,
+        "_prepare_voice_reference",
+        lambda *args: (_ for _ in ()).throw(AssertionError("cache hit must not invoke ffmpeg")),
+    )
+
+    segments, engine = synthesize_tts(narration, tmp_path)
+
+    assert engine == "mimo-tts"
+    assert segments[0]["audio_path"] == str(wav)
+
+
 def test_synthesize_tts_rejects_empty_narration(monkeypatch, tmp_path):
     monkeypatch.setitem(CONFIG, "mimo_tts_api_key", "tp-test")
 
@@ -349,6 +377,92 @@ def test_mimo_tts_writes_decoded_audio(monkeypatch, tmp_path):
     assert payload["audio"] == {"format": "wav", "voice": "冰糖"}
     assert payload["messages"][1] == {"role": "assistant", "content": "这是小米 MiMo 配音。"}
     assert "语速略慢" in payload["messages"][0]["content"]
+
+
+def test_mimo_tts_voiceclone_uses_prepared_reference_without_reencoding_each_segment(monkeypatch, tmp_path):
+    import base64
+
+    seen = []
+    ref = tmp_path / "voice.mp3"
+    ref.write_bytes(b"source-reference")
+    monkeypatch.setitem(CONFIG, "voice_ref", str(ref))
+    monkeypatch.setitem(CONFIG, "voice_ref_b64", base64.b64encode(b"prepared-wav").decode("ascii"))
+    monkeypatch.setitem(CONFIG, "voice_ref_source_signature", voiceover._voice_reference_signature(ref))
+    monkeypatch.setattr(
+        "voiceover.mimo_tts_api_call",
+        lambda payload: seen.append(payload) or {
+            "choices": [{"message": {"audio": {"data": base64.b64encode(b"clone").decode("ascii")}}}]
+        },
+    )
+
+    output = tmp_path / "clone.wav"
+    _tts_mimo("克隆音色解说。", output, emotion="沉稳")
+
+    assert output.read_bytes() == b"clone"
+    assert seen[0]["model"] == "mimo-v2.5-tts-voiceclone"
+    assert seen[0]["audio"]["voice"] == "data:audio/wav;base64,cHJlcGFyZWQtd2F2"
+    assert "沉稳" in seen[0]["messages"][0]["content"]
+
+
+def test_tts_settings_fingerprint_tracks_voice_reference_content(monkeypatch, tmp_path):
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"first")
+    monkeypatch.setitem(CONFIG, "voice_ref", str(ref))
+
+    first = voiceover.tts_settings_fingerprint("mimo-tts")
+    ref.write_bytes(b"second")
+    second = voiceover.tts_settings_fingerprint("mimo-tts")
+
+    assert first["voice_ref_fingerprint"] != second["voice_ref_fingerprint"]
+    assert "voice_ref_b64" not in first
+
+
+def test_prepare_voice_reference_normalizes_and_caps_input(monkeypatch, tmp_path):
+    import base64
+
+    ref = tmp_path / "long-reference.mp3"
+    ref.write_bytes(b"source")
+    commands = []
+
+    def fake_run(command):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"R" * 45)
+        return CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("voiceover.run_cmd", fake_run)
+
+    encoded = voiceover._prepare_voice_reference(ref)
+
+    assert base64.b64decode(encoded) == b"R" * 45
+    assert ["-ar", "24000"] == commands[0][commands[0].index("-ar"):commands[0].index("-ar") + 2]
+    assert ["-ac", "1"] == commands[0][commands[0].index("-ac"):commands[0].index("-ac") + 2]
+    assert ["-t", "30"] == commands[0][commands[0].index("-t"):commands[0].index("-t") + 2]
+
+
+def test_mimo_tts_refreshes_cached_reference_when_source_changes(monkeypatch, tmp_path):
+    import base64
+
+    first = tmp_path / "first.wav"
+    second = tmp_path / "second.wav"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second-reference")
+    monkeypatch.setitem(CONFIG, "voice_ref", str(second))
+    monkeypatch.setitem(CONFIG, "voice_ref_b64", base64.b64encode(b"stale").decode("ascii"))
+    monkeypatch.setitem(CONFIG, "voice_ref_source_signature", voiceover._voice_reference_signature(first))
+    monkeypatch.setattr(voiceover, "_prepare_voice_reference", lambda path: base64.b64encode(b"fresh").decode("ascii"))
+    seen = []
+    monkeypatch.setattr(
+        voiceover,
+        "mimo_tts_api_call",
+        lambda payload: seen.append(payload) or {
+            "choices": [{"message": {"audio": {"data": base64.b64encode(b"audio").decode("ascii")}}}]
+        },
+    )
+
+    _tts_mimo("新参考音频", tmp_path / "out.wav")
+
+    assert seen[0]["audio"]["voice"] == "data:audio/wav;base64,ZnJlc2g="
+    assert CONFIG["voice_ref_source_signature"] == voiceover._voice_reference_signature(second)
 
 
 def test_mimo_tts_injects_per_beat_emotion(monkeypatch, tmp_path):

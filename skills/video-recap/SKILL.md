@@ -83,6 +83,11 @@ python3 scripts/recap.py <video> --work-dir <work_dir>          # [--edit-mode c
 This validates the narration, (cut: builds `edited_source.mp4`), synthesizes the voiceover, and
 assembles `recap_<name>.mp4`.
 
+For source-pinned subtitles, first run `python3 tools/measure_subtitle.py <video>` from the repo
+root, then pass the measured `--subtitle-y-top/--subtitle-y-bot`; this explicitly enables a 60%
+opaque narration-window mask for that band. For cloned recap narration, pass
+`--voice-ref <audio>` (distinct from dub mode).
+
 ### Dub mode — English→Chinese, original voice (`--edit-mode dub`)
 
 Translates an English video into Chinese and **replaces** the speech with the ORIGINAL
@@ -118,7 +123,8 @@ python3 scripts/recap.py --doctor
 ## Options (passed through to the stage skills)
 `--context`, `--scene-threshold`, `--style`, `--edit-mode {full,cut,dub}`, `--target-duration`,
 `--skip-asr`, `--mimo-video-overview`, `--consolidate`, `--consolidate-asr`, `--mimo-tts-voice`,
-`--no-burn-subtitles` (burn is on by default), `--output-dir`, `--material-library-dir`, `--use-materials`, `--save-materials`.
+`--voice-ref`, `--subtitle-y-top`, `--subtitle-y-bot`, `--no-burn-subtitles` (burn is on by default),
+`--output-dir`, `--material-library-dir`, `--use-materials`, `--save-materials`.
 
 `--style` is freeform verbatim guidance for the agent to synthesize with evidence; do not treat it as an option list, preset, switch, or finite style taxonomy.
 
