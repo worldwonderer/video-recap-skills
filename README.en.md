@@ -169,7 +169,7 @@ python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 \
 The measurement tool still uses only stdlib + ffmpeg. For each source it writes grid/red-band
 previews under `.subtitle_measure/<video-source-id>/preview/` plus a source-identified
 `subtitle_positions.json`; omit `--accept-detected` to inspect and confirm the coordinates
-interactively. Coordinates use ffmpeg's auto-rotated display canvas and currently require
+interactively. Coordinates use a half-open `[top, bot)` interval on ffmpeg's auto-rotated display canvas and currently require
 square-pixel (SAR `1:1`) video plus bottom-aligned subtitles (`SUBTITLE_ALIGNMENT=1|2|3`). Tune with
 `SUBTITLE_MASK_OPACITY` (`0..1`) and
 `SOURCE_SUBTITLE_MASK_TIMING=all|narration`. Windows containing replacement original-dialogue

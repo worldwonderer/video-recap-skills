@@ -293,14 +293,36 @@ def _prepare_staged_output(out_dir):
 
 def _commit_staged_output(out_dir, staging):
     out_dir, staging = Path(out_dir), Path(staging)
-    for name in ("frames", "preview", "subtitle_positions.json"):
-        source = staging / name
-        target = out_dir / name
-        if target.is_symlink() or target.is_file():
-            target.unlink()
-        elif target.is_dir():
-            shutil.rmtree(target)
-        source.replace(target)
+    names = ("frames", "preview", "subtitle_positions.json")
+    for name in names:
+        if not (staging / name).exists():
+            raise RuntimeError(f"测量暂存产物缺失: {staging / name}")
+    backup = Path(tempfile.mkdtemp(prefix=".measure-backup-", dir=out_dir))
+    backed_up = []
+    installed = []
+    try:
+        for name in names:
+            target = out_dir / name
+            if target.is_symlink() or target.exists():
+                target.replace(backup / name)
+                backed_up.append(name)
+        for name in names:
+            (staging / name).replace(out_dir / name)
+            installed.append(name)
+    except Exception:
+        for name in installed:
+            target = out_dir / name
+            if target.is_symlink() or target.is_file():
+                target.unlink(missing_ok=True)
+            elif target.is_dir():
+                shutil.rmtree(target)
+        for name in backed_up:
+            saved = backup / name
+            if saved.exists() or saved.is_symlink():
+                saved.replace(out_dir / name)
+        raise
+    finally:
+        shutil.rmtree(backup, ignore_errors=True)
 
 
 def main(argv=None):
@@ -348,17 +370,18 @@ def main(argv=None):
 
         if not detections:
             raise SystemExit("未检测到可靠字幕带；可增加 --frames 或降低 --start-sec 后重试")
-        suggested_top = round(median(top for top, _ in detections))
-        suggested_bot = round(median(bottom for _, bottom in detections))
         width, height = int(canvas_width), int(canvas_height)
+        suggested_top = round(median(top for top, _ in detections))
+        # Detection/preview bands use inclusive pixel rows; the recap CLI uses [top, bot).
+        suggested_bot = min(height, round(median(bottom for _, bottom in detections)) + 1)
         print(f"检测到字幕帧 {len(detections)}/{args.frames}，预览: {out_dir / 'preview'}")
-        print(f"建议字幕带: y=[{suggested_top}, {suggested_bot}]")
+        print(f"建议字幕带（半开区间）: y=[{suggested_top}, {suggested_bot})")
         if args.accept_detected:
             y_top, y_bot = suggested_top, suggested_bot
         else:
             print("请查看红框预览；直接回车接受建议值。")
             y_top = _prompt_coordinate("字幕上沿 y_top", suggested_top)
-            y_bot = _prompt_coordinate("字幕下沿 y_bot", suggested_bot)
+            y_bot = _prompt_coordinate("字幕下沿 y_bot（exclusive）", suggested_bot)
         if not 0 <= y_top < y_bot <= height:
             raise SystemExit(f"坐标无效，必须满足 0 <= top < bot <= {height}")
 

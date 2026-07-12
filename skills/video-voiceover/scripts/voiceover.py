@@ -198,8 +198,10 @@ def synthesize_tts(narration, work_dir):
         for key in (
             "voice_ref_b64",
             "voice_ref_snapshot_path",
+            "voice_ref_snapshot_signature",
             "voice_ref_source_signature",
             "voice_ref_fingerprint",
+            "voice_ref_snapshot_locked",
         ):
             CONFIG.pop(key, None)
     tts_dir = work_dir / "tts_segments"
@@ -238,6 +240,7 @@ def synthesize_tts(narration, work_dir):
 
     if voice_ref:
         _cache_prepared_voice_reference(voice_ref)
+        CONFIG["voice_ref_snapshot_locked"] = True
 
     log(f"TTS 引擎: {engine}")
 
@@ -245,22 +248,25 @@ def synthesize_tts(narration, work_dir):
     failures = []
     max_workers = max(1, min(len(narration), CONFIG.get("tts_workers", 4)))
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(_synthesize_segment, i, seg, narration, tts_dir, engine): i
-            for i, seg in enumerate(narration)
-        }
-        for future in as_completed(futures):
-            try:
-                result = future.result()
-            except Exception as e:
-                i = futures[future]
-                failures.append(_tts_failure_record(i, narration[i], e))
-                log(f"  TTS 段 {i+1} 失败: {e}")
-                continue
-            if result:
-                segments.append(result)
-                log(f"  段 {result['index']+1}: {result['audio_duration']:.1f}s - {result['narration'][:25]}...")
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_synthesize_segment, i, seg, narration, tts_dir, engine): i
+                for i, seg in enumerate(narration)
+            }
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                except Exception as e:
+                    i = futures[future]
+                    failures.append(_tts_failure_record(i, narration[i], e))
+                    log(f"  TTS 段 {i+1} 失败: {e}")
+                    continue
+                if result:
+                    segments.append(result)
+                    log(f"  段 {result['index']+1}: {result['audio_duration']:.1f}s - {result['narration'][:25]}...")
+    finally:
+        CONFIG.pop("voice_ref_snapshot_locked", None)
 
     segments.sort(key=lambda x: x["index"])
     if failures and not CONFIG.get("allow_partial_tts", False):
@@ -614,7 +620,8 @@ def _voice_reference_fingerprint(ref_path):
         return f"missing:{ref.resolve()}"
     resolved = str(ref.resolve())
     if (
-        CONFIG.get("voice_ref_b64")
+        CONFIG.get("voice_ref_snapshot_locked")
+        and CONFIG.get("voice_ref_b64")
         and CONFIG.get("voice_ref_snapshot_path") == resolved
         and CONFIG.get("voice_ref_fingerprint")
     ):
@@ -634,10 +641,26 @@ def _voice_reference_fingerprint(ref_path):
 def _cache_prepared_voice_reference(ref_path):
     with _VOICE_REFERENCE_LOCK:
         ref = Path(ref_path).expanduser().resolve()
+        resolved = str(ref)
+        if (
+            CONFIG.get("voice_ref_snapshot_locked")
+            and CONFIG.get("voice_ref_b64")
+            and CONFIG.get("voice_ref_snapshot_path") == resolved
+        ):
+            return CONFIG["voice_ref_b64"]
         signature = _voice_reference_signature(ref)
+        snapshot_path = CONFIG.get("voice_ref_snapshot_path")
+        snapshot_signature = CONFIG.get("voice_ref_snapshot_signature")
+        legacy_cache_valid = (
+            snapshot_path is None
+            and CONFIG.get("voice_ref_source_signature") == signature
+        )
         if (
             CONFIG.get("voice_ref_b64")
-            and CONFIG.get("voice_ref_snapshot_path") == str(ref)
+            and (
+                (snapshot_path == resolved and snapshot_signature == signature)
+                or legacy_cache_valid
+            )
         ):
             return CONFIG["voice_ref_b64"]
         if not ref.is_file():
@@ -652,6 +675,7 @@ def _cache_prepared_voice_reference(ref_path):
             encoded = _prepare_voice_reference(snapshot)
         CONFIG["voice_ref_b64"] = encoded
         CONFIG["voice_ref_snapshot_path"] = str(ref)
+        CONFIG["voice_ref_snapshot_signature"] = signature
         CONFIG["voice_ref_source_signature"] = signature
         CONFIG["voice_ref_fingerprint"] = fingerprint
         return encoded
@@ -663,20 +687,9 @@ def _tts_mimo(text, output_path, rate="+0%", pitch="+0Hz", emotion=None):
     MiMo-v2.5-tts 是 instruct-TTS：user 消息里的自然语言指令控制整句的情绪/语气/语速。
     每段 narration 的 `emotion` 标签即写进该指令，让解说有起伏、不机械。"""
     voice_ref = str(CONFIG.get("voice_ref") or "").strip()
-    voice_ref_b64 = CONFIG.get("voice_ref_b64")
+    voice_ref_b64 = None
     if voice_ref:
-        resolved = str(Path(voice_ref).expanduser().resolve())
-        snapshot_path = CONFIG.get("voice_ref_snapshot_path")
-        cached_signature = CONFIG.get("voice_ref_source_signature")
-        legacy_cache_valid = (
-            voice_ref_b64
-            and not snapshot_path
-            and cached_signature == _voice_reference_signature(voice_ref)
-        )
-        if not voice_ref_b64 or not (
-            snapshot_path == resolved or legacy_cache_valid
-        ):
-            voice_ref_b64 = _cache_prepared_voice_reference(voice_ref)
+        voice_ref_b64 = _cache_prepared_voice_reference(voice_ref)
     payload = {
         "model": "mimo-v2.5-tts-voiceclone" if voice_ref else CONFIG.get("mimo_tts_model", "mimo-v2.5-tts"),
         "messages": [
@@ -732,8 +745,10 @@ def main():
     for key in (
         "voice_ref_b64",
         "voice_ref_snapshot_path",
+        "voice_ref_snapshot_signature",
         "voice_ref_fingerprint",
         "voice_ref_source_signature",
+        "voice_ref_snapshot_locked",
     ):
         CONFIG.pop(key, None)
     if args.mimo_voice:

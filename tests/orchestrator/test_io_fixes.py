@@ -1,4 +1,5 @@
 import sys
+import os
 from argparse import Namespace
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-recap' / 'scripts'))
@@ -989,6 +990,32 @@ def test_recap_rejects_global_subtitle_band_from_environment_for_multi_source_cu
         recap.main()
     assert exc_info.value.code == 2
     assert "多视频 cut 暂不支持" in capsys.readouterr().err
+
+
+def test_recap_subtitle_coordinates_do_not_leak_into_process_environment(
+    monkeypatch, tmp_path
+):
+    video = tmp_path / "input.mp4"
+    video.write_bytes(b"source")
+    work = tmp_path / "work"
+    monkeypatch.delenv("SUBTITLE_Y_TOP", raising=False)
+    monkeypatch.delenv("SUBTITLE_Y_BOT", raising=False)
+    monkeypatch.delenv("MASK_SOURCE_SUBTITLES", raising=False)
+    monkeypatch.delenv("SOURCE_SUBTITLE_MASK_POLICY", raising=False)
+    monkeypatch.setattr(recap, "_probe_display_height_or_raise", lambda *args, **kwargs: 720)
+    monkeypatch.setattr(recap, "_preflight_burn_subtitles", lambda args: None)
+    monkeypatch.setattr(recap, "_run_or_restore_understanding", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sys, "argv", [
+        "recap.py", str(video), "--work-dir", str(work),
+        "--subtitle-y-top", "610", "--subtitle-y-bot", "660",
+    ])
+
+    recap.main()
+
+    assert "SUBTITLE_Y_TOP" not in os.environ
+    assert "SUBTITLE_Y_BOT" not in os.environ
+    assert "MASK_SOURCE_SUBTITLES" not in os.environ
+    assert "SOURCE_SUBTITLE_MASK_POLICY" not in os.environ
 
 
 def test_recap_fails_fast_and_absolutizes_voice_reference(monkeypatch, tmp_path, capsys):

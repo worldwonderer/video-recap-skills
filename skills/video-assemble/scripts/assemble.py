@@ -16,6 +16,7 @@ ASSEMBLY_QC = "assembly_qc.json"
 VISUAL_QC = "visual_qc.json"
 VISUAL_OVERLAYS = "visual_overlays.json"
 SEGMENT_AUDIO_SCHEMA_VERSION = 1
+FILTER_SCRIPT_THRESHOLD_BYTES = 8000
 # The default subtitle metrics (font/margins/PlayRes) were tuned in this reference space.
 # For any other canvas we scale them to it so glyphs are never stretched (PlayRes aspect ==
 # frame aspect) and stay proportional; a 16:9 source reproduces the legacy look exactly.
@@ -749,13 +750,65 @@ def _style_for_measured_subtitle_band(style, canvas=None):
     scale_y = float(style["play_res_y"]) / canvas_h
     style["margin_v"] = max(0, round((canvas_h - y_bot) * scale_y))
     current_font = max(1, int(style["font_size"]))
-    fitted_font = min(current_font, max(8, round((y_bot - y_top) * scale_y * 0.9)))
+    current_outline = float(style.get("outline", 0) or 0)
+    current_shadow = float(style.get("shadow", 0) or 0)
+    safe_area = _measured_subtitle_safe_area(style, canvas)
+    available_height = int((safe_area or {}).get("height", 0) or 0)
+    fitted_font = current_font
+    for candidate in range(current_font, 7, -1):
+        scale = candidate / current_font
+        outline = max(1 if current_outline > 0 else 0, round(current_outline * scale))
+        shadow = max(0, round(current_shadow * scale))
+        if candidate * 1.25 + outline * 2 + shadow <= available_height + 1e-6:
+            fitted_font = candidate
+            break
+    else:
+        # Keep the renderer's minimum readable size; visual QC will block because it cannot fit.
+        fitted_font = min(current_font, 8)
     if fitted_font < current_font:
         scale = fitted_font / current_font
         style["font_size"] = fitted_font
-        style["outline"] = max(1, round(float(style["outline"]) * scale))
-        style["shadow"] = max(0, round(float(style["shadow"]) * scale))
+        style["outline"] = max(
+            1 if current_outline > 0 else 0, round(current_outline * scale)
+        )
+        style["shadow"] = max(0, round(current_shadow * scale))
     return style
+
+
+def _measured_subtitle_safe_area(style, canvas=None):
+    """Return the padded measured band in ASS PlayRes coordinates, or None."""
+    y_top = int(CONFIG.get("subtitle_y_top", -1))
+    y_bot = int(CONFIG.get("subtitle_y_bot", -1))
+    canvas_w = int((canvas or {}).get("width", 0) or 0)
+    canvas_h = int((canvas or {}).get("height", 0) or 0)
+    if y_top < 0 and y_bot < 0:
+        return None
+    _validate_measured_subtitle_coordinate_domain(canvas)
+    if canvas_w <= 0 or canvas_h <= 0:
+        return None
+    if not 0 <= y_top < y_bot <= canvas_h:
+        raise ValueError(
+            f"字幕带坐标无效: top={y_top}, bot={y_bot}, 画布高度={canvas_h}；"
+            "必须满足 0 <= top < bot <= height"
+        )
+    padding = max(0, int(CONFIG.get("subtitle_mask_padding", 4) or 0))
+    safe_top = max(0, y_top - padding)
+    # The ASS style remains bottom-anchored at the measured y_bot. Bottom mask padding hides
+    # source glyph edges but is not usable subtitle layout space; only top padding can extend
+    # the line box without moving its baseline below the measured band.
+    safe_bot = y_bot
+    play_x = int(style.get("play_res_x") or canvas_w)
+    play_y = int(style.get("play_res_y") or canvas_h)
+    scale_y = play_y / canvas_h
+    margin_l = int(style.get("margin_l") or 0)
+    margin_r = int(style.get("margin_r") or 0)
+    return {
+        "x": margin_l,
+        "y": round(safe_top * scale_y),
+        "width": max(1, play_x - margin_l - margin_r),
+        "height": max(1, round((safe_bot - safe_top) * scale_y)),
+        "bottom_margin": max(0, round((canvas_h - safe_bot) * scale_y)),
+    }
 
 
 def _has_user_subtitles(work_dir):
@@ -1908,7 +1961,9 @@ def _visual_qc_has_forbidden_delivery_facts(value):
 def _build_visual_qc(tts_segments, work_dir, video_duration, canvas, *, overlay_qc=None, mask_filter=None):
     entries = _combined_subtitle_entries(tts_segments, work_dir, video_duration)
     style = _style_for_measured_subtitle_band(_subtitle_style_config(canvas), canvas)
-    subtitle_layout = _subtitle_layout_qc(entries, canvas, style)
+    subtitle_layout = _subtitle_layout_qc(
+        entries, canvas, style, safe_area=_measured_subtitle_safe_area(style, canvas)
+    )
     mask = _source_subtitle_mask_policy(work_dir)
     ratio = None
     if mask.get("active"):
@@ -2461,7 +2516,7 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
         log(f"成片响度归一: {final_ln}")
 
     filter_complex_bytes = filter_complex.encode('utf-8')
-    if len(filter_complex_bytes) > 8000:
+    if len(filter_complex_bytes) > FILTER_SCRIPT_THRESHOLD_BYTES:
         fc_script = Path(work_dir) / ".filter_complex.txt"
         fc_script.write_text(filter_complex, encoding="utf-8")
         log(f"使用 filter_complex_script (表达式长度 {len(filter_complex_bytes)} bytes)")
@@ -2507,11 +2562,22 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
     # encode — otherwise libx264 aborts to a 0-byte file. The downscale helper already evens out.
     even = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
     notes = []
+    video_filter_script = None
     if vf_chain:
         if max_h <= 0:  # no downscale in the chain to force even dims
             vf_chain.append(even)
-        cmd += ["-vf", ",".join(vf_chain), "-c:v", "libx264", "-preset", preset, "-crf", crf,
-                "-pix_fmt", "yuv420p"]
+        video_filter = ",".join(vf_chain)
+        if len(video_filter.encode("utf-8")) > FILTER_SCRIPT_THRESHOLD_BYTES:
+            video_filter_script = Path(work_dir) / ".video_filter.txt"
+            video_filter_script.write_text(video_filter, encoding="utf-8")
+            cmd += ["-filter_script:v:0", str(video_filter_script)]
+            log(
+                "使用 video filter script "
+                f"(表达式长度 {len(video_filter.encode('utf-8'))} bytes)"
+            )
+        else:
+            cmd += ["-vf", video_filter]
+        cmd += ["-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p"]
         notes = ((["遮挡原字幕"] if mask_filter else [])
                  + ([f"视觉叠加×{len(overlay_filters)}"] if overlay_filters else [])
                  + (["压制解说字幕"] if CONFIG.get("burn_subtitles", False) else [])
@@ -2533,8 +2599,10 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
             raise RuntimeError(f"视频组装失败: {result.stderr}")
     finally:
         # 清理临时 filter_complex 脚本（无论 ffmpeg 是否成功）
-        if len(filter_complex_bytes) > 8000:
+        if len(filter_complex_bytes) > FILTER_SCRIPT_THRESHOLD_BYTES:
             fc_script.unlink(missing_ok=True)
+        if video_filter_script is not None:
+            video_filter_script.unlink(missing_ok=True)
 
     log(f"最终视频: {output_path} ({output_path.stat().st_size / 1024 / 1024:.1f}MB)")
     _write_assembly_qc(
@@ -2978,6 +3046,10 @@ def main():
     ap.add_argument("--output-dir", default=None)
     ap.add_argument("--burn-subtitles", action=argparse.BooleanOptionalAction, default=None,
                     help="burn narration subtitles into the video (default on; --no-burn-subtitles to disable)")
+    ap.add_argument("--subtitle-y-top", type=int, default=None,
+                    help="inclusive top of a measured subtitle band in display-frame pixels")
+    ap.add_argument("--subtitle-y-bot", type=int, default=None,
+                    help="exclusive bottom of a measured subtitle band in display-frame pixels")
     ap.add_argument("--source-video", default=None,
                     help="original source video (cut mode) so timeline.json / 剪映 export reference the real clips")
     ap.add_argument("--export-jianying", action="store_true",
@@ -2991,6 +3063,16 @@ def main():
     work_dir = Path(args.work_dir)
     if args.burn_subtitles is not None:
         CONFIG["burn_subtitles"] = args.burn_subtitles
+    if (args.subtitle_y_top is None) != (args.subtitle_y_bot is None):
+        ap.error("--subtitle-y-top and --subtitle-y-bot must be provided together")
+    if args.subtitle_y_top is not None:
+        if args.subtitle_y_top < 0 or args.subtitle_y_bot <= args.subtitle_y_top:
+            ap.error("subtitle Y coordinates must satisfy 0 <= top < bot")
+        CONFIG["subtitle_y_top"] = args.subtitle_y_top
+        CONFIG["subtitle_y_bot"] = args.subtitle_y_bot
+        CONFIG["mask_source_subtitles"] = True
+        CONFIG["source_subtitle_mask_policy"] = "opt_in"
+        CONFIG["source_subtitle_mask_policy_declared"] = True
     if args.source_video:
         CONFIG["source_video"] = args.source_video
         CONFIG["source_video_explicit"] = True

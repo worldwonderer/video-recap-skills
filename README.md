@@ -162,7 +162,7 @@ python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 \
   --subtitle-y-top 610 --subtitle-y-bot 660
 ```
 
-第一条命令仅依赖现有的 Python 标准库 + ffmpeg，会为每个源视频生成 `.subtitle_measure/<视频名-source-id>/preview/` 网格红框预览与带来源信息的 `subtitle_positions.json`；不加 `--accept-detected` 可查看预览后手动确认坐标。坐标属于 ffmpeg 自动旋转后的显示画布，当前仅支持方形像素（SAR `1:1`）视频，并要求底部对齐字幕（`SUBTITLE_ALIGNMENT=1|2|3`）。遮罩可用 `SUBTITLE_MASK_OPACITY`（`0..1`）和 `SOURCE_SUBTITLE_MASK_TIMING=all|narration` 调整；烧录校订版原声字幕时，对应时间窗会自动使用全不透明遮罩，避免和原片硬字幕重影。
+第一条命令仅依赖现有的 Python 标准库 + ffmpeg，会为每个源视频生成 `.subtitle_measure/<视频名-source-id>/preview/` 网格红框预览与带来源信息的 `subtitle_positions.json`；不加 `--accept-detected` 可查看预览后手动确认坐标。坐标属于 ffmpeg 自动旋转后的显示画布，使用半开区间 `[top, bot)`，当前仅支持方形像素（SAR `1:1`）视频，并要求底部对齐字幕（`SUBTITLE_ALIGNMENT=1|2|3`）。遮罩可用 `SUBTITLE_MASK_OPACITY`（`0..1`）和 `SOURCE_SUBTITLE_MASK_TIMING=all|narration` 调整；烧录校订版原声字幕时，对应时间窗会自动使用全不透明遮罩，避免和原片硬字幕重影。
 
 用任意参考音频克隆解说音色（与整轨翻译的 `--edit-mode dub` 不同，这是给 recap 旁白换音色）：
 

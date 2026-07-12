@@ -16,11 +16,13 @@ All notable changes to this project are documented here. This project adheres to
 - 亮色画面不再把整片背景误并为字幕候选；测量结果按源隔离，失败时保留上一轮成功产物。
 - 校订版原声字幕使用逐窗口全不透明遮罩，避免与原片硬字幕重影；测量坐标拒绝不兼容的非底部 ASS 对齐。
 - voice reference 使用同一不可变快照完成转码和缓存标识，进程内重复调用不再继承上一次音色；CLI 与环境变量统一提前校验。
+- 长视频的遮罩滤镜超过安全命令长度时改用 ffmpeg filter script，避免 Windows `CreateProcess` 上限；measured band 统一为 `[top, bot)` 并成为视觉 QC 的真实安全区。
+- 测量产物提交失败会回滚整组旧产物；recap 通过显式 assemble 参数传递字幕坐标，不再污染进程环境。
 
 ### 验证
 
-- 全套 `python3 scripts/test.py` 通过（715 tests）；`ruff`、`compileall`、修改模块 `mypy` clean。
-- 真实 ffmpeg 合成字幕样片验证：测量工具识别 `y=[613,636]`；遮罩像素在留白帧为 `128`、解说帧为 `51`。
+- 全套 `python3 scripts/test.py` 通过（724 tests）；`ruff`、`compileall`、修改模块 `mypy` clean。
+- 真实 ffmpeg 合成字幕样片验证：测量工具识别 `y=[613,637)`；遮罩像素在留白帧为 `128`、解说帧为 `51`。
 
 
 ## [0.3.3] - 2026-06-28

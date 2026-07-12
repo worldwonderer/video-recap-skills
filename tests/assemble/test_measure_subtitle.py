@@ -2,6 +2,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -180,7 +182,9 @@ def test_main_uses_auto_rotated_frame_dimensions_for_canvas(monkeypatch, tmp_pat
     assert positions["canvas"] == {"width": 180, "height": 320}
     assert positions["source"]["path"] == str(video.resolve())
     assert positions["source"]["source_id"]
-    assert 245 < positions["subtitle_y_top"] < positions["subtitle_y_bot"] < 270
+    assert positions["subtitle_y_top"] == 250
+    # Detection uses an inclusive pixel row, while the recap CLI contract is [top, bot).
+    assert positions["subtitle_y_bot"] == 262
     assert list((out / "frames").iterdir()) == []
 
 
@@ -230,3 +234,38 @@ def test_failed_measurement_preserves_previous_owned_results(monkeypatch, tmp_pa
 
     assert old_preview.read_bytes() == b"old-preview"
     assert old_positions.read_text(encoding="utf-8") == '{"old": true}\n'
+
+
+def test_commit_failure_rolls_back_all_previous_measurement_artifacts(monkeypatch, tmp_path):
+    out = tmp_path / "measure"
+    out.mkdir()
+    (out / measure._OWNER_MARKER).write_text(measure._OWNER_MARKER_CONTENT, encoding="utf-8")
+    for name, content in (("frames", b"old-frame"), ("preview", b"old-preview")):
+        directory = out / name
+        directory.mkdir()
+        (directory / "artifact").write_bytes(content)
+    (out / "subtitle_positions.json").write_bytes(b"old-positions")
+
+    staging = out / ".measure-staging-test"
+    staging.mkdir()
+    for name, content in (("frames", b"new-frame"), ("preview", b"new-preview")):
+        directory = staging / name
+        directory.mkdir()
+        (directory / "artifact").write_bytes(content)
+    (staging / "subtitle_positions.json").write_bytes(b"new-positions")
+
+    real_replace = Path.replace
+
+    def fail_on_second_new_artifact(source, target):
+        if source.parent == staging and source.name == "preview":
+            raise OSError("simulated mid-commit failure")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", fail_on_second_new_artifact)
+
+    with pytest.raises(OSError, match="mid-commit"):
+        measure._commit_staged_output(out, staging)
+
+    assert (out / "frames" / "artifact").read_bytes() == b"old-frame"
+    assert (out / "preview" / "artifact").read_bytes() == b"old-preview"
+    assert (out / "subtitle_positions.json").read_bytes() == b"old-positions"

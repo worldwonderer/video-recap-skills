@@ -199,6 +199,51 @@ def test_assemble_main_creates_missing_output_dir(monkeypatch, tmp_path):
     assert manifest["final_output"].endswith("recap_demo.mp4")
 
 
+def test_assemble_main_applies_explicit_measured_subtitle_band(monkeypatch, tmp_path):
+    video = tmp_path / "input.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "tts_meta.json").write_text('{"segments": []}', encoding="utf-8")
+    captured = {}
+
+    def fake_assemble(input_video, tts_segments, work_dir, output_path):
+        captured.update({
+            "top": CONFIG["subtitle_y_top"],
+            "bot": CONFIG["subtitle_y_bot"],
+            "mask": CONFIG["mask_source_subtitles"],
+            "policy": CONFIG["source_subtitle_mask_policy"],
+            "declared": CONFIG["source_subtitle_mask_policy_declared"],
+        })
+        Path(output_path).write_bytes(b"mp4")
+        return output_path
+
+    for key, value in {
+        "subtitle_y_top": -1,
+        "subtitle_y_bot": -1,
+        "mask_source_subtitles": False,
+        "source_subtitle_mask_policy": "off",
+        "source_subtitle_mask_policy_declared": False,
+    }.items():
+        monkeypatch.setitem(CONFIG, key, value)
+    monkeypatch.setattr(assemble, "_preflight_burn_subtitles", lambda: None)
+    monkeypatch.setattr(assemble, "assemble_video", fake_assemble)
+    monkeypatch.setattr(sys, "argv", [
+        "assemble.py", str(video), "--work-dir", str(work),
+        "--subtitle-y-top", "610", "--subtitle-y-bot", "660",
+    ])
+
+    assemble.main()
+
+    assert captured == {
+        "top": 610,
+        "bot": 660,
+        "mask": True,
+        "policy": "opt_in",
+        "declared": True,
+    }
+
+
 def test_resolve_final_output_overwrites_stable_alias(tmp_path):
     """The recap output is always the stable alias recap_<stem>.mp4 (overwritten in
     place), so the iterate-on-narration loop refreshes one file instead of spawning
@@ -345,7 +390,7 @@ def test_generate_ass_places_subtitle_bottom_on_measured_y(monkeypatch, tmp_path
 
     style_line = next(line for line in ass.splitlines() if line.startswith("Style: Default,"))
     assert style_line.split(",")[-2] == "70"  # 720 - measured y_bot 650
-    assert style_line.split(",")[2] == "36"  # fit the 42px default into a measured 40px band
+    assert style_line.split(",")[2] == "31"  # line box + outline + shadow fit above anchored bot
 
 
 def test_generate_ass_rejects_measured_band_outside_canvas(monkeypatch, tmp_path):
@@ -600,6 +645,59 @@ def test_assemble_video_burns_ass_subtitles(monkeypatch, tmp_path):
     assert any(str(arg).startswith("subtitles=") for arg in ffmpeg_cmd)
     assert "-c:v" in ffmpeg_cmd
     assert "libx264" in ffmpeg_cmd
+
+
+def test_assemble_video_uses_filter_script_for_long_timed_mask(monkeypatch, tmp_path):
+    """Dense long-form narration must not place a >32K video graph on Windows' command line."""
+    video = tmp_path / "input.mp4"
+    video.write_bytes(b"video")
+    output = tmp_path / "output.mp4"
+    commands = []
+    video_filter_scripts = []
+
+    def fake_run_cmd(cmd):
+        commands.append(cmd)
+        if "-filter_script:v:0" in cmd:
+            script = Path(cmd[cmd.index("-filter_script:v:0") + 1])
+            video_filter_scripts.append((script, script.read_text(encoding="utf-8")))
+        output.write_bytes(b"mp4")
+        return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setitem(CONFIG, "burn_subtitles", True)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", True)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_policy", "opt_in")
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_policy_declared", True)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_timing", "narration")
+    monkeypatch.setitem(CONFIG, "subtitle_mask_opacity", 0.6)
+    monkeypatch.setitem(CONFIG, "subtitle_y_top", 610)
+    monkeypatch.setitem(CONFIG, "subtitle_y_bot", 660)
+    monkeypatch.setattr("assemble.get_video_duration", lambda path: 3800.0)
+    monkeypatch.setattr("assemble._apply_narration_speed", lambda segments, work_dir: None)
+    monkeypatch.setattr(
+        "assemble._build_timed_narration",
+        lambda segments, out, duration, wd: Path(out).write_bytes(b"narration"),
+    )
+    monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
+
+    segments = [{
+        "index": i,
+        "start": i * 10.0,
+        "end": i * 10.0 + 6.0,
+        "actual_place_start": i * 10.0,
+        "actual_place_end": i * 10.0 + 6.0,
+        "narration": f"第{i}段",
+        "audio_path": str(tmp_path / "narr.wav"),
+        "audio_duration": 1.0,
+    } for i in range(375)]
+
+    assemble_video(video, segments, tmp_path, output)
+
+    ffmpeg_cmd = commands[-1]
+    assert "-filter_script:v:0" in ffmpeg_cmd
+    assert "-vf" not in ffmpeg_cmd
+    assert video_filter_scripts[0][1].count("drawbox=") == 375
+    assert len(" ".join(map(str, ffmpeg_cmd))) < 32767
+    assert not video_filter_scripts[0][0].exists()
 
 
 def test_assemble_video_rejects_empty_tts_segments(tmp_path):
@@ -1702,6 +1800,52 @@ def test_invalid_visual_overlays_schema_blocks_visual_qc(tmp_path, monkeypatch, 
     assert overlay_qc["load_error"] == "invalid_schema"
     assert qc["verdict"] == "FAIL"
     assert "invalid_visual_overlays_json" in qc["blocking_codes"]
+
+
+def test_measured_subtitle_band_is_the_visual_qc_safe_area(tmp_path, monkeypatch):
+    """A band too narrow for even the minimum font must block instead of passing canvas QC."""
+    monkeypatch.setitem(CONFIG, "burn_subtitles", True)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", True)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_policy", "opt_in")
+    monkeypatch.setitem(CONFIG, "subtitle_y_top", 610)
+    monkeypatch.setitem(CONFIG, "subtitle_y_bot", 620)
+    monkeypatch.setitem(CONFIG, "subtitle_mask_padding", 0)
+
+    qc = assemble._build_visual_qc(
+        [{"start": 0.0, "end": 1.0, "narration": "窄字幕带"}],
+        tmp_path,
+        2.0,
+        {"width": 1280, "height": 720, "fps": 30.0, "sample_aspect_ratio": "1:1"},
+    )
+
+    assert qc["subtitles"]["safe_area"]["y"] == 610
+    assert qc["subtitles"]["safe_area"]["height"] == 10
+    assert qc["subtitles"]["overflow"] is True
+    assert "subtitle_overflow" in qc["blocking_codes"]
+
+
+def test_measured_subtitle_qc_contains_normal_line_above_anchored_bottom(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setitem(CONFIG, "burn_subtitles", True)
+    monkeypatch.setitem(CONFIG, "mask_source_subtitles", True)
+    monkeypatch.setitem(CONFIG, "source_subtitle_mask_policy", "opt_in")
+    monkeypatch.setitem(CONFIG, "subtitle_y_top", 610)
+    monkeypatch.setitem(CONFIG, "subtitle_y_bot", 650)
+    monkeypatch.setitem(CONFIG, "subtitle_mask_padding", 4)
+
+    qc = assemble._build_visual_qc(
+        [{"start": 0.0, "end": 1.0, "narration": "正常字幕带"}],
+        tmp_path,
+        2.0,
+        {"width": 1280, "height": 720, "fps": 30.0, "sample_aspect_ratio": "1:1"},
+    )
+
+    safe = qc["subtitles"]["safe_area"]
+    entry = qc["subtitles"]["entry_facts"][0]
+    assert safe == {"x": 40, "y": 606, "width": 1200, "height": 44, "bottom_margin": 70}
+    assert entry["band_height"] <= safe["height"]
+    assert qc["subtitles"]["overflow"] is False
 
 
 def test_legacy_mask_env_without_explicit_policy_is_blocking(monkeypatch):

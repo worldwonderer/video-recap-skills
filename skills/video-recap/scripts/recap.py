@@ -1193,9 +1193,9 @@ def main():
     ap.add_argument("--burn-subtitles", action=argparse.BooleanOptionalAction, default=None,
                     help="burn narration subtitles into the video (default on; --no-burn-subtitles to disable)")
     ap.add_argument("--subtitle-y-top", type=int, default=None,
-                    help="auto-rotated display-frame Y at the top of the measured subtitle band")
+                    help="inclusive auto-rotated display-frame Y at the top of the measured subtitle band")
     ap.add_argument("--subtitle-y-bot", type=int, default=None,
-                    help="auto-rotated display-frame Y at the bottom of the measured subtitle band")
+                    help="exclusive auto-rotated display-frame Y at the bottom of the measured subtitle band")
     ap.add_argument("--review-narration", action=argparse.BooleanOptionalAction, default=None,
                     help="run advisory narration quality review before TTS (default on; fail-open)")
     ap.add_argument("--require-narration-review", action="store_true",
@@ -1257,12 +1257,6 @@ def main():
                 f"subtitle Y coordinates exceed display canvas height {canvas_height}: "
                 f"bot={args.subtitle_y_bot}"
             )
-        os.environ["SUBTITLE_Y_TOP"] = str(args.subtitle_y_top)
-        os.environ["SUBTITLE_Y_BOT"] = str(args.subtitle_y_bot)
-        # Supplying a measured source-subtitle band is itself an explicit opt-in to mask
-        # that band. This keeps the visual safety policy explicit without extra CLI ceremony.
-        os.environ["MASK_SOURCE_SUBTITLES"] = "1"
-        os.environ["SOURCE_SUBTITLE_MASK_POLICY"] = "opt_in"
     if args.voice_ref:
         voice_ref = Path(args.voice_ref).expanduser().resolve()
         if not voice_ref.is_file():
@@ -1441,6 +1435,9 @@ def main():
         aargs += ["--output-dir", args.output_dir]
     if args.burn_subtitles is not None:
         aargs.append("--burn-subtitles" if args.burn_subtitles else "--no-burn-subtitles")
+    if args.subtitle_y_top is not None:
+        aargs += ["--subtitle-y-top", str(args.subtitle_y_top),
+                  "--subtitle-y-bot", str(args.subtitle_y_bot)]
     # env-only burn intent (BURN_SUBTITLES) is propagated implicitly: assemble re-derives it
     # via the same env_bool default the preflight used, so the two agree by shared env.
     if cut:

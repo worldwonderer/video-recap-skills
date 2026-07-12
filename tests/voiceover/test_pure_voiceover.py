@@ -466,6 +466,97 @@ def test_mimo_tts_refreshes_cached_reference_when_source_changes(monkeypatch, tm
     assert CONFIG["voice_ref_source_signature"] == voiceover._voice_reference_signature(second)
 
 
+def test_mimo_tts_refreshes_same_path_snapshot_outside_synthesis_invocation(monkeypatch, tmp_path):
+    import base64
+
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"old-reference")
+    old_signature = voiceover._voice_reference_signature(ref)
+    monkeypatch.setitem(CONFIG, "voice_ref", str(ref))
+    monkeypatch.setitem(CONFIG, "voice_ref_b64", base64.b64encode(b"stale").decode("ascii"))
+    monkeypatch.setitem(CONFIG, "voice_ref_snapshot_path", str(ref.resolve()))
+    monkeypatch.setitem(CONFIG, "voice_ref_source_signature", old_signature)
+    monkeypatch.delitem(CONFIG, "voice_ref_snapshot_locked", raising=False)
+    ref.write_bytes(b"replacement-reference")
+    monkeypatch.setattr(
+        voiceover,
+        "_prepare_voice_reference",
+        lambda path: base64.b64encode(b"fresh").decode("ascii"),
+    )
+    seen = []
+    monkeypatch.setattr(
+        voiceover,
+        "mimo_tts_api_call",
+        lambda payload: seen.append(payload) or {
+            "choices": [{"message": {"audio": {"data": base64.b64encode(b"audio").decode("ascii")}}}]
+        },
+    )
+
+    _tts_mimo("新参考音频", tmp_path / "out.wav")
+
+    assert seen[0]["audio"]["voice"] == "data:audio/wav;base64,ZnJlc2g="
+
+
+def test_mimo_tts_refreshes_prepared_snapshot_after_fingerprint_probe(monkeypatch, tmp_path):
+    """A live-source fingerprint refresh must not relabel stale prepared audio as current."""
+    import base64
+
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"old-reference")
+    old_signature = voiceover._voice_reference_signature(ref)
+    monkeypatch.setitem(CONFIG, "voice_ref", str(ref))
+    monkeypatch.setitem(CONFIG, "voice_ref_b64", base64.b64encode(b"stale").decode("ascii"))
+    monkeypatch.setitem(CONFIG, "voice_ref_snapshot_path", str(ref.resolve()))
+    monkeypatch.setitem(CONFIG, "voice_ref_snapshot_signature", old_signature)
+    monkeypatch.setitem(CONFIG, "voice_ref_source_signature", old_signature)
+    ref.write_bytes(b"replacement-reference")
+
+    # This probes the live source for a segment cache key before the API path prepares audio.
+    voiceover.tts_settings_fingerprint("mimo-tts")
+    monkeypatch.setattr(
+        voiceover,
+        "_prepare_voice_reference",
+        lambda path: base64.b64encode(b"fresh").decode("ascii"),
+    )
+    seen = []
+    monkeypatch.setattr(
+        voiceover,
+        "mimo_tts_api_call",
+        lambda payload: seen.append(payload) or {
+            "choices": [{"message": {"audio": {"data": base64.b64encode(b"audio").decode("ascii")}}}]
+        },
+    )
+
+    _tts_mimo("新参考音频", tmp_path / "out.wav")
+
+    assert seen[0]["audio"]["voice"] == "data:audio/wav;base64,ZnJlc2g="
+    assert CONFIG["voice_ref_snapshot_signature"] == voiceover._voice_reference_signature(ref)
+
+
+def test_mimo_tts_keeps_locked_snapshot_stable_during_parallel_invocation(monkeypatch, tmp_path):
+    import base64
+
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"replacement-after-snapshot")
+    monkeypatch.setitem(CONFIG, "voice_ref", str(ref))
+    monkeypatch.setitem(CONFIG, "voice_ref_b64", base64.b64encode(b"locked").decode("ascii"))
+    monkeypatch.setitem(CONFIG, "voice_ref_snapshot_path", str(ref.resolve()))
+    monkeypatch.setitem(CONFIG, "voice_ref_source_signature", "pre-snapshot-signature")
+    monkeypatch.setitem(CONFIG, "voice_ref_snapshot_locked", True)
+    seen = []
+    monkeypatch.setattr(
+        voiceover,
+        "mimo_tts_api_call",
+        lambda payload: seen.append(payload) or {
+            "choices": [{"message": {"audio": {"data": base64.b64encode(b"audio").decode("ascii")}}}]
+        },
+    )
+
+    _tts_mimo("同一轮调用", tmp_path / "out.wav")
+
+    assert seen[0]["audio"]["voice"] == "data:audio/wav;base64,bG9ja2Vk"
+
+
 def test_main_clears_previous_cli_voice_reference_between_invocations(monkeypatch, tmp_path):
     narration = tmp_path / "narration.json"
     narration.write_text("[]", encoding="utf-8")
