@@ -223,7 +223,7 @@ def test_live_missing_key_is_unavailable_and_replaces_stale_report(monkeypatch, 
 
     assert result["report"]["metadata"]["status"] == "unavailable"
     assert result["report"]["finding_count"] == 0
-    assert qc.validate_report(json.loads((work / "mimo_qc.json").read_text())) is True
+    assert qc.validate_report(json.loads((work / "mimo_qc.json").read_text(encoding="utf-8"))) is True
 
 
 @pytest.mark.parametrize("failure", ["http_401", "http_429", "timeout"])
