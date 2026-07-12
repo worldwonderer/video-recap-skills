@@ -12,6 +12,8 @@ def _burn_on(monkeypatch):
     monkeypatch.setitem(assemble.CONFIG, "burn_subtitles", True)
     monkeypatch.setitem(assemble.CONFIG, "mask_source_subtitles", True)
     monkeypatch.setitem(assemble.CONFIG, "source_subtitle_mask_policy", "opt_in")
+    monkeypatch.setitem(assemble.CONFIG, "source_subtitle_mask_timing", "all")
+    monkeypatch.setitem(assemble.CONFIG, "subtitle_mask_opacity", 1.0)
     monkeypatch.setitem(assemble.CONFIG, "subtitle_original_in_gaps", True)
 
 
@@ -124,6 +126,40 @@ def test_original_gap_entries_full_mode(monkeypatch, tmp_path):
     assert entries and all(e["text"] for e in entries)
     # confined to the asr span clipped into the [0,5] gap
     assert all(1.0 <= e["start"] and e["end"] <= 4.0 + 1e-6 for e in entries)
+
+
+def test_original_gap_entries_suppressed_when_mask_only_follows_narration(monkeypatch, tmp_path):
+    _burn_on(monkeypatch)
+    monkeypatch.setitem(assemble.CONFIG, "source_subtitle_mask_timing", "narration")
+    (tmp_path / "asr_result.json").write_text(
+        json.dumps([{"start": 1.0, "end": 4.0, "text": "原声已自带硬字幕"}]), encoding="utf-8"
+    )
+    segs = [{"actual_place_start": 5.0, "actual_place_end": 8.0, "narration": "解说"}]
+
+    assert assemble._original_gap_subtitle_entries(segs, tmp_path, 10.0) == []
+
+
+def test_original_gap_entries_suppressed_when_mask_is_transparent(monkeypatch, tmp_path):
+    _burn_on(monkeypatch)
+    monkeypatch.setitem(assemble.CONFIG, "subtitle_mask_opacity", 0.0)
+    (tmp_path / "asr_result.json").write_text(
+        json.dumps([{"start": 1.0, "end": 4.0, "text": "原声已自带硬字幕"}]), encoding="utf-8"
+    )
+
+    assert assemble._original_gap_subtitle_entries([], tmp_path, 10.0) == []
+
+
+def test_original_gap_entries_suppressed_when_full_timeline_mask_is_translucent(
+    monkeypatch, tmp_path
+):
+    _burn_on(monkeypatch)
+    monkeypatch.setitem(assemble.CONFIG, "subtitle_mask_opacity", 0.6)
+    (tmp_path / "asr_result.json").write_text(
+        json.dumps([{"start": 1.0, "end": 4.0, "text": "原声仍透过遮罩可见"}]),
+        encoding="utf-8",
+    )
+
+    assert assemble._original_gap_subtitle_entries([], tmp_path, 10.0) == []
 
 
 def test_original_gap_entries_cut_mode_remap(monkeypatch, tmp_path):

@@ -150,6 +150,43 @@ It stores small JSON/MD artifacts plus an append-only `materials_index.jsonl`; i
 python3 skills/video-recap/scripts/recap.py --doctor
 ```
 
+## Enhanced rendering: source-pinned subtitles and cloned narration voice
+
+These enhancements are adapted from
+[ops120/video-recap-skills-plus](https://github.com/ops120/video-recap-skills-plus). Thanks to
+[@ops120](https://github.com/ops120) for publishing and maintaining the downstream implementation.
+
+Pin recap subtitles to the source video's burned-in subtitle band (this explicitly enables
+masking for that measured band; the enhanced default is **60% opacity during narration only**,
+leaving original-audio gaps clean):
+
+```bash
+python3 tools/measure_subtitle.py /path/to/video.mp4 --accept-detected
+python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 \
+  --subtitle-y-top 610 --subtitle-y-bot 660
+```
+
+The measurement tool still uses only stdlib + ffmpeg. For each source it writes grid/red-band
+previews under `.subtitle_measure/<video-source-id>/preview/` plus a source-identified
+`subtitle_positions.json`; omit `--accept-detected` to inspect and confirm the coordinates
+interactively. Coordinates use a half-open `[top, bot)` interval on ffmpeg's auto-rotated display canvas and currently require
+square-pixel (SAR `1:1`) video plus bottom-aligned subtitles (`SUBTITLE_ALIGNMENT=1|2|3`). Tune with
+`SUBTITLE_MASK_OPACITY` (`0..1`) and
+`SOURCE_SUBTITLE_MASK_TIMING=all|narration`. Windows containing replacement original-dialogue
+subtitles are masked opaquely so they cannot stack over the source hard subtitles.
+
+Clone an arbitrary reference voice for recap narration (distinct from full-track translation in
+`--edit-mode dub`):
+
+```bash
+python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --voice-ref /path/to/voice-ref.wav
+```
+
+The reference is normalized to 24 kHz mono once, lazily when fresh TTS is needed; a fully cached
+rerun does not transcode it. Its content hash is part of the TTS cache fingerprint, so replacing
+the file cannot silently reuse old speech. **Use voice cloning only with the voice owner's
+authorization. The reference audio is sent to the MiMo service for synthesis.**
+
 ## English video → Chinese dub · original voice
 
 Translate an English video into Chinese and voice it in the **original speaker's timbre** (cloned, not a fixed voice), leaving the picture unchanged. Unlike "recap" (Chinese commentary over ducked audio), dubbing **replaces** the original speech with a faithful Chinese translation. Trigger it in natural language, like recap:

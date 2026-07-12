@@ -1,4 +1,5 @@
 import sys
+import os
 from argparse import Namespace
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-recap' / 'scripts'))
@@ -938,6 +939,121 @@ def test_recap_rejects_multi_video_non_cut(monkeypatch, tmp_path):
         recap.main()
 
 
+def test_probe_display_height_accounts_for_rotation_and_sar(monkeypatch):
+    payload = {
+        "streams": [{
+            "width": 320,
+            "height": 180,
+            "sample_aspect_ratio": "2:1",
+            "side_data_list": [{"rotation": 90}],
+        }]
+    }
+    monkeypatch.setattr(
+        recap.subprocess,
+        "run",
+        lambda *args, **kwargs: type("Result", (), {
+            "returncode": 0, "stdout": json.dumps(payload), "stderr": ""
+        })(),
+    )
+
+    assert recap._probe_display_height_or_raise("rotated.mp4") == 640
+    with pytest.raises(SystemExit, match="require square-pixel video"):
+        recap._probe_display_height_or_raise("rotated.mp4", require_square_pixels=True)
+
+
+def test_recap_rejects_global_subtitle_band_for_multi_source_cut(monkeypatch, tmp_path, capsys):
+    videos = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
+    for video in videos:
+        video.write_bytes(b"source")
+    monkeypatch.setattr(sys, "argv", [
+        "recap.py", *map(str, videos), "--edit-mode", "cut",
+        "--subtitle-y-top", "100", "--subtitle-y-bot", "130",
+    ])
+
+    with pytest.raises(SystemExit) as exc_info:
+        recap.main()
+    assert exc_info.value.code == 2
+    assert "多视频 cut 暂不支持" in capsys.readouterr().err
+
+
+def test_recap_rejects_global_subtitle_band_from_environment_for_multi_source_cut(
+    monkeypatch, tmp_path, capsys
+):
+    videos = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
+    for video in videos:
+        video.write_bytes(b"source")
+    monkeypatch.setenv("SUBTITLE_Y_TOP", "100")
+    monkeypatch.setenv("SUBTITLE_Y_BOT", "130")
+    monkeypatch.setattr(sys, "argv", ["recap.py", *map(str, videos), "--edit-mode", "cut"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        recap.main()
+    assert exc_info.value.code == 2
+    assert "多视频 cut 暂不支持" in capsys.readouterr().err
+
+
+def test_recap_subtitle_coordinates_do_not_leak_into_process_environment(
+    monkeypatch, tmp_path
+):
+    video = tmp_path / "input.mp4"
+    video.write_bytes(b"source")
+    work = tmp_path / "work"
+    monkeypatch.delenv("SUBTITLE_Y_TOP", raising=False)
+    monkeypatch.delenv("SUBTITLE_Y_BOT", raising=False)
+    monkeypatch.delenv("MASK_SOURCE_SUBTITLES", raising=False)
+    monkeypatch.delenv("SOURCE_SUBTITLE_MASK_POLICY", raising=False)
+    monkeypatch.setattr(recap, "_probe_display_height_or_raise", lambda *args, **kwargs: 720)
+    monkeypatch.setattr(recap, "_preflight_burn_subtitles", lambda args: None)
+    monkeypatch.setattr(recap, "_run_or_restore_understanding", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sys, "argv", [
+        "recap.py", str(video), "--work-dir", str(work),
+        "--subtitle-y-top", "610", "--subtitle-y-bot", "660",
+    ])
+
+    recap.main()
+
+    assert "SUBTITLE_Y_TOP" not in os.environ
+    assert "SUBTITLE_Y_BOT" not in os.environ
+    assert "MASK_SOURCE_SUBTITLES" not in os.environ
+    assert "SOURCE_SUBTITLE_MASK_POLICY" not in os.environ
+
+
+def test_recap_fails_fast_and_absolutizes_voice_reference(monkeypatch, tmp_path, capsys):
+    video = tmp_path / "input.mp4"
+    video.write_bytes(b"source")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("recap._preflight_burn_subtitles", lambda args: None)
+    monkeypatch.setattr("recap._understand_args_for_source", lambda *args: [])
+    monkeypatch.setattr("recap._run_or_restore_understanding", lambda *args: None)
+    monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--voice-ref", "missing.wav"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        recap.main()
+    assert exc_info.value.code == 2
+    assert "reference audio does not exist" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "effect_args, message",
+    [
+        (["--voice-ref", "voice.wav"], "--voice-ref is only supported in full/cut modes"),
+        (["--subtitle-y-top", "610", "--subtitle-y-bot", "660"],
+         "--subtitle-y-top/--subtitle-y-bot are only supported in full/cut modes"),
+    ],
+)
+def test_recap_rejects_plus_effect_flags_ignored_by_dub(
+    monkeypatch, tmp_path, capsys, effect_args, message
+):
+    video = tmp_path / "input.mp4"
+    video.write_bytes(b"source")
+    monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--edit-mode", "dub", *effect_args])
+
+    with pytest.raises(SystemExit) as exc_info:
+        recap.main()
+    assert exc_info.value.code == 2
+    assert message in capsys.readouterr().err
+
+
 def test_recap_multi_video_phase_a_writes_manifest_and_pauses(monkeypatch, tmp_path, capsys):
     v1 = tmp_path / "a.mp4"
     v2 = tmp_path / "b.mp4"
@@ -1108,6 +1224,31 @@ def test_continuation_command_preserves_multi_videos_and_material_flags(tmp_path
     assert "--material-library-dir" in cmd
     assert "--use-materials" in cmd
     assert "--save-materials" in cmd
+
+
+def test_continuation_command_preserves_plus_effect_flags(tmp_path):
+    args = _manifest_args()
+    args.mimo_tts_voice = None
+    args.allow_partial_tts = False
+    args.burn_subtitles = True
+    args.output_dir = None
+    args.export_jianying = False
+    args.jianying_bundle_media = False
+    args.jianying_no_bundle_media = False
+    args.review_narration = None
+    args.require_narration_review = False
+    args.material_library_dir = None
+    args.use_materials = False
+    args.save_materials = False
+    args.voice_ref = str(tmp_path / "voice ref.wav")
+    args.subtitle_y_top = 610
+    args.subtitle_y_bot = 660
+
+    cmd = recap._continuation_command(tmp_path / "in.mp4", tmp_path / "work", args)
+
+    assert "--voice-ref" in cmd and "voice ref.wav" in cmd
+    assert "--subtitle-y-top 610" in cmd
+    assert "--subtitle-y-bot 660" in cmd
 
 
 def test_recap_single_video_phase_a_can_save_materials(monkeypatch, tmp_path):

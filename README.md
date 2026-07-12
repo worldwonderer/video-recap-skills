@@ -150,6 +150,28 @@ python3 skills/video-recap/scripts/recap.py ep1.mp4 ep2.mp4 --edit-mode cut \
 python3 skills/video-recap/scripts/recap.py --doctor
 ```
 
+## 效果增强：贴源字幕与克隆音色解说
+
+本节效果增强适配自 [ops120/video-recap-skills-plus](https://github.com/ops120/video-recap-skills-plus)；感谢 [@ops120](https://github.com/ops120) 公开并维护该下游实现。
+
+让新字幕贴到原视频烧录字幕的位置（自动启用该字幕带遮罩；默认 **0.6 半透明且只在解说时出现**，原声留白保持干净画面）：
+
+```bash
+python3 tools/measure_subtitle.py /path/to/video.mp4 --accept-detected
+python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 \
+  --subtitle-y-top 610 --subtitle-y-bot 660
+```
+
+第一条命令仅依赖现有的 Python 标准库 + ffmpeg，会为每个源视频生成 `.subtitle_measure/<视频名-source-id>/preview/` 网格红框预览与带来源信息的 `subtitle_positions.json`；不加 `--accept-detected` 可查看预览后手动确认坐标。坐标属于 ffmpeg 自动旋转后的显示画布，使用半开区间 `[top, bot)`，当前仅支持方形像素（SAR `1:1`）视频，并要求底部对齐字幕（`SUBTITLE_ALIGNMENT=1|2|3`）。遮罩可用 `SUBTITLE_MASK_OPACITY`（`0..1`）和 `SOURCE_SUBTITLE_MASK_TIMING=all|narration` 调整；烧录校订版原声字幕时，对应时间窗会自动使用全不透明遮罩，避免和原片硬字幕重影。
+
+用任意参考音频克隆解说音色（与整轨翻译的 `--edit-mode dub` 不同，这是给 recap 旁白换音色）：
+
+```bash
+python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --voice-ref /path/to/voice-ref.wav
+```
+
+参考音频仅在需要生成新 TTS 时转成一次 24 kHz 单声道 WAV，之后所有解说段复用；全量命中缓存时不转码。参考文件内容也进入 TTS 缓存指纹，替换音频后不会误用旧配音。**仅在获得音色所有者授权时使用；参考音频会发送给 MiMo 服务用于合成。**
+
 ## 英语视频→中文配音 · 保留原音色
 
 把英文视频翻译成中文，并用**原说话人的音色**配音（克隆，而非固定音色），画面不变。这与「解说」不同：解说在原声上叠加中文评述，配音则把原始台词**替换**成忠实翻译的中文。和解说一样用自然语言触发：

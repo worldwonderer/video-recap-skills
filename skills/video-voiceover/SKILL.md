@@ -35,7 +35,8 @@ timeline, and the orchestrator passes it here. In the legacy direct-cut path,
 ## Run
 
 ```bash
-python3 scripts/voiceover.py --work-dir <work_dir> --narration <narration.json> [--mimo-voice 冰糖]
+python3 scripts/voiceover.py --work-dir <work_dir> --narration <narration.json> \
+  [--mimo-voice 冰糖 | --voice-ref <reference-audio>]
 ```
 
 For direct one-off use, omitting `--narration` reads `work_dir/narration.json`.
@@ -53,6 +54,9 @@ the video-recap orchestrator always passes `narration.json`.
 
 ## Notes
 - Re-runs safely reuse only matching per-segment audio; edited narration or TTS settings regenerate the affected WAVs.
+- `--voice-ref` (full/cut recap only) switches narration to `mimo-v2.5-tts-voiceclone`; the reference
+  is normalized lazily once when fresh synthesis is needed, and its content/preparation fingerprint
+  invalidates stale cached segments. Use only with authorization; the reference is sent to MiMo.
 - `TTS_WORKERS`, `TTS_TIMEOUT`, `TTS_RETRIES`, `ALLOW_PARTIAL_TTS` tune throughput/robustness.
 - Dub mode has its own deterministic gate: `dub_lint.json` blocks empty/overlapping/out-of-range
   translation lines BEFORE voiceclone spend, and `dub_review.json` scaffolds fidelity/tone/timing/

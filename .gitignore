@@ -26,3 +26,4 @@ edited_source.mp4
 edited_source.mp4.meta.json
 *.srt
 *.ass
+.subtitle_measure/
