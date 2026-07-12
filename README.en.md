@@ -251,7 +251,7 @@ Priority: **your file › the agent-proofread `original_subtitles.json` › ASR 
 ## Acknowledgements
 
 - [linux.do](https://linux.do)
-- The 剪映 draft protocol follows [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft), [capcut-mate](https://github.com/Hommy-master/capcut-mate), and [duo-video](https://github.com/duoec/duo-video/tree/ef4eb46c823910553f901649f2f13fd7575e748f); see the [protocol notice](skills/video-assemble/references/jianying/SOURCE.md) for licensing and scope.
+- The 剪映 draft protocol references [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft), [capcut-mate](https://github.com/Hommy-master/capcut-mate), and [duo-video](https://github.com/duoec/duo-video).
 
 ## License
 

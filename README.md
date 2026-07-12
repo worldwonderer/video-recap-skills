@@ -233,7 +233,7 @@ python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --voice-ref /path
 ## 致谢
 
 - [linux.do](https://linux.do)
-- 剪映草稿协议参考 [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft)、[capcut-mate](https://github.com/Hommy-master/capcut-mate) 与 [duo-video](https://github.com/duoec/duo-video/tree/ef4eb46c823910553f901649f2f13fd7575e748f)；许可证与适配说明见[专项文档](skills/video-assemble/references/jianying/SOURCE.md)。
+- 剪映草稿协议参考 [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft)、[capcut-mate](https://github.com/Hommy-master/capcut-mate) 和 [duo-video](https://github.com/duoec/duo-video)。
 
 ## 许可
 
