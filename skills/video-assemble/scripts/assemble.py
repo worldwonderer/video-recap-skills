@@ -320,13 +320,6 @@ def _write_assembly_qc(work_dir, qc):
     return path
 
 
-def _enforce_assembly_qc(work_dir, qc):
-    _write_assembly_qc(work_dir, qc)
-    if qc.get("blocking"):
-        codes = ", ".join(qc.get("blocking_codes", []))
-        raise RuntimeError(f"声音组装 QC 失败: {codes}；详见 {Path(work_dir) / ASSEMBLY_QC}")
-
-
 def _resolve_final_output(base, stem):
     """The recap output is the stable human alias recap_<stem>.mp4, overwritten in place
     on every run so the iterate-on-narration loop always refreshes the same file."""
@@ -880,11 +873,6 @@ def _source_subtitle_mask_policy(work_dir=None):
     }
 
 
-def _source_subtitle_mask_policy_qc(canvas=None, work_dir=None):
-    """Compatibility/test helper: return the same explicit policy facts used by visual QC."""
-    return _source_subtitle_mask_policy(work_dir)
-
-
 def assembly_settings_fingerprint(work_dir=None):
     """Settings that affect the rendered video, used by pipeline resume cache. When work_dir is
     given, a user_subtitles presence flag is included so dropping in a user-subtitle file rebuilds
@@ -964,32 +952,6 @@ def assembly_settings_fingerprint(work_dir=None):
         fingerprint["subtitle_renderer"] = "ass"
         fingerprint["subtitle_style"] = _subtitle_style_config()
     return fingerprint
-
-
-def _wrap_subtitle_text(text, max_chars=20, line_break="\n"):
-    """把过长字幕折成均衡的两行：在最接近中点的标点处断开，标点跟在上一行末尾，
-    绝不让结尾的句号/逗号单独掉到第二行（之前的强制断行会孤立标点、两行严重失衡）。
-
-    遗留工具：现在字幕由 _subtitle_entries / _split_subtitle_chunks 拆成短的单行块，烧录链路
-    不再调用本函数；保留仅作单元测试与兜底。"""
-    text = text.strip()
-    if len(text) <= max_chars:
-        return text
-    puncts = "，。！？、；：…—,.!?;:"
-    mid = len(text) / 2
-    # 候选断点 = 标点之后的位置（标点留在上一行）；排除最后一个字符，避免孤立结尾标点
-    best = None
-    for i, ch in enumerate(text[:-1]):
-        if ch in puncts:
-            cut = i + 1
-            if best is None or abs(cut - mid) < abs(best - mid):
-                best = cut
-    if best is None:                       # 没有可用标点 → 从中点附近断开
-        best = int(round(mid))
-    line1, line2 = text[:best].strip(), text[best:].strip()
-    if not line1 or not line2:             # 退化情形 → 保持一行，不强行制造孤行
-        return text
-    return line_break.join([line1, line2])
 
 
 def _subtitle_display_text(text):
@@ -1171,14 +1133,8 @@ def _distribute_chunks(chunks, start, end):
     return out
 
 
-def _karaoke_chunks(text, start, end, max_chars):
-    """Split narration `text` into short one-line chunks distributed across [start,end]."""
-    return _distribute_chunks(_split_subtitle_chunks(text, max_chars), start, end)
-
-
 def _bracketed_original_chunks(text, start, end, max_chars):
-    """Like _karaoke_chunks, but for ORIGINAL dialogue: wrap the whole line in 「」 so it reads
-    as quoted original speech, visually distinct from the recap's own narration."""
+    """Split original dialogue into timed chunks wrapped in 「」 for visual distinction."""
     raw = str(text).strip()
     if raw.startswith("「") and raw.endswith("」"):
         raw = raw[1:-1].strip()

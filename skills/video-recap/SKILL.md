@@ -32,6 +32,9 @@ export MIMO_API_KEY=***          # ONE key drives ASR + VLM + TTS (all MiMo)
 The whole pipeline runs on ffmpeg + a single MiMo key: ASR (`mimo-v2.5-asr`), VLM (`mimo-v2.5`),
 TTS (`mimo-v2.5-tts`). `tp-*` Token Plan keys default to the cn cluster (`MIMO_TOKEN_PLAN_CLUSTER`).
 Optional MiMo scene-chunk video understanding: `--mimo-video-overview`.
+Optional advisory final-stage review: `--mimo-qc pre-assemble|post-render|both`.
+It is off by default, makes at most one request per selected stage, writes
+`mimo_qc.json`, and is permanently fail-open/non-blocking.
 
 Overridable defaults (zero-config otherwise): see `references/config-playbook.md`.
 
@@ -83,6 +86,18 @@ python3 scripts/recap.py <video> --work-dir <work_dir>          # [--edit-mode c
 This validates the narration, (cut: builds `edited_source.mp4`), synthesizes the voiceover, and
 assembles `recap_<name>.mp4`.
 
+To ask MiMo for agent/user-facing suggestions without gating the render:
+
+```bash
+python3 scripts/recap.py <video> --work-dir <work_dir> --mimo-qc both
+```
+
+The pre-assemble review sees scripts/plans/TTS metadata; post-render also sees up
+to six temporary JPEG samples. Matching inputs use a content cache; add
+`--mimo-qc-refresh` to refresh. Missing credentials, 401/429, timeout, malformed
+output, or sampling failure only produce an `unavailable`/`failed` pointer and
+the pipeline continues. Frame base64 and credentials are never written to disk.
+
 For source-pinned subtitles, first run `python3 tools/measure_subtitle.py <video>` from the repo
 root, then pass the measured `--subtitle-y-top/--subtitle-y-bot`; this explicitly enables a 60%
 opacity narration-window mask for that band. Coordinates use ffmpeg's auto-rotated display canvas
@@ -120,10 +135,13 @@ python3 scripts/recap.py --doctor
 
 - `recap_<video>.mp4` — final video · `subtitles.srt` / `.ass` — subtitles
 - `work_dir/` — all intermediate artifacts (the inter-skill contract; see `references/data-schema.md`)
+- `work_dir/mimo_qc.json` — optional aggregated advisory report for selected
+  pre-assemble/post-render stages; never a release gate
 
 ## Options (passed through to the stage skills)
 `--context`, `--scene-threshold`, `--style`, `--edit-mode {full,cut,dub}`, `--target-duration`,
-`--skip-asr`, `--mimo-video-overview`, `--consolidate`, `--consolidate-asr`, `--mimo-tts-voice`,
+`--skip-asr`, `--mimo-video-overview`, `--mimo-qc {off,pre-assemble,post-render,both}`,
+`--mimo-qc-refresh`, `--consolidate`, `--consolidate-asr`, `--mimo-tts-voice`,
 `--voice-ref`, `--subtitle-y-top`, `--subtitle-y-bot`, `--no-burn-subtitles` (burn is on by default),
 `--output-dir`, `--material-library-dir`, `--use-materials`, `--save-materials`.
 
@@ -132,5 +150,7 @@ python3 scripts/recap.py --doctor
 ## What this skill does NOT do
 - Does NOT write narration.json / clip_plan.json — the agent authors those (see the video-script skill).
 - Does NOT hard-block on the narration review (advisory; validate.py is the hard gate).
+- Does NOT let MiMo QC block, repair, or change the exit status; subjective
+  findings are pointers for the agent/user only.
 - Is NOT an unattended scheduler — it is human-in-the-loop and posts to no channel.
 - Shares NO code between stage skills — they communicate only through work_dir artifacts.

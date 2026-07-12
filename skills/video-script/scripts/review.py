@@ -154,10 +154,6 @@ def _source_output_overlaps(start, end, spans):
     return overlaps
 
 
-def _map_source_range_to_output(start, end, spans):
-    return [(o["output_start"], o["output_end"]) for o in _source_output_overlaps(start, end, spans)]
-
-
 def _remap_frame_facts(frame_facts, overlap):
     if not isinstance(frame_facts, dict):
         return frame_facts
@@ -229,49 +225,6 @@ def remap_grounding_to_output_timeline(vlm_analysis, asr_result, clip_spans):
     remapped_scenes.sort(key=lambda x: (float(x.get("start", 0)), float(x.get("end", 0))))
     remapped_asr.sort(key=lambda x: (float(x.get("start", 0)), float(x.get("end", 0))))
     return remapped_scenes, remapped_asr
-
-
-def _scene_grounding(vlm_analysis, limit=60):
-    lines = []
-    for scene in (vlm_analysis or [])[:limit]:
-        if not isinstance(scene, dict):
-            continue
-        sid = scene.get("scene_id", "?")
-        start = scene.get("start", 0)
-        end = scene.get("end", 0)
-        desc = str(scene.get("description", "")).strip().replace("\n", " ")
-        facts = scene.get("frame_facts")
-        fact_txt = ""
-        picks = []
-        if isinstance(facts, dict):  # canonical shape: {"<ts>": ["action", ...]} (vlm.py)
-            def fact_sort_key(value):
-                try:
-                    return (0, float(value))
-                except (TypeError, ValueError):
-                    return (1, str(value))
-
-            for ts in sorted(facts.keys(), key=fact_sort_key):
-                vals = facts[ts]
-                picks.extend(vals if isinstance(vals, list) else [str(vals)])
-        elif isinstance(facts, list):  # defensive: legacy list shape
-            for f in facts:
-                picks.append(str(f.get("fact", f.get("text", ""))).strip() if isinstance(f, dict) else str(f).strip())
-        if picks:
-            fact_txt = " | 帧实: " + "；".join(p for p in picks[:4] if p)
-        lines.append(f"[场景{sid} {float(start):.0f}-{float(end):.0f}s] {desc}{fact_txt}")
-    return "\n".join(lines)
-
-
-def _asr_grounding(asr_result, limit=80):
-    lines = []
-    for seg in (asr_result or [])[:limit]:
-        if not isinstance(seg, dict):
-            continue
-        text = str(seg.get("text", "")).strip()
-        if not text:
-            continue
-        lines.append(f"[{float(seg.get('start', 0)):.0f}-{float(seg.get('end', 0)):.0f}s] {text}")
-    return "\n".join(lines)
 
 
 def _safe_time(item, key, default=0.0):
@@ -428,16 +381,6 @@ def _research_context_items(research):
     return items
 
 
-def select_coverage_ranges(scenes, asr_result, narration, **kwargs):
-    """Pure compatibility seam: return deterministic review coverage ranges.
-
-    This is a thin public alias over coverage_policy_v1's selected_ranges so tests and
-    downstream orchestration can depend on a stable API without reaching into policy
-    internals.
-    """
-    return coverage_policy_v1(scenes, asr_result, narration, **kwargs).get("selected_ranges", [])
-
-
 def filter_evidence_by_ranges(vlm_analysis, asr_result, ranges, *, timeline="source"):
     """Pure compatibility seam: collect visual/ASR evidence items inside ranges."""
     clock = "output" if timeline == "cut_output" else "source"
@@ -530,43 +473,6 @@ def validate_public_evidence_contract(bundle):
         if item.get("support") != "context_only":
             errors.append(f"context_items[{idx}].support must be context_only")
     return {"valid": not errors, "errors": errors, "warnings": warnings}
-
-
-def render_evidence_for_review(bundle_or_vlm, asr_result=None, narration=None, **kwargs):
-    """Pure compatibility seam: render a bundle, or build+render from raw inputs."""
-    limit_items = kwargs.pop("limit_items", 220)
-    if isinstance(bundle_or_vlm, dict) and "items" in bundle_or_vlm:
-        return render_evidence_bundle(bundle_or_vlm, limit_items=limit_items)
-    bundle = build_evidence_bundle(bundle_or_vlm, asr_result, narration, **kwargs)
-    return render_evidence_bundle(bundle, limit_items=limit_items)
-
-
-def validate_timeline_mapping(clip_spans):
-    """Pure compatibility seam: validate source→output clip-span mapping."""
-    errors = []
-    prev_output_end = None
-    for idx, span in enumerate(clip_spans or []):
-        if not isinstance(span, dict):
-            errors.append(f"clip_spans[{idx}] must be a dict")
-            continue
-        try:
-            ss = float(span["source_start"])
-            se = float(span["source_end"])
-            os_ = float(span["output_start"])
-            oe = float(span["output_end"])
-        except (KeyError, TypeError, ValueError):
-            errors.append(f"clip_spans[{idx}] has invalid required times")
-            continue
-        if not all(math.isfinite(v) for v in (ss, se, os_, oe)):
-            errors.append(f"clip_spans[{idx}] has non-finite times")
-        if se <= ss:
-            errors.append(f"clip_spans[{idx}] source_end must be > source_start")
-        if oe <= os_:
-            errors.append(f"clip_spans[{idx}] output_end must be > output_start")
-        if prev_output_end is not None and os_ < prev_output_end:
-            errors.append(f"clip_spans[{idx}] overlaps previous output span")
-        prev_output_end = max(prev_output_end if prev_output_end is not None else os_, oe)
-    return {"valid": not errors, "errors": errors, "span_count": len(clip_spans or [])}
 
 
 def build_evidence_bundle(vlm_analysis, asr_result, narration, *, timeline="source", research=None, warnings=None):

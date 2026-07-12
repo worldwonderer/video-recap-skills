@@ -69,6 +69,7 @@ def build_draft(timeline, new_id=None, probe=None):
 
     for timeline_track in timeline.get("tracks", []):
         _build_timeline_track(ctx, timeline_track)
+    ctx.finalize_tracks()
 
     draft_id = new_id()
     content = _draft_content_skeleton(

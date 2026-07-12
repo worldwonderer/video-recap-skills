@@ -39,7 +39,8 @@ flowchart LR
 - **Narration in blocks, original in blocks.** Narration plays in connected blocks, each voiced in one pass; in the gaps, the original audio returns at full volume — roughly 7:3.
 - **Cut first, frames aligned.** `--edit-mode cut` renders the cut first, then you narrate against that timeline, so picture and voice stay in sync.
 - **Multi-video cut, reusable analysis.** Feed several videos at once, pick ranges by `source_id`, and render one recap; each video's analysis is saved to a filesystem material library you can `grep` and reuse next time.
-- **Keep editing in 剪映.** Optionally export a schema-driven multi-track 剪映 draft — original, narration, BGM, and subtitles each on a track; ffmpeg remains the canonical render.
+- **Keep editing in 剪映.** Optionally export a schema-driven draft with editable original clips, narration, BGM, subtitles, and local image overlays. Video/audio/images are bundled under `Resources/local` with a material index, so a clone or moved draft stays usable. ffmpeg remains the canonical render.
+- **Optional MiMo adviser, never a gatekeeper.** `--mimo-qc pre-assemble|post-render|both` writes semantic/aesthetic suggestions for the agent/user to `mimo_qc.json`. Missing keys, rate limits, timeouts, and malformed model output are warnings only—never blockers or automatic edits.
 
 ## Installation
 
@@ -150,6 +151,18 @@ It stores small JSON/MD artifacts plus an append-only `materials_index.jsonl`; i
 python3 skills/video-recap/scripts/recap.py --doctor
 ```
 
+Explicitly opt into advisory quality review (off by default):
+
+```bash
+python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --work-dir work_dir_video \
+  --mimo-qc both
+```
+
+Each selected stage makes at most one request and uses a content cache;
+`--mimo-qc-refresh` bypasses it. Post-render review temporarily samples at most
+six JPEGs, each at most 768px on its longest side, and never persists base64.
+`mimo_qc.json` is always advisory and cannot become a blocker.
+
 ## Enhanced rendering: source-pinned subtitles and cloned narration voice
 
 These enhancements are adapted from
@@ -218,6 +231,7 @@ It runs English ASR, splits into complete sentences, pulls one reference clip, t
 - `work_dir/multi_source_manifest.json` · `work_dir/sources/<source_id>/`: multi-video cut source manifest and per-source analysis artifacts
 - `<material-library-dir>/materials/<material_id>/material.json|material.md` · `materials_index.jsonl`: optional grep-friendly material library for reusing analyzed sources
 - `work_dir/timeline.json` · `work_dir/assembly_manifest.json` · `tts_segments/` · `tts_meta.json`: multi-track timeline, slim render record, and TTS audio
+- `work_dir/mimo_qc.json`: optional aggregated pre-assemble/post-render MiMo advice; never a gate
 
 ## Bring your own original-dialogue subtitles (optional, more accurate)
 
@@ -238,7 +252,7 @@ Priority: **your file › the agent-proofread `original_subtitles.json` › ASR 
 
 - [linux.do](https://linux.do)
 - The 剪映 draft export follows the schema of [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft) and [capcut-mate](https://github.com/Hommy-master/capcut-mate) (both Apache-2.0).
-- The schema / builder / writer split for 剪映 export is inspired by [duoec/duo-video](https://github.com/duoec/duo-video).
+- The portable draft contract aligns with [duoec/duo-video](https://github.com/duoec/duo-video) commit `ef4eb46c823910553f901649f2f13fd7575e748f` as a clean-room protocol adaptation; no upstream code, resource bundles, or credentials are copied. The upstream README's 剪映 v10.1.0 smoke test and its JSON template value `5.9.5-beta1` are distinct facts; this project does not present the template value as an installed or verified app version.
 
 ## License
 

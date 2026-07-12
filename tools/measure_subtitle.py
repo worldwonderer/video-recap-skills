@@ -226,10 +226,6 @@ def _write_positions(path, width, height, y_top, y_bot, source=None):
     return payload
 
 
-def _load_json(path):
-    return json.loads(Path(path).read_text(encoding="utf-8"))
-
-
 def _prompt_coordinate(label, suggested):
     try:
         value = input(f"{label} [{suggested}]: ").strip()
@@ -261,24 +257,6 @@ def _claim_output_dir(out_dir):
             raise RuntimeError(f"拒绝认领非空且未标记的输出目录: {out_dir}")
         marker.write_text(_OWNER_MARKER_CONTENT, encoding="utf-8")
     return out_dir
-
-
-def _prepare_output_dir(out_dir):
-    """Reset only artifacts in a directory previously claimed by this tool."""
-    out_dir = _claim_output_dir(out_dir)
-    for name in ("frames", "preview"):
-        managed_dir = out_dir / name
-        if managed_dir.is_symlink() or managed_dir.is_file():
-            managed_dir.unlink()
-        elif managed_dir.is_dir():
-            shutil.rmtree(managed_dir)
-    positions = out_dir / "subtitle_positions.json"
-    if positions.is_symlink() or positions.is_file():
-        positions.unlink()
-    frames_dir, preview_dir = out_dir / "frames", out_dir / "preview"
-    frames_dir.mkdir()
-    preview_dir.mkdir()
-    return frames_dir, preview_dir
 
 
 def _prepare_staged_output(out_dir):
@@ -374,7 +352,7 @@ def main(argv=None):
         suggested_top = round(median(top for top, _ in detections))
         # Detection/preview bands use inclusive pixel rows; the recap CLI uses [top, bot).
         suggested_bot = min(height, round(median(bottom for _, bottom in detections)) + 1)
-        print(f"检测到字幕帧 {len(detections)}/{args.frames}，预览: {out_dir / 'preview'}")
+        print(f"检测到字幕帧 {len(detections)}/{args.frames}，预览: {preview_dir}")
         print(f"建议字幕带（半开区间）: y=[{suggested_top}, {suggested_bot})")
         if args.accept_detected:
             y_top, y_bot = suggested_top, suggested_bot
@@ -392,6 +370,7 @@ def main(argv=None):
         shutil.rmtree(staging, ignore_errors=True)
 
     positions = out_dir / "subtitle_positions.json"
+    print(f"最终预览: {out_dir / 'preview'}")
     print(f"坐标文件: {positions}")
     print(f"使用: python3 skills/video-recap/scripts/recap.py {video} "
           f"--subtitle-y-top {y_top} --subtitle-y-bot {y_bot}")

@@ -10,6 +10,8 @@ set of tracks — exactly like a cut-tool project:
   - one **narration** audio track: the placed TTS beats;
   - an optional **bgm** audio track: a looped music bed with its own ducking;
   - one **subtitle** (text) track: the narration lines.
+  - optional **image** tracks: local photo overlays with normalized center-origin,
+    Y-up transforms for editable JianYing export.
 
 The canonical ducking semantics live in `audio_automation.py`; ffmpeg
 (`assemble.py`) and this timeline model both derive their automation from that
@@ -23,11 +25,12 @@ import json
 from audio_automation import fixed_ducking_keyframes as ducking_keyframes
 from audio_automation import variable_ducking_keyframes
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def build_timeline(canvas, duration_s, video_clips, narration_segments,
-                   bgm=None, ducking=None, subtitle_segments=None):
+                   bgm=None, ducking=None, subtitle_segments=None,
+                   image_segments=None):
     """Assemble a Timeline dict from resolved placement data.
 
     canvas: {"width", "height", "fps"}
@@ -137,6 +140,43 @@ def build_timeline(canvas, duration_s, video_clips, narration_segments,
         })
     if text_segs:
         tracks.append({"kind": "text", "name": "subtitle", "segments": text_segs})
+
+    # --- local image overlays (optional, timeline schema v2)
+    images = []
+    for segment in image_segments or []:
+        if not isinstance(segment, dict) or not segment.get("source_path"):
+            continue
+        try:
+            ts = float(segment["timeline_start"])
+            te = float(segment["timeline_end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if te <= ts:
+            continue
+        scale = segment.get("scale") if isinstance(segment.get("scale"), dict) else {}
+        position = segment.get("position") if isinstance(segment.get("position"), dict) else {}
+        flip = segment.get("flip") if isinstance(segment.get("flip"), dict) else {}
+        images.append({
+            "source_path": str(segment["source_path"]),
+            "timeline_start": round(ts, 4),
+            "timeline_end": round(te, 4),
+            "opacity": round(max(0.0, min(1.0, float(segment.get("opacity", 1.0)))), 4),
+            "rotation_degrees": round(float(segment.get("rotation_degrees", 0.0)), 4),
+            "scale": {
+                "x": round(float(scale.get("x", 1.0)), 4),
+                "y": round(float(scale.get("y", 1.0)), 4),
+            },
+            "position": {
+                "x": round(float(position.get("x", 0.0)), 4),
+                "y": round(float(position.get("y", 0.0)), 4),
+            },
+            "flip": {
+                "horizontal": bool(flip.get("horizontal", False)),
+                "vertical": bool(flip.get("vertical", False)),
+            },
+        })
+    if images:
+        tracks.append({"kind": "image", "name": "image", "segments": images})
 
     return {
         "schema_version": SCHEMA_VERSION,

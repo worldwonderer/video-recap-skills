@@ -1,4 +1,9 @@
-"""Track layout bands and deterministic overlap-safe allocation for JianYing export."""
+"""Semantic track ordering and overlap-safe allocation for JianYing export.
+
+The order mirrors duo-video's authoring layout. It is used only to order track
+objects; JianYing segment ``render_index`` remains the schema default and must
+not be confused with this semantic layout value.
+"""
 
 from dataclasses import dataclass
 
@@ -7,31 +12,26 @@ from dataclasses import dataclass
 class TrackBand:
     kind: str
     track_type: str
-    render_index: int
+    layout_order: int
     description: str
 
 
-# Parity values for existing output are preserved: video at 0, narration/BGM at
-# 1/2 via explicit role handling, and subtitles in JianYing's high text band.
-RI_VIDEO = 0
-RI_NARRATION = 1
-RI_BGM = 2
-RI_TEXT = 15000
+SEGMENT_RENDER_INDEX = 2
 
 
 TRACK_LAYOUT_BANDS = {
-    "audio": TrackBand("audio", "audio", RI_NARRATION, "narration and general audio below text"),
-    "sound": TrackBand("sound", "audio", RI_BGM, "sound/BGM bed lane"),
-    "video": TrackBand("video", "video", RI_VIDEO, "base video track"),
-    "image": TrackBand("image", "video", 1000, "future image/overlay lane"),
-    "overlay": TrackBand("overlay", "video", 1000, "future video/image overlay lane"),
-    "mask": TrackBand("mask", "video", 4000, "future mask/effect lane"),
-    "effect": TrackBand("effect", "video", 5000, "future effects lane"),
-    "video_effect": TrackBand("video_effect", "video", 5000, "future video effects lane"),
-    "sticker": TrackBand("sticker", "sticker", 10000, "future sticker lane"),
-    "subtitle": TrackBand("subtitle", "text", RI_TEXT, "subtitle text lane"),
-    "text": TrackBand("text", "text", RI_TEXT, "plain text lane"),
-    "text_template": TrackBand("text_template", "text", RI_TEXT + 100, "future text template lane"),
+    "sound": TrackBand("sound", "audio", 10_000, "sound effects"),
+    "audio": TrackBand("audio", "audio", 20_000, "narration, music, and general audio"),
+    "green_screen": TrackBand("green_screen", "video", 30_000, "green-screen background"),
+    "video": TrackBand("video", "video", 40_000, "base video"),
+    "image": TrackBand("image", "video", 50_000, "image and photo overlays"),
+    "mask": TrackBand("mask", "video", 60_000, "masks"),
+    "effect": TrackBand("effect", "effect", 70_000, "video effects"),
+    "video_effect": TrackBand("video_effect", "effect", 70_000, "video effects"),
+    "sticker": TrackBand("sticker", "sticker", 80_000, "stickers"),
+    "subtitle": TrackBand("subtitle", "text", 90_000, "subtitles"),
+    "text": TrackBand("text", "text", 100_000, "plain text"),
+    "text_template": TrackBand("text_template", "text", 110_000, "text templates"),
 }
 
 
@@ -40,11 +40,15 @@ class AllocatedTrack:
     kind: str
     name: str
     track_type: str
-    render_index: int
+    layout_order: int
 
 
 class TrackAllocator:
-    """Allocate deterministic suffix tracks when same-name segments overlap."""
+    """Allocate deterministic suffix tracks when same-name segments overlap.
+
+    Intervals are half-open, so adjacent segments reuse a track while true
+    overlap creates ``name-1``, ``name-2``, and so on.
+    """
 
     def __init__(self):
         self._occupied = {}
@@ -55,7 +59,9 @@ class TrackAllocator:
         return any(int(start_us) < old_end and end_us > old_start for old_start, old_end in existing)
 
     def allocate(self, kind, base_name, start_us, duration_us):
-        band = TRACK_LAYOUT_BANDS.get(kind, TRACK_LAYOUT_BANDS["video"])
+        band = TRACK_LAYOUT_BANDS.get(kind)
+        if band is None:
+            band = TrackBand(kind, "video", 120_000, "unregistered fallback")
         base_name = base_name or kind
         suffix = 0
         while True:
@@ -64,5 +70,5 @@ class TrackAllocator:
             occupied = self._occupied.setdefault(key, [])
             if not self._overlaps(start_us, duration_us, occupied):
                 occupied.append((int(start_us), int(start_us) + int(duration_us)))
-                return AllocatedTrack(kind, name, band.track_type, band.render_index + suffix)
+                return AllocatedTrack(kind, name, band.track_type, band.layout_order + suffix)
             suffix += 1

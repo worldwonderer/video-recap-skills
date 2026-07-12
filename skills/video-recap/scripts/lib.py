@@ -1,5 +1,9 @@
-"""Self-contained config + log for the video-recap orchestrator (no cross-skill imports)."""
+"""Self-contained config, MiMo client, and log for the video-recap orchestrator."""
+import json
 import os
+import socket
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 
@@ -140,6 +144,9 @@ CONFIG = {
     "mimo_video_model_source": "env" if (
         os.environ.get("MIMO_VIDEO_MODEL") or os.environ.get("MIMO_MODEL")
     ) else "default",
+    "mimo_qc_model": os.environ.get("MIMO_QC_MODEL") or os.environ.get("MIMO_VIDEO_MODEL")
+    or os.environ.get("MIMO_MODEL", DEFAULT_MIMO_MODEL),
+    "mimo_qc_model_source": "env" if os.environ.get("MIMO_QC_MODEL") else "fallback",
     "vlm_model": os.environ.get("MIMO_MODEL", DEFAULT_MIMO_MODEL),
     "vlm_model_source": "env" if os.environ.get("MIMO_MODEL") else "default",
     "mimo_asr_model": os.environ.get("MIMO_ASR_MODEL", DEFAULT_MIMO_ASR_MODEL),
@@ -306,6 +313,55 @@ def narration_tempo_budget(tts_rate_offset=0.0, *, config=None):
         "segment_tempo_max": segment_tempo_max,
         "max_raw_duration_factor": global_speed * segment_tempo_max,
     }
+
+
+class MiMoQCRequestError(RuntimeError):
+    """Sanitized, fail-open transport error for the advisory QC request."""
+
+
+def mimo_qc_api_call(payload, *, config=None, timeout=60):
+    """Send exactly one OpenAI-compatible MiMo request for one QC stage.
+
+    Deliberately no retries: the QC feature is advisory, and the orchestrator's
+    one-request-per-stage contract is more important than hiding 429/timeout
+    behavior. Callers turn every failure into a non-blocking status report.
+    """
+    cfg = dict(CONFIG)
+    if config:
+        cfg.update(config)
+    api_key = cfg.get("mimo_video_api_key") or cfg.get("mimo_api_key") or cfg.get("api_key")
+    if not api_key:
+        raise MiMoQCRequestError("missing_key")
+    endpoint = normalize_api_url(
+        cfg.get("mimo_video_api_url") or cfg.get("mimo_api_url") or cfg.get("api_url")
+    )
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "video-recap/mimo-qc",
+            "api-key": str(api_key),
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=float(timeout)) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        raise MiMoQCRequestError(f"http_{exc.code}") from None
+    except (TimeoutError, socket.timeout):
+        raise MiMoQCRequestError("timeout") from None
+    except (urllib.error.URLError, OSError):
+        raise MiMoQCRequestError("network_error") from None
+    try:
+        result = json.loads(raw)
+    except (TypeError, ValueError):
+        raise MiMoQCRequestError("invalid_json") from None
+    if not isinstance(result, dict):
+        raise MiMoQCRequestError("invalid_response")
+    return result
 
 def log(msg):
     print(f"[video-recap] {msg}", flush=True)

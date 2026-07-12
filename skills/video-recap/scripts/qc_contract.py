@@ -7,10 +7,9 @@ pipeline, or attempt automatic fixes.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -29,7 +28,6 @@ SEVERITIES = frozenset({"info", "advisory", "warning", "blocker"})
 CONFIDENCES = frozenset({"low", "medium", "high", "objective"})
 SAMPLE_POLICIES = frozenset({"all", "deterministic", "sampled", "semantic", "aesthetic"})
 ARTIFACTS = frozenset({"final_qc.json", "golden_eval.json", "mimo_qc.json", "preflight_qc.json"})
-SUPPORTED_ARTIFACTS = ARTIFACTS
 
 DETERMINISTIC_CATEGORIES = frozenset({
     "missing_artifact",
@@ -142,39 +140,6 @@ def artifact_fingerprint(path: str | Path) -> str:
     return h.hexdigest()
 
 
-def load_rule_table(path: str | Path | None = None) -> dict[str, Any]:
-    """Load the optional blocking-allowance table.
-
-    The table contains no credentials and is never resolved from environment
-    variables. With no path, the skill reference table is loaded if present.
-    """
-    if path is None:
-        path = Path(__file__).resolve().parents[1] / "references" / "shift-left-qc-rules.json"
-    p = Path(path)
-    if not p.exists():
-        return {"schema_version": SCHEMA_VERSION, "non_deterministic_blocking_allow": []}
-    with p.open("r", encoding="utf-8") as f:
-        table = json.load(f)
-    if not isinstance(table, dict):
-        raise QCContractError("rule table must be a JSON object")
-    return table
-
-
-def _allowed_non_deterministic_blocking(rule_table: Mapping[str, Any] | None, category: str, code: str) -> bool:
-    if not rule_table or rule_table.get("schema_version") != SCHEMA_VERSION:
-        return False
-    for item in rule_table.get("non_deterministic_blocking_allow", []):
-        if not isinstance(item, Mapping):
-            continue
-        if item.get("category") in (category, "*") and item.get("code") in (code, "*"):
-            return True
-    return False
-
-
-def _objective_corroboration_present(value: Any) -> bool:
-    return isinstance(value, Mapping) and bool(value.get("type")) and bool(value.get("evidence"))
-
-
 def build_finding(
     *,
     stage: str,
@@ -197,15 +162,13 @@ def build_finding(
     location: Mapping[str, Any] | None = None,
     evidence: Mapping[str, Any] | None = None,
     objective_corroboration: Mapping[str, Any] | None = None,
-    rule_table: Mapping[str, Any] | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
     """Build and validate one normalized QC finding.
 
     Deterministic objective findings may block. MiMo semantic/aesthetic findings
-    default to advisory, non-blocking. Non-deterministic findings may not block
-    unless the rule table explicitly allows the category/code and objective
-    corroboration is supplied.
+    default to advisory and may never block. Objective checks belong in the
+    deterministic QC producers instead of upgrading subjective model findings.
     """
     if finding_id is None:
         finding_id = id
@@ -246,10 +209,7 @@ def build_finding(
         blocking = severity in BLOCKING_SEVERITIES
 
     if is_non_deterministic and blocking:
-        if not _allowed_non_deterministic_blocking(rule_table, category, code):
-            raise QCContractError(f"non-deterministic blocking finding is not allowed: {category}/{code}")
-        if not _objective_corroboration_present(objective_corroboration):
-            raise QCContractError("non-deterministic blocking finding requires objective_corroboration")
+        raise QCContractError(f"non-deterministic blocking finding is not allowed: {category}/{code}")
 
     finding = {
         "finding_id": finding_id,
@@ -274,7 +234,7 @@ def build_finding(
         "objective_corroboration": dict(objective_corroboration),
     }
     finding.update(redact_secrets(extra))
-    _validate_finding(finding, rule_table=rule_table)
+    _validate_finding(finding)
     return finding
 
 
@@ -282,9 +242,8 @@ def build_report(
     *,
     artifact: str,
     stage: str,
-    findings: list[Mapping[str, Any]] | None = None,
+    findings: Sequence[Mapping[str, Any]] | None = None,
     metadata: Mapping[str, Any] | None = None,
-    rule_table: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build and validate a minimal report for a supported QC artifact."""
     normalized_findings = [redact_secrets(dict(f)) for f in (findings or [])]
@@ -299,11 +258,11 @@ def build_report(
         "findings": normalized_findings,
         "metadata": redact_secrets(dict(metadata or {})),
     }
-    validate_report(report, rule_table=rule_table)
+    validate_report(report)
     return report
 
 
-def validate_report(report: Mapping[str, Any], rule_table: Mapping[str, Any] | None = None) -> bool:
+def validate_report(report: Mapping[str, Any]) -> bool:
     """Validate report shape, value domains, and blocking semantics."""
     if not isinstance(report, Mapping):
         raise QCContractError("report must be an object")
@@ -319,7 +278,7 @@ def validate_report(report: Mapping[str, Any], rule_table: Mapping[str, Any] | N
     if not isinstance(report["findings"], list):
         raise QCContractError("findings must be a list")
     for finding in report["findings"]:
-        _validate_finding(finding, rule_table=rule_table)
+        _validate_finding(finding)
     blocker_count = sum(1 for f in report["findings"] if f.get("blocking") is True)
     if report["blocker_count"] != blocker_count:
         raise QCContractError("blocker_count does not match findings")
@@ -330,7 +289,7 @@ def validate_report(report: Mapping[str, Any], rule_table: Mapping[str, Any] | N
     return True
 
 
-def _validate_finding(finding: Mapping[str, Any], rule_table: Mapping[str, Any] | None = None) -> None:
+def _validate_finding(finding: Mapping[str, Any]) -> None:
     if not isinstance(finding, Mapping):
         raise QCContractError("finding must be an object")
     missing = _REQUIRED_FINDING_FIELDS - set(finding)
@@ -374,9 +333,6 @@ def _validate_finding(finding: Mapping[str, Any], rule_table: Mapping[str, Any] 
 
     is_non_deterministic = (not finding["deterministic"]) or finding["category"] in NON_DETERMINISTIC_CATEGORIES
     if is_non_deterministic and finding["blocking"]:
-        if not _allowed_non_deterministic_blocking(rule_table, finding["category"], finding["code"]):
-            raise QCContractError(
-                f"non-deterministic blocking finding is not allowed: {finding['category']}/{finding['code']}"
-            )
-        if not _objective_corroboration_present(finding["objective_corroboration"]):
-            raise QCContractError("non-deterministic blocking finding requires objective_corroboration")
+        raise QCContractError(
+            f"non-deterministic blocking finding is not allowed: {finding['category']}/{finding['code']}"
+        )

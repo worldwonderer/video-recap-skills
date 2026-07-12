@@ -4,7 +4,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-a
 import json
 import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
-from assemble import _wrap_subtitle_text, _split_subtitle_chunks, _subtitle_entries, _adjust_tts_speed, _apply_narration_speed, _assembly_manifest_payload, _build_audio_filter_complex, _build_timed_narration, _build_video_clips, _emit_timeline, _resolve_final_output, _value_fingerprint, _escape_ass_text, _generate_ass, _generate_srt, _seconds_to_ass_time, _seconds_to_srt_time, _source_subtitle_mask_filter, _subtitle_burn_filter, _output_downscale_filter, assemble_video, assembly_settings_fingerprint, final_loudnorm_filter
+from assemble import _split_subtitle_chunks, _subtitle_entries, _adjust_tts_speed, _apply_narration_speed, _assembly_manifest_payload, _build_audio_filter_complex, _build_timed_narration, _build_video_clips, _emit_timeline, _resolve_final_output, _value_fingerprint, _escape_ass_text, _generate_ass, _generate_srt, _seconds_to_ass_time, _seconds_to_srt_time, _source_subtitle_mask_filter, _subtitle_burn_filter, _output_downscale_filter, assemble_video, assembly_settings_fingerprint, final_loudnorm_filter
 from lib import CONFIG
 import assemble
 
@@ -1095,17 +1095,6 @@ def test_assemble_video_uses_silent_original_track_when_source_has_no_audio(monk
     assert output.exists()
 
 
-def test_wrap_subtitle_text_balances_and_never_orphans_punctuation():
-    # Bug: a 2-line wrap force-broke at max_chars+5 and dropped the trailing "。" alone on line 2.
-    out = _wrap_subtitle_text("这婴儿还在襁褓里，脑子里却装着一个现代人将死的记忆。", max_chars=20)
-    lines = out.split("\n")
-    assert len(lines) == 2
-    assert lines[0].endswith("，") and lines[1].endswith("。")   # punctuation stays on its line, no orphan
-    assert all(len(c) >= 3 for c in lines)                        # neither line is a lone punctuation mark
-    # short text stays on one line
-    assert _wrap_subtitle_text("短句。", max_chars=20) == "短句。"
-
-
 def test_split_subtitle_chunks_breaks_block_into_short_one_line_pieces():
     block = "这婴儿还在襁褓里，脑子里却装着一个现代人将死的记忆。他叫范闲，注定要搅动这座庙堂。"
     chunks = _split_subtitle_chunks(block, max_chars=20)
@@ -1683,7 +1672,7 @@ def test_mask_policy_must_be_explicit_and_cache_fingerprint_safe(monkeypatch):
     assert forced_fp != safe_fp
 
     monkeypatch.delitem(CONFIG, "source_subtitle_mask_policy", raising=False)
-    qc = assemble._source_subtitle_mask_policy_qc(canvas={"width": 1280, "height": 720})
+    qc = assemble._source_subtitle_mask_policy()
     assert qc["policy"] == "legacy_implicit"
     assert qc.get("blocking") is True
 
@@ -1858,7 +1847,7 @@ def test_legacy_mask_env_without_explicit_policy_is_blocking(monkeypatch):
         monkeypatch.delenv("SOURCE_SUBTITLE_MASK_POLICY", raising=False)
         importlib.reload(assemble_lib)
 
-        policy = assemble._source_subtitle_mask_policy_qc(canvas={"width": 1280, "height": 720})
+        policy = assemble._source_subtitle_mask_policy()
 
         assert CONFIG["mask_source_subtitles"] is True
         assert CONFIG["source_subtitle_mask_policy"] == "off"

@@ -1,10 +1,10 @@
-"""Material and segment builders for the milestone-1 JianYing exporter."""
+"""Production material and segment builders for the JianYing exporter."""
 
 import json
 import os
 
 from jianying_schema import us, validate_material_category
-from jianying_tracks import RI_BGM, RI_NARRATION, RI_TEXT, RI_VIDEO
+from jianying_tracks import SEGMENT_RENDER_INDEX
 
 
 def timerange(start_us, dur_us):
@@ -74,17 +74,31 @@ def windowed_volume_keyframes(keyframes, seg_start_s, seg_end_s, default_gain, n
     return volume_keyframes(selected, start, new_id)
 
 
-def clip_default():
+def clip_from_segment(segment=None):
+    segment = segment or {}
+    scale = segment.get("scale") if isinstance(segment.get("scale"), dict) else {}
+    position = segment.get("position") if isinstance(segment.get("position"), dict) else {}
+    flip = segment.get("flip") if isinstance(segment.get("flip"), dict) else {}
     return {
-        "alpha": 1.0,
-        "flip": {"horizontal": False, "vertical": False},
-        "rotation": 0.0,
-        "scale": {"x": 1.0, "y": 1.0},
-        "transform": {"x": 0.0, "y": 0.0},
+        "alpha": round(float(segment.get("opacity", 1.0)), 4),
+        "flip": {
+            "horizontal": bool(flip.get("horizontal", False)),
+            "vertical": bool(flip.get("vertical", False)),
+        },
+        "rotation": float(segment.get("rotation_degrees", 0.0)),
+        "scale": {
+            "x": float(scale.get("x", 1.0)),
+            "y": float(scale.get("y", 1.0)),
+        },
+        # Timeline v2 uses JianYing's normalized, canvas-center, Y-up coordinates.
+        "transform": {
+            "x": float(position.get("x", 0.0)),
+            "y": float(position.get("y", 0.0)),
+        },
     }
 
 
-def base_segment(material_id, target_start_us, target_dur_us, render_index, volume, keyframes, new_id):
+def base_segment(material_id, target_start_us, target_dur_us, volume, keyframes, new_id):
     return {
         "enable_adjust": True,
         "enable_color_correct_adjust": False,
@@ -96,7 +110,7 @@ def base_segment(material_id, target_start_us, target_dur_us, render_index, volu
         "last_nonzero_volume": 1.0,
         "reverse": False,
         "track_attribute": 0,
-        "track_render_index": 0,
+        "track_render_index": SEGMENT_RENDER_INDEX,
         "visible": True,
         "id": new_id(),
         "material_id": material_id,
@@ -106,30 +120,18 @@ def base_segment(material_id, target_start_us, target_dur_us, render_index, volu
         "speed": 1.0,
         "volume": round(float(volume), 4),
         "is_tone_modify": False,
-        "render_index": render_index,
+        "render_index": SEGMENT_RENDER_INDEX,
     }
 
 
 def audio_segment_piece(material_id, target_start_us, target_dur_us, source_start_us,
-                        source_dur_us, render_index, volume, keyframes, new_id):
-    seg = base_segment(material_id, target_start_us, target_dur_us, render_index, volume, keyframes, new_id)
+                        source_dur_us, volume, keyframes, new_id):
+    seg = base_segment(material_id, target_start_us, target_dur_us, volume, keyframes, new_id)
     seg["source_timerange"] = timerange(source_start_us, source_dur_us)
     seg["extra_material_refs"] = []
     seg["clip"] = None
     seg["hdr_settings"] = None
     return seg
-
-
-def track(name, track_type, segments, new_id):
-    return {
-        "attribute": 0,
-        "flag": 0,
-        "id": new_id(),
-        "is_default_name": False,
-        "name": name,
-        "segments": segments,
-        "type": track_type,
-    }
 
 
 def unsupported_track_note(kind):
@@ -140,7 +142,7 @@ def unsupported_track_note(kind):
 
 
 def build_video_track(ctx, timeline_track):
-    segs = []
+    track_name = timeline_track.get("name", "video")
     for clip in timeline_track.get("clips", []):
         ts, te = float(clip["timeline_start"]), float(clip["timeline_end"])
         ss, se = float(clip["source_start"]), float(clip["source_end"])
@@ -180,20 +182,18 @@ def build_video_track(ctx, timeline_track):
         audio = clip.get("audio", {})
         keyframes = volume_keyframes(audio.get("volume_keyframes"), ts, ctx.new_id)
         volume = audio.get("base_gain", 1.0) if not keyframes else 1.0
-        seg = base_segment(mat_id, us(ts), us(te - ts), RI_VIDEO, volume, keyframes, ctx.new_id)
+        seg = base_segment(mat_id, us(ts), us(te - ts), volume, keyframes, ctx.new_id)
         seg["source_timerange"] = timerange(us(ss), us(se - ss))
         seg["extra_material_refs"] = [speed["id"]]
-        seg["clip"] = clip_default()
+        seg["clip"] = clip_from_segment(clip)
         seg["uniform_scale"] = {"on": True, "value": 1.0}
         seg["hdr_settings"] = {"intensity": 1.0, "mode": 1, "nits": 1000}
-        segs.append(seg)
-    ctx.tracks.append(track("video", "video", segs, ctx.new_id))
+        ctx.add_segment("video", track_name, us(ts), us(te - ts), seg)
 
 
 def build_audio_track(ctx, timeline_track):
     role = timeline_track.get("role", timeline_track.get("name", "audio"))
-    render_index = RI_BGM if role == "bgm" else RI_NARRATION
-    segs = []
+    track_name = timeline_track.get("name", role)
     for segment in timeline_track.get("segments", []):
         ts, te = float(segment["timeline_start"]), float(segment["timeline_end"])
         path = segment["source_path"]
@@ -246,23 +246,23 @@ def build_audio_track(ctx, timeline_track):
                     segment.get("gain", 1.0), ctx.new_id)
                 piece_volume = segment.get("gain", 1.0) if not piece_kfs else 1.0
                 piece_seg = audio_segment_piece(
-                    mat_id, us(ts) + cursor, piece, 0, piece, render_index,
+                    mat_id, us(ts) + cursor, piece, 0, piece,
                     piece_volume, piece_kfs, ctx.new_id)
                 piece_seg["extra_material_refs"] = [speed["id"]]
-                segs.append(piece_seg)
+                ctx.add_segment("audio", track_name, us(ts) + cursor, piece, piece_seg)
                 cursor += piece
         else:
             speed = speed_material(ctx.new_id)
             ctx.materials["speeds"].append(speed)
             audio_seg = audio_segment_piece(
-                mat_id, us(ts), place_us, 0, place_us, render_index, volume, keyframes, ctx.new_id)
+                mat_id, us(ts), place_us, 0, place_us, volume, keyframes, ctx.new_id)
             audio_seg["extra_material_refs"] = [speed["id"]]
-            segs.append(audio_seg)
-    ctx.tracks.append(track(role, "audio", segs, ctx.new_id))
+            ctx.add_segment("audio", track_name, us(ts), place_us, audio_seg)
 
 
 def build_text_track(ctx, timeline_track):
-    segs = []
+    track_name = timeline_track.get("name", "text")
+    track_kind = "subtitle" if track_name == "subtitle" else "text"
     for segment in timeline_track.get("segments", []):
         ts, te = float(segment["timeline_start"]), float(segment["timeline_end"])
         text = segment.get("text", "")
@@ -282,7 +282,7 @@ def build_text_track(ctx, timeline_track):
         ctx.materials["texts"].append({
             "id": mat_id,
             "content": json.dumps(content, ensure_ascii=False),
-            "type": "text",
+            "type": "subtitle" if track_kind == "subtitle" else "text",
             "typesetting": 0,
             "alignment": 1,
             "letter_spacing": 0.0,
@@ -292,16 +292,63 @@ def build_text_track(ctx, timeline_track):
             "add_type": 0,
             "check_flag": 7,
         })
-        seg = base_segment(mat_id, us(ts), us(te - ts), RI_TEXT, 1.0, [], ctx.new_id)
-        seg["source_timerange"] = None
+        duration_us = us(te - ts)
+        seg = base_segment(mat_id, us(ts), duration_us, 1.0, [], ctx.new_id)
+        seg["source_timerange"] = timerange(0, duration_us)
         seg["extra_material_refs"] = []
-        seg["clip"] = clip_default()
+        seg["clip"] = clip_from_segment(segment)
         seg["uniform_scale"] = {"on": True, "value": 1.0}
         seg["type"] = "text_effect"
         seg["source_platform"] = 1
         seg["clip"]["transform"]["y"] = -0.72
-        segs.append(seg)
-    ctx.tracks.append(track("subtitle", "text", segs, ctx.new_id))
+        ctx.add_segment(track_kind, track_name, us(ts), duration_us, seg)
+
+
+def build_image_track(ctx, timeline_track):
+    """Build local image overlays as JianYing photo materials on video tracks."""
+    track_name = timeline_track.get("name", "image")
+    for segment in timeline_track.get("segments", []):
+        ts, te = float(segment["timeline_start"]), float(segment["timeline_end"])
+        duration_us = us(te - ts)
+        path = segment["source_path"]
+        _ignored_duration, width, height = ctx.media_duration(path, duration_us)
+        mat_id = ctx.new_id()
+        ctx.materials["videos"].append({
+            "audio_fade": None,
+            "category_id": "",
+            "category_name": "local",
+            "check_flag": 63487,
+            "crop": {
+                "upper_left_x": 0.0,
+                "upper_left_y": 0.0,
+                "upper_right_x": 1.0,
+                "upper_right_y": 0.0,
+                "lower_left_x": 0.0,
+                "lower_left_y": 1.0,
+                "lower_right_x": 1.0,
+                "lower_right_y": 1.0,
+            },
+            "crop_ratio": "free",
+            "crop_scale": 1.0,
+            "duration": duration_us,
+            "has_audio": False,
+            "height": height or ctx.height,
+            "id": mat_id,
+            "local_material_id": mat_id,
+            "material_id": mat_id,
+            "material_name": os.path.basename(path),
+            "media_path": "",
+            "path": path,
+            "type": "photo",
+            "width": width or ctx.width,
+        })
+        seg = base_segment(mat_id, us(ts), duration_us, 1.0, [], ctx.new_id)
+        seg["source_timerange"] = timerange(0, duration_us)
+        seg["extra_material_refs"] = []
+        seg["clip"] = clip_from_segment(segment)
+        seg["uniform_scale"] = {"on": True, "value": 1.0}
+        seg["hdr_settings"] = {"intensity": 1.0, "mode": 1, "nits": 1000}
+        ctx.add_segment("image", track_name, us(ts), duration_us, seg)
 
 
 def build_timeline_track(ctx, timeline_track):
@@ -314,6 +361,8 @@ def build_timeline_track(ctx, timeline_track):
         build_audio_track(ctx, timeline_track)
     elif kind == "text":
         build_text_track(ctx, timeline_track)
+    elif kind == "image":
+        build_image_track(ctx, timeline_track)
     else:
         note = unsupported_track_note(kind)
         if note:

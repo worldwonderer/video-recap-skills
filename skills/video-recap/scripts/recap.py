@@ -26,6 +26,7 @@ import qc_contract
 # write report-only post-render QC without subprocess overhead or credential/env
 # expansion. Sibling skills still communicate through subprocess artifacts.
 import final_qc
+import mimo_qc
 from doctor import ffmpeg_has_subtitles_filter
 import materials as material_lib
 
@@ -174,6 +175,61 @@ def _print_final_qc_pointer(result):
             + "; ".join(problems)
             + "；详见 final_qc.json / golden_eval.json"
         )
+
+
+def _mimo_qc_stage_enabled(args, stage):
+    mode = getattr(args, "mimo_qc", "off") or "off"
+    return (
+        mode == "both"
+        or (mode == "pre-assemble" and stage == "pre_assemble")
+        or (mode == "post-render" and stage == "post_render")
+    )
+
+
+def _prepare_mimo_qc(work_dir, args):
+    """Remove an old advisory artifact when this run has MiMo QC disabled."""
+    if getattr(args, "mimo_qc", "off") == "off":
+        mimo_qc.clear_report(work_dir)
+
+
+def _print_mimo_qc_pointer(result, stage):
+    report = result.get("report", {}) if isinstance(result, dict) else {}
+    metadata = report.get("metadata", {}) if isinstance(report, dict) else {}
+    status = metadata.get("status", "unknown")
+    path = result.get("path", "mimo_qc.json") if isinstance(result, dict) else "mimo_qc.json"
+    stage_findings = [
+        finding for finding in report.get("findings", [])
+        if isinstance(finding, dict) and finding.get("stage") == stage
+    ]
+    if status in {"failed", "unavailable"}:
+        reason = metadata.get("error") or "unavailable"
+        print(f"[video-recap] ⚠ MiMo QC {stage}: {status} ({reason})；建议性检查不可用，继续流水线")
+        return
+    print(f"[video-recap] ℹ MiMo QC {stage}: {status}, {len(stage_findings)} 条建议；详见 {path}")
+    for finding in stage_findings[:5]:
+        print(f"[video-recap]   - {finding.get('message') or finding.get('decision_reason')}")
+
+
+def _run_mimo_qc_stage(work_dir, args, stage, *, final_output=None):
+    """Run one selected advisory stage and never propagate a failure."""
+    if not _mimo_qc_stage_enabled(args, stage):
+        return None
+    try:
+        result = mimo_qc.run(
+            work_dir,
+            stage=stage,
+            live=True,
+            refresh=bool(getattr(args, "mimo_qc_refresh", False)),
+            final_output=final_output,
+        )
+    except Exception as exc:
+        print(
+            f"[video-recap] ⚠ MiMo QC {stage}: {type(exc).__name__}；"
+            "建议性检查失败，继续流水线"
+        )
+        return None
+    _print_mimo_qc_pointer(result, stage)
+    return result
 
 
 def _entry(skill, script):
@@ -451,13 +507,6 @@ def _write_multi_source_manifest(work_dir, source_records):
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
-
-
-def _load_multi_source_manifest(work_dir):
-    data = _load_json(Path(work_dir) / MULTI_SOURCE_MANIFEST)
-    if isinstance(data, dict) and isinstance(data.get("sources"), list):
-        return data
-    return None
 
 
 def _load_run_manifest(work_dir):
@@ -768,6 +817,11 @@ def _continuation_command(video, work_dir, args):
         parts.append("--skip-asr")
     if args.mimo_video_overview:
         parts.append("--mimo-video-overview")
+    mimo_mode = getattr(args, "mimo_qc", "off")
+    if mimo_mode != "off":
+        parts += ["--mimo-qc", mimo_mode]
+    if getattr(args, "mimo_qc_refresh", False):
+        parts.append("--mimo-qc-refresh")
     if not args.consolidate:  # default is ON now; only the opt-out needs to round-trip
         parts.append("--no-consolidate")
     if args.consolidate_asr:
@@ -1143,6 +1197,7 @@ def _run_multi_cut(videos, work_dir, args):
     _write_shift_left_stage_qc(work_dir, "post_tts", metadata=_tts_qc_metadata(work_dir))
     overlays_path = _write_canonical_visual_overlays(work_dir, narration_json)
     _write_shift_left_stage_qc(work_dir, "pre_assemble", metadata={"visual_overlays": str(overlays_path)})
+    _run_mimo_qc_stage(work_dir, args, "pre_assemble")
 
     recap_stem = f"multi_{videos[0].stem}"
     aargs = [str(edited_source), "--work-dir", str(work_dir), "--recap-stem", recap_stem]
@@ -1161,6 +1216,7 @@ def _run_multi_cut(videos, work_dir, args):
     final_dir = Path(args.output_dir) if args.output_dir else work_dir.parent
     final_output = _read_assembly_output(work_dir) or (final_dir / ("recap_" + recap_stem + ".mp4"))
     _write_shift_left_stage_qc(work_dir, "post_render", metadata=_post_render_qc_metadata(work_dir, final_output))
+    _run_mimo_qc_stage(work_dir, args, "post_render", final_output=final_output)
     final_qc_result = _write_final_qc_reports(work_dir, final_output)
     print(f"[video-recap] ✅ 完成: {final_output}")
     _print_final_qc_pointer(final_qc_result)
@@ -1182,6 +1238,18 @@ def main():
                     help="compatibility: accept sparse cut mapping and legacy duration drift override")
     ap.add_argument("--skip-asr", action="store_true")
     ap.add_argument("--mimo-video-overview", action="store_true")
+    ap.add_argument(
+        "--mimo-qc",
+        default=os.environ.get("MIMO_QC", "off"),
+        choices=["off", "pre-assemble", "post-render", "both"],
+        help="optional advisory MiMo QC stage(s); never blocks the pipeline",
+    )
+    ap.add_argument(
+        "--mimo-qc-refresh",
+        action="store_true",
+        default=_env_bool("MIMO_QC_REFRESH", False),
+        help="ignore a matching MiMo QC stage cache",
+    )
     ap.add_argument("--consolidate", action=argparse.BooleanOptionalAction, default=True,
                     help="build the understanding story index (Pass B); default ON, --no-consolidate to skip")
     ap.add_argument("--consolidate-asr", action="store_true", help="also clean ASR (Pass A)")
@@ -1215,6 +1283,12 @@ def main():
                     help="save analyzed JSON/MD artifacts into the material library")
     ap.add_argument("--doctor", action="store_true")
     args = ap.parse_args()
+
+    # argparse does not validate environment-derived defaults against choices.
+    if args.mimo_qc not in {"off", "pre-assemble", "post-render", "both"}:
+        ap.error(
+            "MIMO_QC/--mimo-qc must be one of: off, pre-assemble, post-render, both"
+        )
 
     if args.doctor:
         _run("video-recap", "doctor.py")
@@ -1273,12 +1347,14 @@ def main():
             if args.work_dir
             else videos[0].parent / f"work_dir_multi_{videos[0].stem}"
         )
+        _prepare_mimo_qc(work_dir, args)
         _run_multi_cut(videos, work_dir, args)
         return
 
     video = videos[0]
     work_dir = Path(args.work_dir).resolve() if args.work_dir else video.parent / f"work_dir_{video.stem}"
     work_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_mimo_qc(work_dir, args)
     cut = args.edit_mode == "cut"
     narration_json = work_dir / "narration.json"
     clip_plan_json = work_dir / "clip_plan.json"
@@ -1429,6 +1505,7 @@ def main():
     _write_shift_left_stage_qc(work_dir, "post_tts", metadata=_tts_qc_metadata(work_dir))
     overlays_path = _write_canonical_visual_overlays(work_dir, narration_for_tts)
     _write_shift_left_stage_qc(work_dir, "pre_assemble", metadata={"visual_overlays": str(overlays_path)})
+    _run_mimo_qc_stage(work_dir, args, "pre_assemble")
 
     aargs = [str(assemble_video_path), "--work-dir", str(work_dir), "--recap-stem", video.stem]
     if args.output_dir:
@@ -1454,6 +1531,7 @@ def main():
     final_dir = Path(args.output_dir) if args.output_dir else work_dir.parent
     final_output = _read_assembly_output(work_dir) or (final_dir / ("recap_" + video.stem + ".mp4"))
     _write_shift_left_stage_qc(work_dir, "post_render", metadata=_post_render_qc_metadata(work_dir, final_output))
+    _run_mimo_qc_stage(work_dir, args, "post_render", final_output=final_output)
     final_qc_result = _write_final_qc_reports(work_dir, final_output)
     print(f"[video-recap] ✅ 完成: {final_output}")
     _print_final_qc_pointer(final_qc_result)

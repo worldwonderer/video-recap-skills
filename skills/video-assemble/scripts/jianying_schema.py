@@ -1,16 +1,15 @@
-"""Schema constants, skeleton factories, and capability registries for JianYing export.
+"""Schema constants, skeleton factories, and material registry for JianYing export.
 
 This module is intentionally data-oriented: it owns draft version metadata, the
-full `materials` parallel-array shape, and the duo-video-inspired distinction
-between material categories and cross-cutting exporter capabilities.
+full `materials` parallel-array shape, and the implemented material dispatch.
 """
 
 DRAFT_VERSION = 360000
 NEW_VERSION = "111.0.0"
 APP = {"app_id": 3704, "app_source": "lv", "app_version": "5.9.5-beta1", "os": "mac"}
 
-# The full 剪映 materials object: ~45 parallel arrays, only a few are populated
-# by the milestone-1 exporter. Keeping every array preserves draft compatibility.
+# The full 剪映 materials object: ~45 parallel arrays. Only arrays backed by a
+# production builder are populated; retaining the full shape preserves compatibility.
 MATERIAL_KEYS = (
     "ai_translates audio_balances audio_effects audio_fades audio_track_indexes audios "
     "beats canvases chromas color_curves digital_humans drafts effects flowers green_screens "
@@ -136,8 +135,11 @@ def meta_info(draft_id, total_us):
         "draft_removable_storage_device": "",
         "draft_root_path": "",
         "draft_segment_extra_info": [],
+        "draft_timeline_materials_size_": 0,
         "draft_type": "",
         "tm_draft_cloud_completed": "",
+        "tm_draft_create": 0,
+        "tm_draft_modified": 0,
         "tm_draft_cloud_modified": 0,
         "tm_draft_removed": 0,
         "tm_duration": int(total_us),
@@ -147,8 +149,8 @@ def meta_info(draft_id, total_us):
 def material_category_registry():
     """Material category support table inspired by duo-video's MaterialTypeEnum.
 
-    Keep this separate from feature capabilities: keyframes, bundling, and path
-    rewrite are exporter capabilities, not material categories.
+    Keyframes, bundling, and path rewrite are exporter behavior, not material
+    categories, so they intentionally do not appear here.
     """
     return {
         "video": {"status": "supported", "materials_key": "videos", "track_type": "video"},
@@ -156,47 +158,18 @@ def material_category_registry():
         "text": {"status": "supported", "materials_key": "texts", "track_type": "text"},
         "subtitle": {"status": "supported", "materials_key": "texts", "track_type": "text"},
         "speed": {"status": "supported_auxiliary", "materials_key": "speeds", "track_type": None},
-        "image": {"status": "reserved", "materials_key": "images", "track_type": "video"},
+        # JianYing represents photos in materials.videos with material.type=photo.
+        "image": {"status": "supported", "materials_key": "videos", "track_type": "video"},
         "sticker": {"status": "reserved", "materials_key": "stickers", "track_type": "sticker"},
         "sound": {"status": "reserved", "materials_key": "audios", "track_type": "audio"},
         "text_template": {"status": "reserved", "materials_key": "text_templates", "track_type": "text"},
         "lut": {"status": "reserved", "materials_key": "effects", "track_type": "video"},
         "transition": {"status": "reserved", "materials_key": "transitions", "track_type": "video"},
         "video_effect": {"status": "reserved", "materials_key": "video_effects", "track_type": "video"},
-        "face_effect": {"status": "reserved", "materials_key": "effects", "track_type": "video"},
+        "face_effect": {"status": "reserved", "materials_key": "video_effects", "track_type": "effect"},
         "mask": {"status": "reserved", "materials_key": "masks", "track_type": "video"},
-        "style": {"status": "reserved", "materials_key": "material_colors", "track_type": "video"},
-    }
-
-
-def feature_capabilities():
-    """Cross-cutting exporter capabilities, deliberately not material categories."""
-    return {
-        "volume_automation": {
-            "status": "supported",
-            "property_type": "KFTypeVolume",
-            "description": "timeline-absolute gain points become segment-relative JianYing keyframes",
-        },
-        "bgm_loop_splitting": {
-            "status": "supported",
-            "description": "looped BGM is split into repeated JianYing audio segments",
-        },
-        "media_bundling": {
-            "status": "supported",
-            "description": "referenced media can be copied into the draft materials folder",
-        },
-        "path_rewrite": {
-            "status": "supported",
-            "description": "bundled media paths are rewritten after atomic move",
-        },
-        "collision_safe_write": {
-            "status": "supported",
-            "description": "non-empty draft folders are never overwritten",
-        },
-        "lazy_export_isolation": {
-            "status": "supported",
-            "description": "assemble imports JianYing modules only when export is requested",
-        },
+        # duo-video style is an authoring preset; it is not a direct JianYing material array.
+        "style": {"status": "reserved", "materials_key": None, "track_type": None},
     }
 
 

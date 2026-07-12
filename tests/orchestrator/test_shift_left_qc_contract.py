@@ -1,4 +1,5 @@
 import json
+import inspect
 import sys
 from pathlib import Path
 
@@ -45,7 +46,7 @@ def test_required_fields_and_value_domains():
     assert set(qc._REQUIRED_FINDING_FIELDS) <= set(finding)
     report = qc.build_report(artifact="mimo_qc.json", stage="post_tts", findings=[finding])
     assert report["schema_version"] == 1
-    assert report["artifact"] in qc.SUPPORTED_ARTIFACTS
+    assert report["artifact"] in qc.ARTIFACTS
     assert qc.validate_report(report) is True
 
     with pytest.raises(qc.QCContractError, match="unsupported severity"):
@@ -100,12 +101,9 @@ def test_non_deterministic_blocking_without_rule_table_allowance_rejected():
         )
 
 
-def test_non_deterministic_blocking_with_rule_table_requires_corroboration():
-    rules = {
-        "schema_version": qc.SCHEMA_VERSION,
-        "non_deterministic_blocking_allow": [{"category": "semantic", "code": "claim_contradiction"}],
-    }
-    with pytest.raises(qc.QCContractError, match="objective_corroboration"):
+def test_non_deterministic_blocking_cannot_be_enabled_by_a_rule_table():
+    assert "rule_table" not in inspect.signature(qc.build_finding).parameters
+    with pytest.raises(qc.QCContractError, match="non-deterministic blocking"):
         qc.build_finding(
             id="m3",
             stage="post_tts",
@@ -119,52 +117,8 @@ def test_non_deterministic_blocking_with_rule_table_requires_corroboration():
             blocking=True,
             source={"artifact": "mimo_qc.json"},
             evidence={"summary": "model found contradiction"},
-            rule_table=rules,
+            objective_corroboration={"type": "subtitle_span", "evidence": "asr_result[3]"},
         )
-
-    finding = qc.build_finding(
-        id="m4",
-        stage="post_tts",
-        severity="blocker",
-        confidence="high",
-        sample_policy="semantic",
-        category="semantic",
-        code="claim_contradiction",
-        message="claim is objectively contradicted by subtitle span",
-        deterministic=False,
-        blocking=True,
-        source={"artifact": "mimo_qc.json"},
-        evidence={"summary": "model found contradiction"},
-        objective_corroboration={"type": "subtitle_span", "evidence": "asr_result[3]"},
-        rule_table=rules,
-    )
-    assert finding["blocking"] is True
-    assert qc.build_report(artifact="mimo_qc.json", stage="post_tts", findings=[finding], rule_table=rules)["ok"] is False
-
-
-def test_non_deterministic_blocking_rule_table_requires_matching_schema_version():
-    base = dict(
-        id="m5",
-        stage="post_tts",
-        severity="blocker",
-        confidence="high",
-        sample_policy="semantic",
-        category="semantic",
-        code="claim_contradiction",
-        message="claim is objectively contradicted by subtitle span",
-        deterministic=False,
-        blocking=True,
-        source={"artifact": "mimo_qc.json"},
-        evidence={"summary": "model found contradiction"},
-        objective_corroboration={"type": "subtitle_span", "evidence": "asr_result[3]"},
-    )
-    for rules in (
-        {"non_deterministic_blocking_allow": [{"category": "semantic", "code": "claim_contradiction"}]},
-        {"schema_version": qc.SCHEMA_VERSION + 1, "non_deterministic_blocking_allow": [{"category": "semantic", "code": "claim_contradiction"}]},
-    ):
-        with pytest.raises(qc.QCContractError, match="non-deterministic blocking"):
-            qc.build_finding(**base, rule_table=rules)
-
 
 def test_qc_contract_redacts_metadata_keys_values_and_urls():
     report = qc.build_report(
@@ -233,12 +187,6 @@ def test_unknown_schema_version_and_missing_required_fields_validation_errors():
     bad_finding.pop("location")
     with pytest.raises(qc.QCContractError, match="finding missing required fields"):
         qc.validate_report({**report, "findings": [bad_finding], "finding_count": 1, "blocker_count": 1, "ok": False})
-
-
-def test_load_rule_table_default_has_no_blocking_nondeterministic_allowances():
-    table = qc.load_rule_table()
-    assert table["schema_version"] == 1
-    assert table["non_deterministic_blocking_allow"] == []
 
 
 def test_stage_names_match_approved_gate_matrix_exactly():
@@ -327,8 +275,8 @@ import recap  # noqa: E402
 
 
 def test_preflight_qc_artifact_supported_without_changing_existing_artifacts():
-    assert "preflight_qc.json" in qc.SUPPORTED_ARTIFACTS
-    assert {"final_qc.json", "golden_eval.json", "mimo_qc.json"} <= qc.SUPPORTED_ARTIFACTS
+    assert "preflight_qc.json" in qc.ARTIFACTS
+    assert {"final_qc.json", "golden_eval.json", "mimo_qc.json"} <= qc.ARTIFACTS
     report = qc.build_report(artifact="preflight_qc.json", stage="pre_tts", findings=[])
     assert report["ok"] is True
     assert qc.validate_report(report) is True

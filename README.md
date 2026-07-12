@@ -39,7 +39,8 @@ flowchart LR
 - **解说成块，原声也成块。** 解说一段段连着讲、整块一次配音，段间留白把精彩原声整段放回满音量——大致七三开。
 - **先剪后配，画面对齐。** `--edit-mode cut` 先把长视频剪成成片，再对着成片写解说，时间轴天然对齐。
 - **多视频也能剪，分析可复用。** 一次传多个视频，按 `source_id` 选段剪成一个成片；每个视频的分析沉淀为文件系统素材库，下次 `grep` 复用、不重算。
-- **能接着在剪映里改。** 可选导出 schema-driven 的多轨剪映草稿，原片、解说、BGM、字幕各占一轨；ffmpeg 仍是最终成片的判定标准。
+- **能接着在剪映里改。** 可选导出 schema-driven 的多轨剪映草稿，原片、解说、BGM、字幕和本地图片叠层都可编辑；视频/音频/图片默认打包进 `Resources/local` 并建立素材索引，clone 或搬目录后仍可用。ffmpeg 仍是最终成片的判定标准。
+- **可选 MiMo 成片顾问，不当门神。** `--mimo-qc pre-assemble|post-render|both` 把语义/审美建议写进 `mimo_qc.json` 给 Agent/用户看；缺 key、限流、超时或模型输出异常都只提示，绝不阻断或自动改片。
 
 ## 安装
 
@@ -150,6 +151,15 @@ python3 skills/video-recap/scripts/recap.py ep1.mp4 ep2.mp4 --edit-mode cut \
 python3 skills/video-recap/scripts/recap.py --doctor
 ```
 
+需要额外的建议性质量审阅时显式开启（默认关闭）：
+
+```bash
+python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --work-dir work_dir_video \
+  --mimo-qc both
+```
+
+每个阶段最多一次请求，相同内容命中缓存；`--mimo-qc-refresh` 可刷新。成片阶段最多临时抽 6 张、最长边 768px 的 JPEG，base64 不落盘。`mimo_qc.json` 永远是 advisory artifact，不参与 blocker 判定。
+
 ## 效果增强：贴源字幕与克隆音色解说
 
 本节效果增强适配自 [ops120/video-recap-skills-plus](https://github.com/ops120/video-recap-skills-plus)；感谢 [@ops120](https://github.com/ops120) 公开并维护该下游实现。
@@ -203,6 +213,7 @@ python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --voice-ref /path
 - `work_dir/multi_source_manifest.json` · `work_dir/sources/<source_id>/`：多视频 cut 的来源清单与每个源视频的理解产物
 - `<material-library-dir>/materials/<material_id>/material.json|material.md` · `materials_index.jsonl`：可选素材库，方便 `grep -R` 查找/复用已分析素材
 - `work_dir/timeline.json` · `work_dir/assembly_manifest.json` · `tts_segments/` · `tts_meta.json`：多轨时间线、渲染记录与 TTS 音频
+- `work_dir/mimo_qc.json`：可选的组装前/成片后 MiMo 建议（多阶段聚合、永不阻断）
 
 ## 自带原声字幕（可选，更准）
 
@@ -223,7 +234,7 @@ python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --voice-ref /path
 
 - [linux.do](https://linux.do)
 - 剪映草稿导出参考了 [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft)、[capcut-mate](https://github.com/Hommy-master/capcut-mate)（均 Apache-2.0）的草稿结构。
-- 剪映导出的 schema / builder / writer 分层参考了 [duoec/duo-video](https://github.com/duoec/duo-video) 的设计思路。
+- 剪映导出的可携带草稿协议对齐 [duoec/duo-video](https://github.com/duoec/duo-video) commit `ef4eb46c823910553f901649f2f13fd7575e748f`；这是 clean-room 协议适配，不复制其代码、资源包或凭证。上游 README 的剪映 v10.1.0 实测与 JSON 模板中的 `5.9.5-beta1` 是两件事，本项目不把模板值冒充已安装/已验证版本。
 
 ## 许可
 

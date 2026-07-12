@@ -70,7 +70,7 @@ def test_write_positions_json_is_recap_cli_compatible(tmp_path):
     out = tmp_path / "subtitle_positions.json"
     measure._write_positions(out, 1280, 720, 610, 660)
 
-    assert measure._load_json(out) == {
+    assert json.loads(out.read_text(encoding="utf-8")) == {
         "canvas": {"width": 1280, "height": 720},
         "subtitle_y_top": 610,
         "subtitle_y_bot": 660,
@@ -87,7 +87,7 @@ def test_default_output_dir_is_source_specific(tmp_path):
     assert measure._default_output_dir(first).parent == tmp_path / ".subtitle_measure"
 
 
-def test_prepare_output_dir_preserves_unrelated_files(tmp_path):
+def test_claim_output_dir_preserves_unrelated_files(tmp_path):
     out = tmp_path / "custom-output"
     (out / "frames").mkdir(parents=True)
     (out / "frames" / "old.pgm").write_bytes(b"old")
@@ -98,7 +98,7 @@ def test_prepare_output_dir_preserves_unrelated_files(tmp_path):
     unrelated.write_text("important", encoding="utf-8")
 
     try:
-        measure._prepare_output_dir(out)
+        measure._claim_output_dir(out)
     except RuntimeError as exc:
         assert "未标记的输出目录" in str(exc)
     else:
@@ -110,7 +110,7 @@ def test_prepare_output_dir_preserves_unrelated_files(tmp_path):
     assert (out / "subtitle_positions.json").exists()
 
 
-def test_prepare_output_dir_cleans_marker_owned_artifacts_only(tmp_path):
+def test_staged_output_preserves_marker_owned_artifacts_until_commit(tmp_path):
     out = tmp_path / "owned"
     out.mkdir()
     (out / measure._OWNER_MARKER).write_text(measure._OWNER_MARKER_CONTENT, encoding="utf-8")
@@ -119,21 +119,22 @@ def test_prepare_output_dir_cleans_marker_owned_artifacts_only(tmp_path):
     unrelated = out / "keep-me.txt"
     unrelated.write_text("important", encoding="utf-8")
 
-    frames, preview = measure._prepare_output_dir(out)
+    staging, frames, preview = measure._prepare_staged_output(out)
 
     assert list(frames.iterdir()) == []
     assert list(preview.iterdir()) == []
+    assert (out / "frames" / "old.pgm").read_bytes() == b"old"
     assert unrelated.read_text(encoding="utf-8") == "important"
 
 
-def test_prepare_output_dir_refuses_to_claim_nonempty_unmanaged_directory(tmp_path):
+def test_claim_output_dir_refuses_to_claim_nonempty_unmanaged_directory(tmp_path):
     out = tmp_path / "videos"
     out.mkdir()
     sentinel = out / "movie.mp4"
     sentinel.write_bytes(b"important")
 
     try:
-        measure._prepare_output_dir(out)
+        measure._claim_output_dir(out)
     except RuntimeError as exc:
         assert "拒绝认领非空" in str(exc)
     else:
@@ -143,14 +144,14 @@ def test_prepare_output_dir_refuses_to_claim_nonempty_unmanaged_directory(tmp_pa
     assert not (out / measure._OWNER_MARKER).exists()
 
 
-def test_prepare_output_dir_rejects_forged_marker(tmp_path):
+def test_claim_output_dir_rejects_forged_marker(tmp_path):
     out = tmp_path / "forged"
     out.mkdir()
     marker = out / measure._OWNER_MARKER
     marker.write_text("not this tool\n", encoding="utf-8")
 
     try:
-        measure._prepare_output_dir(out)
+        measure._claim_output_dir(out)
     except RuntimeError as exc:
         assert "所有权标记无效" in str(exc)
     else:
@@ -186,6 +187,60 @@ def test_main_uses_auto_rotated_frame_dimensions_for_canvas(monkeypatch, tmp_pat
     # Detection uses an inclusive pixel row, while the recap CLI contract is [top, bot).
     assert positions["subtitle_y_bot"] == 262
     assert list((out / "frames").iterdir()) == []
+
+
+def test_interactive_prompt_points_to_current_staging_preview_then_final_path(
+        monkeypatch, tmp_path, capsys):
+    video = tmp_path / "input.mp4"
+    video.write_bytes(b"video")
+    out = tmp_path / "measure"
+    out.mkdir()
+    (out / measure._OWNER_MARKER).write_text(measure._OWNER_MARKER_CONTENT, encoding="utf-8")
+    (out / "preview").mkdir()
+    (out / "preview" / "stale.png").write_bytes(b"stale")
+    (out / "frames").mkdir()
+    (out / "subtitle_positions.json").write_text("{}\n", encoding="utf-8")
+
+    width = height = 100
+    pixels = bytearray([120] * (width * height))
+    for y in range(70, 80):
+        for x in range(18, 82):
+            pixels[y * width + x] = 20 if y in {70, 79} else 235
+
+    monkeypatch.setattr(measure, "_probe_video", lambda path: (width, height, 5.0, "1:1"))
+    monkeypatch.setattr(measure, "_sample_times", lambda *args: [1.0])
+    monkeypatch.setattr(
+        measure,
+        "_extract_gray_frame",
+        lambda _video, _timestamp, output: output.write_bytes(
+            f"P5\n{width} {height}\n255\n".encode() + pixels
+        ),
+    )
+    monkeypatch.setattr(measure, "_write_preview", lambda *args: args[2].write_bytes(b"current"))
+
+    prompts = []
+
+    def inspect_prompt(prompt):
+        prompts.append(prompt)
+        if len(prompts) > 1:
+            return ""
+        output = capsys.readouterr().out
+        preview_line = next(line for line in output.splitlines() if "预览:" in line)
+        advertised = Path(preview_line.split("预览:", 1)[1].strip())
+        assert advertised != out / "preview"
+        assert advertised.parent.name.startswith(".measure-staging-")
+        assert [p.read_bytes() for p in advertised.iterdir()] == [b"current"]
+        assert (out / "preview" / "stale.png").read_bytes() == b"stale"
+        return ""
+
+    monkeypatch.setattr("builtins.input", inspect_prompt)
+
+    assert measure.main([str(video), "--out-dir", str(out), "--frames", "1"]) == 0
+
+    output = capsys.readouterr().out
+    assert len(prompts) == 2
+    assert f"最终预览: {out / 'preview'}" in output
+    assert [p.read_bytes() for p in (out / "preview").iterdir()] == [b"current"]
 
 
 def test_main_rejects_non_square_pixel_coordinate_domain(monkeypatch, tmp_path, capsys):

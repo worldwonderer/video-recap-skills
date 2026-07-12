@@ -6,11 +6,11 @@ import pytest  # noqa: E402
 from export_jianying import build_draft, export_timeline_to_jianying, _us  # noqa: E402
 from jianying_schema import (  # noqa: E402
     MATERIAL_KEYS,
-    feature_capabilities,
     material_category_registry,
     validate_material_category,
 )
 from jianying_tracks import TRACK_LAYOUT_BANDS, TrackAllocator  # noqa: E402
+import jianying_writer  # noqa: E402
 from timeline import build_timeline  # noqa: E402
 
 
@@ -112,10 +112,16 @@ def test_build_draft_structure_and_tracks():
     assert len(m["videos"]) == 2 and len(m["audios"]) == 2 and len(m["texts"]) == 1
     assert len(m["speeds"]) == 4                        # one per media segment: 2 video + 1 narration + 1 bgm
     types = [t["type"] for t in content["tracks"]]
-    assert types == ["video", "audio", "audio", "text"]
-    # main video track sits at render_index 0, text on top
-    assert content["tracks"][0]["segments"][0]["render_index"] == 0
-    assert content["tracks"][-1]["segments"][0]["render_index"] == 15000
+    assert types == ["audio", "audio", "video", "text"]
+    assert all(
+        segment["render_index"] == 2 and segment["track_render_index"] == 2
+        for track in content["tracks"]
+        for segment in track["segments"]
+    )
+    assert [track["flag"] for track in content["tracks"]] == [0, 2, 0, 0]
+    subtitle = content["tracks"][-1]["segments"][0]
+    assert content["materials"]["texts"][0]["type"] == "subtitle"
+    assert subtitle["source_timerange"] == subtitle["target_timerange"] | {"start": 0}
 
 
 def test_draft_times_are_all_integer_microseconds():
@@ -132,14 +138,14 @@ def test_draft_times_are_all_integer_microseconds():
                 check(x)
     check(content)
     # a video clip placed at source 10s for 10s
-    vseg = content["tracks"][0]["segments"][0]
+    vseg = next(t for t in content["tracks"] if t["name"] == "video")["segments"][0]
     assert vseg["target_timerange"] == {"start": 0, "duration": 10_000_000}
     assert vseg["source_timerange"] == {"start": 10_000_000, "duration": 10_000_000}
 
 
 def test_ducking_becomes_volume_keyframes():
     content, _m, _n = build_draft(_sample_timeline(), new_id=_counter_ids(), probe=_fake_probe)
-    vseg = content["tracks"][0]["segments"][0]
+    vseg = next(t for t in content["tracks"] if t["name"] == "video")["segments"][0]
     kf_lists = vseg["common_keyframes"]
     assert kf_lists and kf_lists[0]["property_type"] == "KFTypeVolume"
     vals = [k["values"][0] for k in kf_lists[0]["keyframe_list"]]
@@ -227,16 +233,16 @@ def test_representative_parity_export_with_bundle_collision_loop_and_keyframes(t
 
     tracks = content["tracks"]
     assert [(t["type"], t["name"]) for t in tracks] == [
-        ("video", "video"), ("audio", "narration"), ("audio", "bgm"), ("text", "subtitle")
+        ("audio", "narration"), ("audio", "bgm"), ("video", "video"), ("text", "subtitle")
     ]
-    assert tracks[0]["segments"][0]["render_index"] == 0
-    assert tracks[-1]["segments"][0]["render_index"] == 15000
+    assert {segment["render_index"] for track in tracks for segment in track["segments"]} == {2}
     assert len(next(t for t in tracks if t["name"] == "bgm")["segments"]) == 3
 
-    assert tracks[0]["segments"][0]["common_keyframes"][0]["property_type"] == "KFTypeVolume"
+    assert next(t for t in tracks if t["name"] == "video")["segments"][0]["common_keyframes"][0]["property_type"] == "KFTypeVolume"
     assert next(t for t in tracks if t["name"] == "bgm")["segments"][0]["common_keyframes"][0]["property_type"] == "KFTypeVolume"
     for material in materials["videos"] + materials["audios"]:
-        assert material["path"].startswith(str(draft_path / "materials"))
+        assert material["path"].startswith("##_draftpath_placeholder_")
+        assert "##/Resources/local/" in material["path"]
 
 
 def test_export_uses_collision_safe_draft_folder(tmp_path):
@@ -261,7 +267,7 @@ def test_exporter_handles_timeline_without_bgm():
                         [{"source_path": "/n.wav", "timeline_start": 0.0, "timeline_end": 2.0,
                           "text": "x"}], bgm=None, ducking=None)
     content, _m, _n = build_draft(tl, new_id=_counter_ids(), probe=_fake_probe)
-    assert [t["type"] for t in content["tracks"]] == ["video", "audio", "text"]
+    assert [t["type"] for t in content["tracks"]] == ["audio", "video", "text"]
 
 
 def test_bundle_media_copies_and_rewrites_paths(tmp_path):
@@ -278,11 +284,13 @@ def test_bundle_media_copies_and_rewrites_paths(tmp_path):
     draft_dir, _notes = export_timeline_to_jianying(
         tl, str(tmp_path / "out"), draft_name="d", new_id=_counter_ids(),
         probe=_fake_probe, bundle_media=True)
-    mats = Path(draft_dir) / "materials"
-    assert (mats / "orig.mp4").exists() and (mats / "n0.wav").exists()
+    resources = Path(draft_dir) / "Resources" / "local"
+    assert (resources / "video" / "orig.mp4").exists()
+    assert (resources / "audio" / "n0.wav").exists()
     content = json.loads((Path(draft_dir) / "draft_content.json").read_text(encoding="utf-8"))
     for m in content["materials"]["videos"] + content["materials"]["audios"]:
-        assert m["path"].startswith(str(mats)), "material paths rewritten into the bundle"
+        assert m["path"].startswith("##_draftpath_placeholder_")
+        assert "##/Resources/local/" in m["path"]
 
 
 def test_exporter_skips_empty_audio_track():
@@ -310,50 +318,60 @@ def test_core_assemble_does_not_import_exporter():
     assert r.returncode == 0, r.stderr
 
 
-def test_material_category_registry_is_separate_from_feature_capabilities():
+def test_material_category_registry_matches_implemented_builders():
     categories = material_category_registry()
     assert categories["video"]["status"] == "supported"
     assert categories["audio"]["status"] == "supported"
     assert categories["text"]["status"] == "supported"
     assert categories["subtitle"]["status"] == "supported"
     assert categories["speed"]["status"] == "supported_auxiliary"
+    assert categories["image"] == {
+        "status": "supported", "materials_key": "videos", "track_type": "video"
+    }
     for reserved in (
-        "image", "sticker", "sound", "text_template", "lut", "transition",
+        "sticker", "sound", "text_template", "lut", "transition",
         "video_effect", "face_effect", "mask", "style",
     ):
         assert categories[reserved]["status"] == "reserved"
-
-    capabilities = feature_capabilities()
-    assert capabilities["volume_automation"]["property_type"] == "KFTypeVolume"
-    assert "media_bundling" in capabilities
-    assert "path_rewrite" in capabilities
-    assert "collision_safe_write" in capabilities
-    assert "lazy_export_isolation" in capabilities
-
-    assert "KFTypeVolume" not in categories
-    assert "media_bundling" not in categories
-    unsupported = validate_material_category("image")
+    assert categories["face_effect"]["materials_key"] == "video_effects"
+    assert categories["style"]["materials_key"] is None
+    unsupported = validate_material_category("transition")
     assert unsupported["supported"] is False
     assert unsupported["status"] == "reserved"
 
 
-def test_unsupported_material_category_produces_note_without_malformed_output():
+def test_local_image_overlay_builds_photo_material_and_overlap_safe_tracks():
     tl = {"schema_version": 1, "canvas": {"width": 100, "height": 100, "fps": 30},
-          "duration": 2.0, "tracks": [
+          "duration": 3.0, "tracks": [
               {"kind": "image", "name": "overlay", "segments": [
-                  {"source_path": "/overlay.png", "timeline_start": 0.0, "timeline_end": 2.0}
+                  {"source_path": "/overlay.png", "timeline_start": 0.0, "timeline_end": 2.0,
+                   "opacity": 0.75, "rotation_degrees": 15,
+                   "scale": {"x": 0.5, "y": 0.6}, "position": {"x": 0.25, "y": -0.4},
+                   "flip": {"horizontal": True, "vertical": False}},
+                  {"source_path": "/overlay-2.png", "timeline_start": 1.0, "timeline_end": 3.0}
               ]}]}
 
     content, _meta, notes = build_draft(tl, new_id=_counter_ids(), probe=_fake_probe)
 
-    assert content["tracks"] == []
+    assert notes == []
     assert content["materials"]["images"] == []
-    assert any("暂不支持" in note and "image" in note for note in notes)
+    assert [item["type"] for item in content["materials"]["videos"]] == ["photo", "photo"]
+    assert [(track["name"], track["flag"]) for track in content["tracks"]] == [
+        ("overlay", 0), ("overlay-1", 2)
+    ]
+    clip = content["tracks"][0]["segments"][0]["clip"]
+    assert clip == {
+        "alpha": 0.75,
+        "flip": {"horizontal": True, "vertical": False},
+        "rotation": 15.0,
+        "scale": {"x": 0.5, "y": 0.6},
+        "transform": {"x": 0.25, "y": -0.4},
+    }
 
 
 def test_track_allocator_uses_layout_bands_and_suffixes_overlaps():
-    assert TRACK_LAYOUT_BANDS["video"].render_index == 0
-    assert TRACK_LAYOUT_BANDS["subtitle"].render_index == 15000
+    assert TRACK_LAYOUT_BANDS["video"].layout_order < TRACK_LAYOUT_BANDS["image"].layout_order
+    assert TRACK_LAYOUT_BANDS["image"].layout_order < TRACK_LAYOUT_BANDS["subtitle"].layout_order
     assert {"audio", "sound", "video", "image", "mask", "sticker", "subtitle", "text_template"} <= set(TRACK_LAYOUT_BANDS)
 
     allocator = TrackAllocator()
@@ -362,6 +380,63 @@ def test_track_allocator_uses_layout_bands_and_suffixes_overlaps():
     assert allocator.allocate("subtitle", "subtitle", 4_500_000, 2_000_000).name == "subtitle-1"
     assert allocator.allocate("subtitle", "subtitle", 4_500_000, 2_000_000).name == "subtitle-2"
     assert allocator.allocate("image", "overlay", 4_500_000, 2_000_000).name == "overlay"
+
+
+def test_bundle_uses_duo_resources_contract_and_indexes_deduped_media(monkeypatch, tmp_path):
+    monkeypatch.setattr(jianying_writer.time, "time", lambda: 1_700_000_000.123)
+    src = tmp_path / "src"
+    src.mkdir()
+    video = src / "same.mp4"
+    audio = src / "voice.wav"
+    image = src / "card.png"
+    for path, payload in ((video, b"video"), (audio, b"audio"), (image, b"image")):
+        path.write_bytes(payload)
+    timeline = {
+        "schema_version": 2,
+        "canvas": {"width": 1280, "height": 720, "fps": 30},
+        "duration": 3.0,
+        "tracks": [
+            {"kind": "video", "name": "video", "clips": [
+                {"source_path": str(video), "source_start": 0, "source_end": 3,
+                 "timeline_start": 0, "timeline_end": 3, "audio": {"base_gain": 1}},
+            ]},
+            {"kind": "audio", "name": "narration", "role": "narration", "segments": [
+                {"source_path": str(audio), "timeline_start": 0, "timeline_end": 2},
+            ]},
+            {"kind": "image", "name": "overlay", "segments": [
+                {"source_path": str(image), "timeline_start": 0.5, "timeline_end": 2.5},
+            ]},
+        ],
+    }
+
+    draft_dir, _ = export_timeline_to_jianying(
+        timeline, tmp_path / "out", "portable", new_id=_counter_ids(),
+        probe=_fake_probe, bundle_media=True,
+    )
+    root = Path(draft_dir)
+    assert (root / "Resources/local/video/same.mp4").read_bytes() == b"video"
+    assert (root / "Resources/local/audio/voice.wav").read_bytes() == b"audio"
+    assert (root / "Resources/local/image/card.png").read_bytes() == b"image"
+
+    content = json.loads((root / "draft_content.json").read_text(encoding="utf-8"))
+    paths = [m["path"] for m in content["materials"]["videos"] + content["materials"]["audios"]]
+    assert all(path.startswith("##_draftpath_placeholder_") for path in paths)
+    assert any("/Resources/local/image/card.png" in path for path in paths)
+
+    meta = json.loads((root / "draft_meta_info.json").read_text(encoding="utf-8"))
+    values = next(group["value"] for group in meta["draft_materials"] if group["type"] == 0)
+    assert {value["metetype"] for value in values} == {"video", "music", "photo"}
+    assert {value["file_Path"] for value in values} == {
+        "./Resources/local/video/same.mp4",
+        "./Resources/local/audio/voice.wav",
+        "./Resources/local/image/card.png",
+    }
+    assert all(value["md5"] for value in values)
+    assert all(value["id"] for value in values)
+    assert {value["extra_info"] for value in values} == {"same.mp4", "voice.wav", "card.png"}
+    assert {value["create_time"] for value in values} == {1_700_000_000}
+    assert {value["import_time"] for value in values} == {1_700_000_000}
+    assert {value["import_time_ms"] for value in values} == {1_700_000_000_123}
 
 
 

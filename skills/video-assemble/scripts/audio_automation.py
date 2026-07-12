@@ -59,28 +59,6 @@ def duck_ramp_expression(start, end, fade):
     return f"min(1,max(0,min({_t_minus(ramp_start)},{ramp_end:.2f}-t)/{fade:.2f}))"
 
 
-def duck_ramp_gain(start, end, fade, t):
-    """Numeric gain weight (0..1) for the canonical duck shape."""
-    start = float(start)
-    end = float(end)
-    fade = float(fade or 0)
-    t = float(t)
-    if end <= start:
-        return 0.0
-    if fade <= 0:
-        return 1.0 if start <= t <= end else 0.0
-    return max(0.0, min(1.0, min(t - (start - fade), (end + fade) - t) / fade))
-
-
-def ducking_gain_at(windows, idle, fade, t):
-    """Evaluate gain at time `t` for already-coalesced [(s,e,gain)] windows."""
-    idle = float(idle)
-    gain = idle
-    for s, e, level in windows:
-        gain += (float(level) - idle) * duck_ramp_gain(s, e, fade, t)
-    return max(0.0, min(1.0, gain))
-
-
 def ducking_expression(windows, idle, fade):
     """Build the ffmpeg volume expression for coalesced duck windows."""
     merged = list(windows or [])

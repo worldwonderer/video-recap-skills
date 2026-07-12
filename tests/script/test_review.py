@@ -369,33 +369,19 @@ def test_public_grounding_seams_are_api_free(tmp_path):
     vlm = [{"scene_id": 1, "start": 0, "end": 4, "description": "门口对峙", "frame_facts": {"1.0": ["男子握拳"]}}]
     asr = [{"start": 1, "end": 2, "text": "站住"}]
 
-    ranges = review.select_coverage_ranges(vlm, asr, narration)
+    bundle = review.build_evidence_bundle(vlm, asr, narration, research={"characters": {"甲": "背景"}})
+    ranges = bundle["coverage"]["selected_ranges"]
     filtered = review.filter_evidence_by_ranges(vlm, asr, ranges)
     assert [item["source"] for item in filtered["items"]] == ["visual", "asr"]
 
-    bundle = review.build_evidence_bundle(vlm, asr, narration, research={"characters": {"甲": "背景"}})
     assert review.validate_public_evidence_contract(bundle)["valid"] is True
     assert review.build_review_coverage_metadata(bundle)["scene_count"] == 1
-    assert "门口对峙" in review.render_evidence_for_review(bundle)
+    assert "门口对峙" in review.render_evidence_bundle(bundle)
 
     qc = review.build_grounding_qc(tmp_path, {"findings": []}, bundle)
     assert qc["verdict"] == "pass"
     review.write_grounding_qc(tmp_path, qc)
     assert json.loads((tmp_path / "grounding_qc.json").read_text(encoding="utf-8"))["owner"] == "video-script.review"
-
-
-def test_validate_timeline_mapping_reports_bad_spans():
-    good = review.validate_timeline_mapping([
-        {"source_start": 10, "source_end": 20, "output_start": 0, "output_end": 10},
-        {"source_start": 30, "source_end": 35, "output_start": 10, "output_end": 15},
-    ])
-    bad = review.validate_timeline_mapping([
-        {"source_start": 1, "source_end": 1, "output_start": 0, "output_end": 1},
-    ])
-    assert good["valid"] is True and good["span_count"] == 2
-    assert bad["valid"] is False and bad["errors"]
-
-
 
 def test_review_narration_chunks_large_evidence_and_merges(monkeypatch, tmp_path):
     narration = [{"start": 0, "end": 980, "narration": "全片复盘。"}]
