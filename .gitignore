@@ -12,7 +12,7 @@ prd.json
 progress.txt
 
 # Local run artifacts & generated media — never commit real footage/audio/subtitles.
-# Targeted patterns (not bare *.mp4) so the tracked demo/demo.mp4 fixture is unaffected.
+# Keep patterns targeted rather than ignoring every media file extension.
 work_dir*/
 outputs*/
 output*/

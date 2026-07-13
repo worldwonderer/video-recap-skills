@@ -2302,7 +2302,7 @@ def _bgm_envelope(tts_segments, base, duck, fade, bridge=None):
     """Per-beat ducking automation for the BGM track using the shared contract."""
     if bridge is None:
         bridge = default_bridge(fade)
-    windows = _placement_windows(tts_segments, lambda seg: duck)
+    windows = _placement_windows(tts_segments, lambda _: duck)
     merged = coalesce_duck_windows(windows, bridge)
     return ducking_expression(merged, base, fade)
 
@@ -2581,7 +2581,7 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
     return output_path
 
 
-def _adjust_tts_speed(audio_path, target_duration, work_dir, tts_rate_offset=0.0, *, return_meta=True):
+def _adjust_tts_speed(audio_path, target_duration, tts_rate_offset=0.0):
     """Fit overlong TTS with bounded atempo; never time-trim speech in assemble.
 
     Assemble has no word/sentence timestamps, so if bounded atempo cannot make the
@@ -2761,23 +2761,8 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         available_samples = end_boundary - actual_start
         available_duration = max(available_samples / sample_rate, 0)
         if tts_dur > available_duration > 0:
-            try:
-                wav_path, _actual_dur, fit_meta = _adjust_tts_speed(
-                    wav_path, available_duration, work_dir, tts_rate_offset, return_meta=True)
-            except TypeError:
-                # Tests/older extensions may monkeypatch the old signature; normalize it.
-                adjusted_result = _adjust_tts_speed(wav_path, available_duration, work_dir, tts_rate_offset)
-                if len(adjusted_result) == 2:
-                    wav_path, _actual_dur = adjusted_result
-                    fit_meta = {
-                        "fit_status": "tempo_adjusted" if wav_path != original_wav_path else "fits",
-                        "segment_tempo_factor": 1.0,
-                        "effective_tempo": narration_tempo_budget(tts_rate_offset)["global_narration_speed"],
-                        "global_narration_speed": narration_tempo_budget(tts_rate_offset)["global_narration_speed"],
-                        "truncate_reason": "none",
-                    }
-                else:
-                    wav_path, _actual_dur, fit_meta = adjusted_result
+            wav_path, _actual_dur, fit_meta = _adjust_tts_speed(
+                wav_path, available_duration, tts_rate_offset)
             seg.update({
                 "fit_status": fit_meta["fit_status"],
                 "segment_tempo_factor": fit_meta.get("segment_tempo_factor", 1.0),

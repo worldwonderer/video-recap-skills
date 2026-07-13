@@ -6,10 +6,6 @@ full `materials` parallel-array shape, and the implemented material dispatch.
 
 from jianying_templates import template
 
-DRAFT_VERSION = 360000
-NEW_VERSION = "111.0.0"
-APP = {"app_id": 3704, "app_source": "lv", "app_version": "5.9.5-beta1", "os": "mac"}
-
 # The full 剪映 materials object: ~45 parallel arrays. Only arrays backed by a
 # production builder are populated; retaining the full shape preserves compatibility.
 MATERIAL_KEYS = (

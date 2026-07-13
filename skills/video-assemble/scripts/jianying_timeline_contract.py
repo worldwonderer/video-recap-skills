@@ -8,7 +8,6 @@ CURRENT_SCHEMA_VERSION = 2
 RESOURCE_TRACK_KINDS = {
     "face_effect", "sound", "sticker", "text_template", "video_effect",
 }
-SUPPORTED_TRACK_KINDS = {"audio", "image", "text", "video"} | RESOURCE_TRACK_KINDS
 
 
 def _error(path, expectation):

@@ -49,7 +49,7 @@ def test_adjust_tts_speed_derives_outputs_from_audio_name_only(monkeypatch, tmp_
     monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
 
     adjusted, actual_dur, meta = _adjust_result_parts(
-        _adjust_tts_speed(src, target_duration=2.0, work_dir=tmp_path)
+        _adjust_tts_speed(src, target_duration=2.0)
     )
 
     assert actual_dur == 2.0
@@ -76,7 +76,7 @@ def test_adjust_tts_speed_no_safe_fit_keeps_source_audio_and_metadata(monkeypatc
     monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
 
     adjusted, actual_dur, meta = _adjust_result_parts(
-        _adjust_tts_speed(src, target_duration=1.0, work_dir=tmp_path)
+        _adjust_tts_speed(src, target_duration=1.0)
     )
 
     assert actual_dur == 10.0
@@ -1276,7 +1276,7 @@ def test_p0_adjust_tts_speed_respects_cumulative_tempo_cap(monkeypatch, tmp_path
     monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
 
     out, dur, meta = _adjust_result_parts(
-        _adjust_tts_speed(src, target_duration=10.0, work_dir=tmp_path, tts_rate_offset=0.05)
+        _adjust_tts_speed(src, target_duration=10.0, tts_rate_offset=0.05)
     )
 
     effective_tempo = float(meta["global_narration_speed"]) * (1.0 + float(meta["tts_rate_offset"])) * float(meta["segment_tempo_factor"])
@@ -1304,7 +1304,7 @@ def test_p0_adjust_tts_speed_no_safe_fit_does_not_time_cut(monkeypatch, tmp_path
     monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
 
     out, dur, meta = _adjust_result_parts(
-        _adjust_tts_speed(src, target_duration=10.0, work_dir=tmp_path, tts_rate_offset=0.05)
+        _adjust_tts_speed(src, target_duration=10.0, tts_rate_offset=0.05)
     )
 
     assert Path(out) == src
@@ -1326,7 +1326,7 @@ def test_p0_build_timed_narration_propagates_no_safe_fit_metadata(monkeypatch, t
         wf.setframerate(44100)
         wf.writeframes(b"\x00\x10" * int(2.0 * 44100))
 
-    def fake_adjust(path, target_duration, work_dir, tts_rate_offset=0.0):
+    def fake_adjust(path, target_duration, tts_rate_offset=0.0):
         return str(path), 2.0, {
             "fit_status": "no_safe_fit",
             "truncate_reason": "no_safe_boundary",
@@ -1371,7 +1371,7 @@ def test_p0_build_timed_narration_trims_subframe_overrun_instead_of_dropping(mon
         wf.setframerate(44100)
         wf.writeframes(b"\x00\x10" * int(2.1 * 44100))  # longer than the 2.0s slot -> triggers fit
 
-    def fake_adjust(path, target_duration, work_dir, tts_rate_offset=0.0, *, return_meta=True):
+    def fake_adjust(path, target_duration, tts_rate_offset=0.0):
         # simulate atempo landing ~10ms over the fit target (real ffmpeg rounding drift)
         over = tmp_path / "over.wav"
         n = int((target_duration + 0.010) * 44100)

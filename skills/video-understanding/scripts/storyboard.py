@@ -244,7 +244,7 @@ def _tile_pages(frame_paths, columns, out_dir, out_stem, scratch_dir):
     return pages
 
 
-def _render_storyboard(work_dir, tiles, out_stem, fps):
+def _render_storyboard(work_dir, tiles, out_stem):
     """Shared render path: optionally burn labels, tile to pages, return (page_paths, labels_burned).
 
     `tiles` is a list of dicts that ALREADY carry a resolved `frame_file` (absolute path) and a
@@ -326,7 +326,7 @@ def build_source_storyboard(work_dir, video_path, scenes, fps):
             log("storyboard 跳过 source：未解析到任何帧")
             return None
 
-        pages, labels_burned = _render_storyboard(work_dir, tiles, "source_storyboard", fps)
+        pages, labels_burned = _render_storyboard(work_dir, tiles, "source_storyboard")
         if not pages:
             log("storyboard 跳过 source：拼贴失败")
             return None
@@ -459,7 +459,7 @@ def build_edited_storyboard(work_dir, source_video_path, clip_plan_validated, fp
         if len(tiles) > max_tiles:
             tiles = tiles[:max_tiles]
 
-        pages, labels_burned = _render_storyboard(work_dir, tiles, "edited_storyboard", fps)
+        pages, labels_burned = _render_storyboard(work_dir, tiles, "edited_storyboard")
         if not pages:
             log("storyboard 跳过 edited：拼贴失败")
             return None

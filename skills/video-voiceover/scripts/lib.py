@@ -8,7 +8,6 @@ import subprocess
 import time
 import urllib.request
 import urllib.error
-from pathlib import Path
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
@@ -302,9 +301,6 @@ if isinstance(_EXISTING_CONFIG_REF, dict):
     _EXISTING_CONFIG_REF.update(CONFIG)
     CONFIG = _EXISTING_CONFIG_REF
 
-SCRIPT_DIR = Path(__file__).parent
-PROMPTS_DIR = SCRIPT_DIR.parent / "references"
-
 def narration_tempo_budget(tts_rate_offset=0.0, *, config=None):
     """Return the canonical tempo budget shared by voiceover and assemble."""
     cfg = config or CONFIG
@@ -373,18 +369,6 @@ def file_fingerprint(path, chunk_size=1024 * 1024):
         for chunk in iter(lambda: f.read(chunk_size), b""):
             h.update(chunk)
     return h.hexdigest()
-def video_fingerprint(video_path):
-    """Full video content fingerprint used as the root pipeline asset print."""
-    return file_fingerprint(video_path)
-
-def step_cache_key(video_path, step_name, params_fingerprint=""):
-    """Build a cache key from video content, step name and step parameters."""
-    params_digest = params_fingerprint
-    if not isinstance(params_digest, str):
-        params_digest = stable_hash(params_digest)
-    payload = f"{video_fingerprint(video_path)}_{step_name}_{params_digest}"
-    return hashlib.md5(payload.encode("utf-8")).hexdigest()
-
 def _retry_after_seconds(value, fallback):
     """Parse Retry-After seconds or HTTP-date; return fallback on malformed input."""
     if not value:
@@ -455,10 +439,6 @@ def _call_mimo_endpoint(kind, payload, max_retries=10):
         api_key_source=settings["api_key_source"],
     )
 
-def mimo_video_api_call(payload, max_retries=10):
-    """Call the MiMo video-understanding endpoint."""
-    return _call_mimo_endpoint("video", payload, max_retries=max_retries)
-
 def mimo_tts_api_call(payload, max_retries=10):
     """Call the MiMo TTS endpoint."""
     return _call_mimo_endpoint("tts", payload, max_retries=max_retries)
@@ -522,17 +502,6 @@ def api_call(payload, max_retries=8, *, api_provider=None, api_url=None, api_key
                 time.sleep(wait)
             else:
                 raise RuntimeError(f"API 调用失败 {max_retries} 次: {e}")
-
-def load_prompt(name):
-    """加载 prompt 模板"""
-    path = PROMPTS_DIR / "prompt-templates.md"
-    if not path.exists():
-        return None
-    content = path.read_text(encoding="utf-8")
-    # 用 ### NAME 和 ### 分隔提取对应 prompt
-    pattern = rf"### {name}\s*\n(.*?)(?=\n### |\Z)"
-    m = re.search(pattern, content, re.DOTALL)
-    return m.group(1).strip() if m else None
 
 def _text_char_count(text):
     """计算文本的有效字数（去除标点和空白，这些不占 TTS 朗读时间）。"""

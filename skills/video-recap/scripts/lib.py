@@ -1,10 +1,9 @@
-"""Self-contained config, MiMo client, and log for the video-recap orchestrator."""
+"""Self-contained config and MiMo client for the video-recap orchestrator."""
 import json
 import os
 import socket
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 
 # ── 配置 ──────────────────────────────────────────────────────────────
@@ -293,9 +292,6 @@ CONFIG = {
     "subtitle_play_res_y": env_int("SUBTITLE_PLAY_RES_Y", 720, minimum=1),
 }
 
-SCRIPT_DIR = Path(__file__).parent
-PROMPTS_DIR = SCRIPT_DIR.parent / "references"
-
 def narration_tempo_budget(tts_rate_offset=0.0, *, config=None):
     """Return the canonical tempo budget shared by voiceover and assemble."""
     cfg = config or CONFIG
@@ -362,6 +358,3 @@ def mimo_qc_api_call(payload, *, config=None, timeout=60):
     if not isinstance(result, dict):
         raise MiMoQCRequestError("invalid_response")
     return result
-
-def log(msg):
-    print(f"[video-recap] {msg}", flush=True)

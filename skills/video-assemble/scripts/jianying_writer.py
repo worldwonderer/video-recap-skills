@@ -212,7 +212,7 @@ def _descriptor(raw, default_kind, *, required):
     }
 
 
-def _material_resource_descriptors(material, materials_key, default_kind):
+def _material_resource_descriptors(material, default_kind):
     descriptors = [
         _descriptor(raw, default_kind, required=True)
         for raw in material.get("_bundle_resources", [])
@@ -273,7 +273,7 @@ def bundle_media(content, meta, draft_dir):
         for materials_key, resource_kind in RESOURCE_DIRECTORY_BY_MATERIALS_KEY.items():
             for material in materials.get(materials_key, []):
                 descriptors = _material_resource_descriptors(
-                    material, materials_key, resource_kind
+                    material, resource_kind
                 )
                 seen_descriptors = set()
                 for descriptor in descriptors:

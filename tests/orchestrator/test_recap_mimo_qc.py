@@ -124,7 +124,7 @@ def test_multi_pipeline_uses_the_same_mimo_stage_order(monkeypatch, tmp_path):
     work = tmp_path / "project"
     work.mkdir()
     args = _manifest_args(edit_mode="cut")
-    records = recap._build_multi_source_records([first.resolve(), second.resolve()], work, args)
+    records = recap._build_multi_source_records([first.resolve(), second.resolve()], args)
     recap._write_multi_source_manifest(work, records)
     recap._write_project_run_manifest(work, [first.resolve(), second.resolve()], args, records)
     (work / "clip_plan.json").write_text(json.dumps({

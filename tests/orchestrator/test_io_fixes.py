@@ -1130,7 +1130,7 @@ def test_recap_multi_cut_forwards_allow_sparse_cut_compat_and_records_source(mon
     work = tmp_path / "project"
     work.mkdir()
     args = _manifest_args(edit_mode="cut", target_duration="10m")
-    records = recap._build_multi_source_records([v1.resolve(), v2.resolve()], work, args)
+    records = recap._build_multi_source_records([v1.resolve(), v2.resolve()], args)
     recap._write_multi_source_manifest(work, records)
     recap._write_project_run_manifest(work, [v1.resolve(), v2.resolve()], args, records)
     (work / "clip_plan.json").write_text(json.dumps({
@@ -1172,7 +1172,7 @@ def test_recap_multi_video_phase_b_invokes_cut_with_sources_manifest(monkeypatch
     work = tmp_path / "project"
     work.mkdir()
     args = _manifest_args(edit_mode="cut")
-    records = recap._build_multi_source_records([v1.resolve(), v2.resolve()], work, args)
+    records = recap._build_multi_source_records([v1.resolve(), v2.resolve()], args)
     recap._write_multi_source_manifest(work, records)
     recap._write_project_run_manifest(work, [v1.resolve(), v2.resolve()], args, records)
     (work / "clip_plan.json").write_text(json.dumps({
