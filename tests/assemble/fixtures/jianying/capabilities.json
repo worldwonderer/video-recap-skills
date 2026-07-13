@@ -1,0 +1,36 @@
+{
+  "source": {
+    "repository": "https://github.com/duoec/duo-video.git",
+    "commit": "ef4eb46",
+    "module": "duo-video-jy"
+  },
+  "template_fixtures": {
+    "duo_empty_project_info.json": "src/main/resources/tpl/empty_jy_project_info.json",
+    "duo_empty_video.json": "src/main/resources/tpl/empty_jy_material_video.json",
+    "duo_empty_audio.json": "src/main/resources/tpl/empty_yj_material_audio.json",
+    "duo_empty_text.json": "src/main/resources/tpl/empty_yj_material_text.json",
+    "duo_empty_segment.json": "src/main/resources/tpl/empty_jy_segment.json"
+  },
+  "required_capabilities": [
+    "video",
+    "image",
+    "audio",
+    "text",
+    "sound",
+    "sticker",
+    "text_template",
+    "transition",
+    "mask",
+    "lut",
+    "video_effect",
+    "face_effect",
+    "green_screen",
+    "chroma",
+    "compound",
+    "variable_speed",
+    "reverse_local_source",
+    "generic_transform",
+    "rich_text",
+    "per_character_text_style"
+  ]
+}

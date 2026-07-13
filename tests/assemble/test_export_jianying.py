@@ -110,7 +110,7 @@ def test_build_draft_structure_and_tracks():
     assert content["duration"] == 15_000_000           # µs
     m = content["materials"]
     assert len(m["videos"]) == 2 and len(m["audios"]) == 2 and len(m["texts"]) == 1
-    assert len(m["speeds"]) == 4                        # one per media segment: 2 video + 1 narration + 1 bgm
+    assert m["speeds"] == []                            # duo-video emits speed only when rate != 1x
     types = [t["type"] for t in content["tracks"]]
     assert types == ["audio", "audio", "video", "text"]
     assert all(
@@ -229,7 +229,7 @@ def test_representative_parity_export_with_bundle_collision_loop_and_keyframes(t
     assert len(materials["videos"]) == 2
     assert len(materials["audios"]) == 2
     assert len(materials["texts"]) == 1
-    assert len(materials["speeds"]) == 6  # 2 video + narration + 3 looped BGM pieces
+    assert materials["speeds"] == []  # 1x media does not need auxiliary speed refs
 
     tracks = content["tracks"]
     assert [(t["type"], t["name"]) for t in tracks] == [
@@ -328,16 +328,22 @@ def test_material_category_registry_matches_implemented_builders():
     assert categories["image"] == {
         "status": "supported", "materials_key": "videos", "track_type": "video"
     }
-    for reserved in (
+    for supported in (
         "sticker", "sound", "text_template", "lut", "transition",
-        "video_effect", "face_effect", "mask", "style",
+        "video_effect", "face_effect", "mask", "style", "chroma",
+        "green_screen", "compound",
     ):
-        assert categories[reserved]["status"] == "reserved"
+        assert categories[supported]["status"].startswith("supported")
+    for offline_payload in (
+        "sticker", "sound", "text_template", "lut", "transition",
+        "video_effect", "face_effect", "mask", "chroma",
+    ):
+        assert categories[offline_payload]["status"] == "supported_offline_payload"
     assert categories["face_effect"]["materials_key"] == "video_effects"
     assert categories["style"]["materials_key"] is None
     unsupported = validate_material_category("transition")
-    assert unsupported["supported"] is False
-    assert unsupported["status"] == "reserved"
+    assert unsupported["supported"] is True
+    assert unsupported["status"] == "supported_offline_payload"
 
 
 def test_local_image_overlay_builds_photo_material_and_overlap_safe_tracks():

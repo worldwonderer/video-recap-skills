@@ -1,0 +1,30 @@
+{
+  "styles": [
+    {
+      "fill": {
+        "alpha": 1.0,
+        "content": {
+          "render_type": "solid",
+          "solid": {
+            "alpha": 1.0,
+            "color": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          }
+        }
+      },
+      "font": {
+        "id": "",
+        "path": ""
+      },
+      "range": [
+        0,
+        4
+      ],
+      "size": 15.0
+    }
+  ],
+  "text": ""
+}

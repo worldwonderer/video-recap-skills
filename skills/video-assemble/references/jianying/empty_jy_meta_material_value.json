@@ -1,0 +1,23 @@
+{
+  "duration": 0,
+  "height": 0,
+  "id": "",
+  "md5": "",
+  "metetype": "",
+  "type": 0,
+  "width": 1080,
+  "create_time": 0,
+  "extra_info": "",
+  "file_Path": "",
+  "import_time": 0,
+  "import_time_ms": 0,
+  "item_source": 1,
+  "roughcut_time_range": {
+    "duration": 0,
+    "start": 0
+  },
+  "sub_time_range": {
+    "duration": -1,
+    "start": -1
+  }
+}

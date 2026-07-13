@@ -55,6 +55,29 @@ times are seconds and volumes are gains, so this file has no 剪映-only units.
   not invent image overlays automatically.
 - `volume_keyframes` are timeline-absolute `{t, gain}` points with linear ramps.
 
+Schema v2 also has additive JianYing authoring fields. Existing v1 timelines
+are copied and migrated to v2 at the exporter boundary; an unknown future
+schema version is rejected instead of being guessed:
+
+- video clips may add `speed`, `reverse`, `reverse_path`, `opacity`,
+  `rotation_degrees`, `scale`, `position`, `flip`, `transition`, `mask`, `lut`,
+  `compound`, `chroma`, and `green_background`;
+- audio/image segments may add constant `speed`; image segments may also add
+  `transition`, `mask`, and `lut`;
+- text segments may add `style`, `style_id`, `words`, and the same visual
+  transforms. `words[].index` / `length` are UTF-16 code-unit ranges, matching
+  JianYing and Java rather than Python code-point indexes;
+- top-level `style_presets` is a name-to-style object;
+- top-level `resource_packages` is a name-to-offline-package object;
+- `build_timeline(..., extra_tracks=[...])` appends explicit `sound`, `sticker`,
+  `text_template`, `video_effect`, or `face_effect` tracks without making the
+  normal recap pipeline invent proprietary effects.
+
+For a video clip with constant speed, the authored ranges must satisfy
+`source_end - source_start == (timeline_end - timeline_start) * speed`; an
+inconsistent clip is rejected. Image and resource segments derive that source
+duration automatically. This keeps source selection unambiguous.
+
 ## Optional 剪映 / JianYing export
 
 `--export-jianying` / `EXPORT_JIANYING=1` maps the timeline into a folder with
@@ -107,20 +130,73 @@ recommended clone-ready workflow. Non-empty draft folders are never overwritten;
 a numbered sibling such as `recap_demo_2` is created. The entire folder is staged
 and atomically renamed, so a copy/write exception does not publish a half-draft.
 
-### Material support boundary
+### Duo-video capability alignment
 
-Actually emitted today:
+The adapter is pinned to `duo-video@ef4eb46`; it deep-copies the upstream MIT
+JSON templates before replacing authored values. Core categories use status
+`supported`; proprietary-resource categories use
+`supported_offline_payload`. The latter means a pre-adapted material/segment
+protocol can be emitted from caller data. It does **not** mean this project
+ships JianYing's proprietary resource catalog or reconstructs it from an ID.
 
-- `video`, `audio`, `text`, `subtitle`, auxiliary `speed`;
-- local `image`, represented by 剪映 as `materials.videos` with `type: photo`,
-  including opacity, rotation, scale, normalized position, flip, bundling, meta
-  indexing, and overlap-safe lanes.
+| Capability | Timeline authoring | Output |
+| --- | --- | --- |
+| Video / local photo / audio | normal `video`, `image`, `audio` tracks | `materials.videos` / `audios`; photos use `type: photo` |
+| Text / subtitle / style | `text` track plus `style`, `style_id`, `words`, `style_presets` | UTF-16 rich-text styles, font/stroke/shadow/background/effect-style payloads |
+| Constant speed | `speed > 0` on video/audio/image/resource segments | segment speed plus referenced `materials.speeds`; curve speed is not claimed |
+| Reverse | `reverse: true`, optionally `reverse_path` | export generates a local reversed file with ffmpeg when needed, then bundles it; direct `build_draft()` requires `reverse_path` |
+| Transform | opacity, rotation, scale, normalized position, flip | editable segment `clip` transform |
+| Sound / sticker / video effect / face effect | explicit resource track with one offline material source | `audios`, `stickers`, or `video_effects` plus the matching track |
+| Text template | explicit resource track with pre-adapted template/text/effect payloads | `text_templates` plus caller-supplied subordinate `texts` / `effects` |
+| Transition / mask / LUT | object or package name on a video/photo segment | referenced `transitions`; legacy + `common_mask`; LUT/skin-tone `effects` |
+| Green screen / compound | video clip with `compound`, local `green_background`, and `chroma` | nested `materials.drafts` with recursively bundled foreground/background |
 
-Reserved but **not emitted**: `sticker`, `sound`, `text_template`, `lut`,
-`transition`, `video_effect`, `face_effect`, `mask`, and `style`. Several upstream
-features depend on opaque remote resource IDs/packages or upstream demo
-credentials. Until this project has a legal offline resource provider, fixtures,
-and real-app verification, the registry must not advertise them as supported.
+Resource-backed segments must define exactly one of:
+
+```jsonc
+{"material": {"type": "sticker", "resource_id": "...", "path": "/local/file"}}
+{"resource_config": {
+  "resource_id": "...",
+  "main_config": {"type": "sticker", "path": "/local/file"},
+  "resources": [
+    "/local/file",
+    {"source_path": "/local/package-dir", "target_path": "package-dir"}
+  ],
+  "cover_img": "/local/cover.png",
+  "texts": [],
+  "effects": []
+}}
+{"resource_package": "named-package"}
+```
+
+`resource_package` resolves a top-level `resource_packages` entry with the same
+shape as `resource_config`. Both the local snake_case keys above and the real
+Jackson `JyResource` keys (`resourceId`, `mainConfig`, `coverImg`) are accepted.
+`main_config` / `mainConfig` may be an object or a JSON string;
+`resource_config` itself may be an object or a local JSON-file path.
+
+`resources` is an explicit local-file contract, never a filesystem guess. A
+string copies that file/directory using its basename. An object may additionally
+set `resource_kind` and a safe package-relative `target_path`. ZIP input is
+validated against path traversal, extracted under
+`Resources/local/<kind>/<archive-stem>`, and keeps its internal layout. Exact
+declared path values in material JSON, including rich-text JSON strings, are
+rewritten to draft placeholders. Missing declared resources, unsafe targets,
+unknown package names, and malformed payloads fail explicitly; semantic strings
+that happen to match local filenames are never copied. No network lookup,
+embedded demo credential, or silent resource-ID fallback is used.
+
+LUT skin-tone correction additionally requires an offline effect
+`main_config` with `lumi_hub_path`; the adapter emits the upstream `version: v3`
+skin-tone effect rather than deriving an effect directory from the `.cube`
+file's parent.
+
+Text-template **protocol emission** accepts the output of an offline template
+adapter in `main_config` / `texts` / `effects`. This repository does not bundle
+or download duo-video's separate `jy_text_template_adapter`, so it does not
+claim that an arbitrary official resource ID plus replacement strings can be
+adapted locally. The same boundary applies to official stickers/effects: callers
+must legally supply complete offline package data.
 
 ## Isolation and failure behavior
 
@@ -131,7 +207,21 @@ and real-app verification, the registry must not advertise them as supported.
 - The source clip is un-burned, so hardcoded source subtitles remain visible in
   the editable draft. ffmpeg remains the authoritative final mix.
 
-## Manual smoke checklist
+## Verification boundary and manual smoke checklist
+
+Automated golden tests compare root, video, audio, text, rich-text, and
+base-segment templates against the pinned upstream revision. Structural tests
+cover compound/meta output and exercise every row in the matrix. On macOS,
+JianYing Pro `10.8.7-beta1` detected and registered a generated bundled smoke
+draft (`copy_draft_external`, `errno: 0`). Manual verification then opened it,
+confirmed online video/narration/BGM/subtitle/photo tracks and a valid preview,
+saved it, closed it, and reopened it with the same editable timeline. This does
+not prove that every caller-supplied official resource package renders correctly.
+
+AutoJY is a separate desktop-automation/export pipeline in the duo-video
+ecosystem, not part of the draft JSON protocol. This repository does not ship or
+claim AutoJY UI automation, rendered-file upload, task-status callbacks, or an
+automated final-video export smoke test.
 
 With a desktop 剪映 install, generate a bundled draft and verify:
 
@@ -146,5 +236,6 @@ With a desktop 剪映 install, generate a bundled draft and verify:
 The draft schema also follows
 [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft) and
 [capcut-mate](https://github.com/Hommy-master/capcut-mate) (Apache-2.0). The
-duo-video alignment is a clean-room protocol adaptation; no upstream code or
-credentials are vendored.
+duo-video alignment independently implements the builders and vendors only the
+pinned JSON protocol templates under duo-video's MIT license; no upstream
+executable code, resource package, adapter binary, or credential is vendored.

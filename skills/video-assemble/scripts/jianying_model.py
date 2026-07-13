@@ -22,8 +22,27 @@ class DraftBuildContext:
     total_us: int
     new_id: NewIdFn
     probe: ProbeFn
+    resource_packages: dict = field(default_factory=dict)
+    style_presets: dict = field(default_factory=dict)
     materials: dict[str, list] = field(
-        default_factory=lambda: {"videos": [], "audios": [], "texts": [], "speeds": []}
+        default_factory=lambda: {
+            key: []
+            for key in (
+                "audios",
+                "chromas",
+                "common_mask",
+                "drafts",
+                "effects",
+                "masks",
+                "speeds",
+                "stickers",
+                "text_templates",
+                "texts",
+                "transitions",
+                "video_effects",
+                "videos",
+            )
+        }
     )
     tracks: list[dict] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -39,6 +58,8 @@ class DraftBuildContext:
             total_us=us(timeline.get("duration", 0)),
             new_id=new_id,
             probe=probe,
+            resource_packages=dict(timeline.get("resource_packages") or {}),
+            style_presets=dict(timeline.get("style_presets") or {}),
         )
 
     def media_duration(self, path, fallback_us):
@@ -52,7 +73,8 @@ class DraftBuildContext:
         track = next(
             (
                 item for item in self.tracks
-                if item["type"] == allocated.track_type and item["name"] == allocated.name
+                if item["_semantic_kind"] == allocated.kind
+                and item["name"] == allocated.name
             ),
             None,
         )
@@ -65,6 +87,7 @@ class DraftBuildContext:
                 "name": allocated.name,
                 "segments": [],
                 "type": allocated.track_type,
+                "_semantic_kind": allocated.kind,
                 "_layout_order": allocated.layout_order,
             }
             self.tracks.append(track)
@@ -80,6 +103,7 @@ class DraftBuildContext:
             count = type_counts.get(track["type"], 0)
             track["flag"] = 0 if count == 0 else 2
             type_counts[track["type"]] = count + 1
+            track.pop("_semantic_kind", None)
             track.pop("_layout_order", None)
         return self.tracks
 

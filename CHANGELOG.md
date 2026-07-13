@@ -11,7 +11,7 @@ All notable changes to this project are documented here. This project adheres to
 - **半透明、解说时段遮罩。** 显式启用原字幕遮罩后，默认改为 `SUBTITLE_MASK_OPACITY=0.6`、`SOURCE_SUBTITLE_MASK_TIMING=narration`，原声留白不再常驻黑条；仍可设为 `1` / `all` 恢复全黑全时段效果。
 - **参考音色解说。** recap / voiceover 新增 `--voice-ref`，通过 `mimo-v2.5-tts-voiceclone` 给普通解说克隆音色；新生成时参考音频惰性转码一次、最长取 30 秒，内容与转码版本指纹参与 TTS 缓存校验。
 - **正式的建议性 MiMo QC。** `--mimo-qc pre-assemble|post-render|both` 在单源/多源流水线的组装前、成片后各最多发起一次 MiMo 请求，把语义/审美观察聚合进 `mimo_qc.json`；内容缓存、`--mimo-qc-refresh`、最多 6 张/768px 临时抽帧、密钥/base64 不落盘均有回归覆盖。缺 key、401/429、超时、畸形响应和本地异常全部 fail-open，只提示 Agent/用户，永远不生成 blocker。
-- **可携带剪映草稿与本地图片叠层。** 对齐 `duoec/duo-video@ef4eb46c823910553f901649f2f13fd7575e748f` 的本地草稿协议：素材按 video/audio/image 打包到 `Resources/local`、使用 draft placeholder 路径、写 type-0 `draft_meta_info.json` 索引；字幕 material/source range、轨道顺序/flag/render index 和重叠拆轨同步修正。timeline schema v2 新增本地图片叠层，支持透明度、旋转、缩放、中心归一化位置、翻转与 overlap-safe lanes。
+- **可携带剪映草稿与 duo-video 核心/离线资源协议适配。** 固定并深拷贝 `duoec/duo-video@ef4eb46c823910553f901649f2f13fd7575e748f` 的 MIT JSON 模板，运行时清除模板设备指纹；素材按 video/audio/image 打包到 `Resources/local` 并写 type-0 meta 索引。timeline schema v2 除本地图片叠层外，还支持区间一致的恒定变速、自动生成倒放素材、通用 transform、UTF-16 富文本/逐字样式和便携字体/花字、转场/双 mask/LUT、绿幕复合草稿，以及由调用方预适配离线 payload 驱动的 sound/sticker/text-template/video-effect/face-effect 轨道。离线包兼容上游 camelCase `JyResource`，显式清单支持安全 ZIP 解包；官方资源库、文本模板适配器和 AutoJY 桌面自动化不随包提供。
 
 ### 修复
 
@@ -24,8 +24,9 @@ All notable changes to this project are documented here. This project adheres to
 
 ### 验证
 
-- 全套 `python3 scripts/test.py` 通过（738 tests）；`ruff`、`compileall`、修改模块 `mypy` clean。
+- 全套 `python3 scripts/test.py` 通过（801 tests）；`ruff`、`compileall`、修改模块 `mypy` clean；其中 assemble 275 tests 覆盖固定上游模板、能力矩阵、timeline 迁移和便携资源写入。
 - 真实 ffmpeg 合成字幕样片验证：测量工具识别 `y=[613,637)`；遮罩像素在留白帧为 `128`、解说帧为 `51`。
+- 本机剪映专业版 `10.8.7-beta1` 已发现并登记便携 smoke 草稿（`copy_draft_external`, `errno: 0`）；手工确认视频/解说/BGM/字幕/图片轨在线、预览正常，并完成保存、关闭与重开。AutoJY 和最终视频自动导出不在本次验证范围。
 
 
 ## [0.3.3] - 2026-06-28

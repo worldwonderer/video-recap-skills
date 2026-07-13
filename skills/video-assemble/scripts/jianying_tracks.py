@@ -28,6 +28,7 @@ TRACK_LAYOUT_BANDS = {
     "mask": TrackBand("mask", "video", 60_000, "masks"),
     "effect": TrackBand("effect", "effect", 70_000, "video effects"),
     "video_effect": TrackBand("video_effect", "effect", 70_000, "video effects"),
+    "face_effect": TrackBand("face_effect", "effect", 70_010, "face effects"),
     "sticker": TrackBand("sticker", "sticker", 80_000, "stickers"),
     "subtitle": TrackBand("subtitle", "text", 90_000, "subtitles"),
     "text": TrackBand("text", "text", 100_000, "plain text"),

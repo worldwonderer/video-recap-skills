@@ -233,8 +233,7 @@ python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --voice-ref /path
 ## 致谢
 
 - [linux.do](https://linux.do)
-- 剪映草稿导出参考了 [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft)、[capcut-mate](https://github.com/Hommy-master/capcut-mate)（均 Apache-2.0）的草稿结构。
-- 剪映导出的可携带草稿协议对齐 [duoec/duo-video](https://github.com/duoec/duo-video) commit `ef4eb46c823910553f901649f2f13fd7575e748f`；这是 clean-room 协议适配，不复制其代码、资源包或凭证。上游 README 的剪映 v10.1.0 实测与 JSON 模板中的 `5.9.5-beta1` 是两件事，本项目不把模板值冒充已安装/已验证版本。
+- 剪映草稿协议参考 [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft)、[capcut-mate](https://github.com/Hommy-master/capcut-mate) 与 [duo-video](https://github.com/duoec/duo-video/tree/ef4eb46c823910553f901649f2f13fd7575e748f)；许可证与适配说明见[专项文档](skills/video-assemble/references/jianying/SOURCE.md)。
 
 ## 许可
 

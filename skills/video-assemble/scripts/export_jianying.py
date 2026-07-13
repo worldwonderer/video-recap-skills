@@ -13,14 +13,18 @@ a safe writer/bundler. This mirrors the useful schema boundaries from duo-video
 while ffmpeg remains the canonical renderer and JianYing export remains an
 optional sidecar.
 
-Schema and the draft skeleton are reimplemented from the open-source
-pyJianYingDraft (© GuanYixuan, Apache-2.0) and capcut-mate (© Hommy, Apache-2.0);
-see ACKNOWLEDGEMENTS / 致谢 in the README. No third-party code is vendored — the
-draft JSON is built directly here so the bundle stays stdlib-only.
+Schema and the draft skeleton are informed by the open-source pyJianYingDraft
+(© GuanYixuan, Apache-2.0) and capcut-mate (© Hommy, Apache-2.0). JSON protocol
+templates pinned from duo-video are vendored under its MIT license; builders
+are implemented locally and no upstream executable code, resource package,
+adapter binary, or credential is included. See ACKNOWLEDGEMENTS / 致谢.
 """
 
+import copy
 import json
+import os
 import subprocess
+import tempfile
 import uuid
 
 from jianying_builders import build_timeline_track as _build_timeline_track
@@ -28,6 +32,7 @@ from jianying_model import DraftBuildContext as _DraftBuildContext
 from jianying_schema import draft_content_skeleton as _draft_content_skeleton
 from jianying_schema import meta_info as _meta_info
 from jianying_schema import us as _us
+from jianying_timeline_contract import normalize_timeline as _normalize_timeline
 from jianying_writer import write_draft as _write_draft
 
 __all__ = ["_us", "build_draft", "export_timeline_to_jianying", "main"]
@@ -63,6 +68,7 @@ def _probe_media(path):
 
 def build_draft(timeline, new_id=None, probe=None):
     """Build the 剪映 draft_content dict and companion meta from a timeline."""
+    timeline = _normalize_timeline(timeline)
     new_id = new_id or _default_id
     probe = probe or _probe_media
     ctx = _DraftBuildContext.from_timeline(timeline, new_id, probe)
@@ -85,15 +91,80 @@ def build_draft(timeline, new_id=None, probe=None):
     return content, meta, ctx.notes
 
 
+def _generate_reversed_media(source_path, output_path):
+    commands = [
+        [
+            "ffmpeg", "-y", "-v", "error", "-i", source_path,
+            "-vf", "reverse", "-af", "areverse", output_path,
+        ],
+        [
+            "ffmpeg", "-y", "-v", "error", "-i", source_path,
+            "-vf", "reverse", "-an", output_path,
+        ],
+    ]
+    errors = []
+    for command in commands:
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode == 0 and os.path.isfile(output_path):
+            return
+        errors.append((result.stderr or result.stdout or "unknown ffmpeg error").strip())
+    raise RuntimeError(f"failed to reverse JianYing source {source_path}: {'; '.join(errors)}")
+
+
+def _prepare_reverse_sources(timeline, temporary_dir):
+    prepared = copy.deepcopy(timeline)
+    generated = []
+    for track in prepared.get("tracks", []):
+        if not isinstance(track, dict) or track.get("kind") != "video":
+            continue
+        for clip in track.get("clips", []):
+            if not isinstance(clip, dict) or not clip.get("reverse") or clip.get("reverse_path"):
+                continue
+            source_path = clip.get("source_path")
+            if not isinstance(source_path, str) or not os.path.isfile(source_path):
+                raise ValueError(f"reverse source does not exist: {source_path}")
+            output_path = os.path.join(temporary_dir, f"reversed-{uuid.uuid4().hex}.mp4")
+            _generate_reversed_media(source_path, output_path)
+            clip["reverse_path"] = output_path
+            generated.append(source_path)
+    return prepared, generated
+
+
 def export_timeline_to_jianying(timeline, out_dir, draft_name="recap", new_id=None,
-                                probe=None, bundle_media=False):
+                                probe=None, bundle_media=True):
     """Write a 剪映 draft folder under out_dir/draft_name. Returns (folder, notes).
 
-    bundle_media=True copies the referenced media into the draft folder so it is
-    self-contained and portable to another machine.
+    Referenced media is bundled by default so the draft is self-contained and
+    portable. Pass bundle_media=False only when external absolute paths are
+    intentionally required.
     """
-    content, meta, notes = build_draft(timeline, new_id=new_id, probe=probe)
-    return _write_draft(content, meta, notes, out_dir, draft_name, bundle_media_enabled=bundle_media)
+    needs_generated_reverse = any(
+        isinstance(track, dict)
+        and track.get("kind") == "video"
+        and any(
+            isinstance(clip, dict) and clip.get("reverse") and not clip.get("reverse_path")
+            for clip in track.get("clips", [])
+        )
+        for track in timeline.get("tracks", [])
+    )
+    if needs_generated_reverse and not bundle_media:
+        raise ValueError("automatic reverse generation requires media bundling")
+    if not needs_generated_reverse:
+        content, meta, notes = build_draft(timeline, new_id=new_id, probe=probe)
+        return _write_draft(
+            content, meta, notes, out_dir, draft_name,
+            bundle_media_enabled=bundle_media,
+        )
+
+    os.makedirs(out_dir, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="jianying-reverse-", dir=out_dir) as temporary_dir:
+        prepared, generated = _prepare_reverse_sources(timeline, temporary_dir)
+        content, meta, notes = build_draft(prepared, new_id=new_id, probe=probe)
+        notes.extend(f"已生成倒放素材: {source}" for source in generated)
+        return _write_draft(
+            content, meta, notes, out_dir, draft_name,
+            bundle_media_enabled=True,
+        )
 
 
 def main():
@@ -102,8 +173,16 @@ def main():
     ap.add_argument("timeline", help="path to timeline.json")
     ap.add_argument("--out-dir", required=True, help="parent dir to create the draft folder in")
     ap.add_argument("--name", default="recap", help="draft folder name")
-    ap.add_argument("--bundle-media", action="store_true",
-                    help="copy referenced media into the draft folder (portable, self-contained)")
+    bundle_group = ap.add_mutually_exclusive_group()
+    bundle_group.add_argument(
+        "--bundle-media", dest="bundle_media", action="store_true",
+        help="copy referenced media into the draft folder (default)",
+    )
+    bundle_group.add_argument(
+        "--no-bundle-media", dest="bundle_media", action="store_false",
+        help="keep external media paths instead of making a portable draft",
+    )
+    ap.set_defaults(bundle_media=True)
     args = ap.parse_args()
     with open(args.timeline, encoding="utf-8") as f:
         timeline = json.load(f)

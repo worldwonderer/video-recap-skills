@@ -251,8 +251,7 @@ Priority: **your file › the agent-proofread `original_subtitles.json` › ASR 
 ## Acknowledgements
 
 - [linux.do](https://linux.do)
-- The 剪映 draft export follows the schema of [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft) and [capcut-mate](https://github.com/Hommy-master/capcut-mate) (both Apache-2.0).
-- The portable draft contract aligns with [duoec/duo-video](https://github.com/duoec/duo-video) commit `ef4eb46c823910553f901649f2f13fd7575e748f` as a clean-room protocol adaptation; no upstream code, resource bundles, or credentials are copied. The upstream README's 剪映 v10.1.0 smoke test and its JSON template value `5.9.5-beta1` are distinct facts; this project does not present the template value as an installed or verified app version.
+- The 剪映 draft protocol follows [pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft), [capcut-mate](https://github.com/Hommy-master/capcut-mate), and [duo-video](https://github.com/duoec/duo-video/tree/ef4eb46c823910553f901649f2f13fd7575e748f); see the [protocol notice](skills/video-assemble/references/jianying/SOURCE.md) for licensing and scope.
 
 ## License
 

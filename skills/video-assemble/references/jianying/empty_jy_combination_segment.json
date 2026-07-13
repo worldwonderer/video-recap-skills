@@ -1,0 +1,84 @@
+{
+  "is_tone_modify": false,
+  "enable_adjust_mask": false,
+  "keyframe_refs": [],
+  "enable_adjust": true,
+  "enable_video_mask": true,
+  "enable_hsl": false,
+  "speed": 1,
+  "clip": {
+    "rotation": 0,
+    "transform": {
+      "y": 0,
+      "x": 0
+    },
+    "flip": {
+      "vertical": false,
+      "horizontal": false
+    },
+    "scale": {
+      "y": 1,
+      "x": 1
+    },
+    "alpha": 1
+  },
+  "intensifies_audio": false,
+  "uniform_scale": {
+    "on": true,
+    "value": 1
+  },
+  "responsive_layout": {
+    "vertical_pos_layout": 0,
+    "target_follow": "",
+    "enable": false,
+    "horizontal_pos_layout": 0,
+    "size_layout": 0
+  },
+  "enable_hsl_curves": true,
+  "desc": "",
+  "state": 0,
+  "enable_lut": true,
+  "reverse": false,
+  "target_timerange": {
+    "start": 0,
+    "duration": 0
+  },
+  "cartoon": false,
+  "enable_color_correct_adjust": false,
+  "last_nonzero_volume": 1,
+  "enable_smart_color_adjust": false,
+  "source": "segmentsourcenormal",
+  "render_timerange": {
+    "start": 0,
+    "duration": 0
+  },
+  "render_index": 0,
+  "group_id": "",
+  "enable_color_match_adjust": false,
+  "enable_color_curves": true,
+  "raw_segment_id": "",
+  "volume": 1,
+  "visible": true,
+  "track_render_index": 0,
+  "track_attribute": 0,
+  "is_loop": false,
+  "id": "",
+  "enable_color_wheels": true,
+  "extra_material_refs": [],
+  "template_id": "",
+  "template_scene": "default",
+  "material_id": "",
+  "common_keyframes": [],
+  "digital_human_template_group_id": "",
+  "color_correct_alg_result": "",
+  "hdr_settings": {
+    "mode": 1,
+    "intensity": 1,
+    "nits": 1000
+  },
+  "is_placeholder": false,
+  "source_timerange": {
+    "start": 0,
+    "duration": 0
+  }
+}

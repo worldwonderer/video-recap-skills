@@ -1,0 +1,70 @@
+{
+  "caption_info": null,
+  "cartoon": false,
+  "clip": {
+    "alpha": 1.0,
+    "flip": {
+      "horizontal": false,
+      "vertical": false
+    },
+    "rotation": 0.0,
+    "scale": {
+      "x": 1.0,
+      "y": 1.0
+    },
+    "transform": {
+      "x": 0.0,
+      "y": 0.0
+    }
+  },
+  "common_keyframes": [],
+  "enable_adjust": true,
+  "enable_color_correct_adjust": false,
+  "enable_color_curves": true,
+  "enable_color_match_adjust": false,
+  "enable_color_wheels": true,
+  "enable_lut": true,
+  "enable_smart_color_adjust": false,
+  "extra_material_refs": [],
+  "group_id": "",
+  "hdr_settings": {
+    "intensity": 1.0,
+    "mode": 1,
+    "nits": 1000
+  },
+  "id": "",
+  "intensifies_audio": false,
+  "is_placeholder": false,
+  "is_tone_modify": false,
+  "keyframe_refs": [],
+  "last_nonzero_volume": 1.0,
+  "material_id": "",
+  "render_index": 0,
+  "responsive_layout": {
+    "enable": false,
+    "horizontal_pos_layout": 0,
+    "size_layout": 0,
+    "target_follow": "",
+    "vertical_pos_layout": 0
+  },
+  "reverse": false,
+  "source_timerange": {
+    "duration": 0,
+    "start": 0
+  },
+  "speed": 1.0,
+  "target_timerange": {
+    "duration": 0,
+    "start": 0
+  },
+  "template_id": "",
+  "template_scene": "default",
+  "track_attribute": 0,
+  "track_render_index": 0,
+  "uniform_scale": {
+    "on": true,
+    "value": 1.0
+  },
+  "visible": true,
+  "volume": 1.0
+}
