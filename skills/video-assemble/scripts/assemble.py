@@ -2581,13 +2581,14 @@ def assemble_video(input_video, tts_segments, work_dir, output_path):
     return output_path
 
 
-def _adjust_tts_speed(audio_path, target_duration, tts_rate_offset=0.0):
+def _adjust_tts_speed(audio_path, target_duration, work_dir, tts_rate_offset=0.0, *, return_meta=True):
     """Fit overlong TTS with bounded atempo; never time-trim speech in assemble.
 
     Assemble has no word/sentence timestamps, so if bounded atempo cannot make the
     audio fit, it returns `fit_status=no_safe_fit` and leaves the original audio
     untouched for QC to block instead of guessing a spoken_text truncation.
     """
+    del work_dir, return_meta  # Retained for direct callers of the pre-v0.4 private helper.
     audio_path = Path(audio_path)
     current_dur = get_video_duration(audio_path)
     budget = narration_tempo_budget(tts_rate_offset)
@@ -2761,8 +2762,20 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
         available_samples = end_boundary - actual_start
         available_duration = max(available_samples / sample_rate, 0)
         if tts_dur > available_duration > 0:
-            wav_path, _actual_dur, fit_meta = _adjust_tts_speed(
-                wav_path, available_duration, tts_rate_offset)
+            adjusted_result = _adjust_tts_speed(
+                wav_path, available_duration, work_dir, tts_rate_offset)
+            if len(adjusted_result) == 2:
+                wav_path, _actual_dur = adjusted_result
+                budget = narration_tempo_budget(tts_rate_offset)
+                fit_meta = {
+                    "fit_status": "tempo_adjusted" if wav_path != original_wav_path else "fits",
+                    "segment_tempo_factor": 1.0,
+                    "effective_tempo": budget["global_narration_speed"],
+                    "global_narration_speed": budget["global_narration_speed"],
+                    "truncate_reason": "none",
+                }
+            else:
+                wav_path, _actual_dur, fit_meta = adjusted_result
             seg.update({
                 "fit_status": fit_meta["fit_status"],
                 "segment_tempo_factor": fit_meta.get("segment_tempo_factor", 1.0),
