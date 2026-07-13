@@ -1359,6 +1359,51 @@ def test_p0_build_timed_narration_propagates_no_safe_fit_metadata(monkeypatch, t
     assert seg["narration"] == "原始长文案，不能猜测截断。"
 
 
+def test_build_timed_narration_accepts_legacy_two_item_adjust_result(monkeypatch, tmp_path):
+    """Older extensions may return only adjusted path and duration."""
+    import wave
+
+    original = tmp_path / "long.wav"
+    with wave.open(str(original), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(44100)
+        wav.writeframes(b"\x00\x10" * int(2.0 * 44100))
+
+    def fake_adjust(path, target_duration, work_dir, tts_rate_offset=0.0):
+        assert Path(path) == original
+        assert target_duration == 1.0
+        assert Path(work_dir) == tmp_path
+        assert tts_rate_offset == 0.0
+        adjusted = tmp_path / "adjusted.wav"
+        with wave.open(str(adjusted), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(44100)
+            wav.writeframes(b"\x00\x10" * int(0.8 * 44100))
+        return str(adjusted), 0.8
+
+    monkeypatch.setitem(CONFIG, "narration_delay_seconds", 0.0)
+    monkeypatch.setitem(CONFIG, "narration_tail_pad_seconds", 0.0)
+    monkeypatch.setitem(CONFIG, "narration_tighten", False)
+    monkeypatch.setattr("assemble._adjust_tts_speed", fake_adjust)
+    segment = {
+        "index": 0,
+        "start": 0.0,
+        "end": 1.0,
+        "narration": "兼容旧扩展返回值。",
+        "audio_path": str(original),
+        "audio_duration": 2.0,
+        "tts_rate_offset": 0.0,
+    }
+
+    _build_timed_narration([segment], tmp_path / "narration.wav", 1.0, tmp_path)
+
+    assert segment["fit_status"] == "tempo_adjusted"
+    assert segment["blocking"] is False
+    assert segment["placed_audio_duration"] == pytest.approx(0.8)
+
+
 def test_p0_build_timed_narration_trims_subframe_overrun_instead_of_dropping(monkeypatch, tmp_path):
     """Regression: a rounding-level overrun (<=50ms of post-atempo tail) must be trimmed and
     PLACED, not dropped as no_safe_fit — which would lose the whole narration block and trip
@@ -1371,7 +1416,7 @@ def test_p0_build_timed_narration_trims_subframe_overrun_instead_of_dropping(mon
         wf.setframerate(44100)
         wf.writeframes(b"\x00\x10" * int(2.1 * 44100))  # longer than the 2.0s slot -> triggers fit
 
-    def fake_adjust(path, target_duration, work_dir, tts_rate_offset=0.0, *, return_meta=True):
+    def fake_adjust(path, target_duration, work_dir, tts_rate_offset=0.0):
         # simulate atempo landing ~10ms over the fit target (real ffmpeg rounding drift)
         over = tmp_path / "over.wav"
         n = int((target_duration + 0.010) * 44100)

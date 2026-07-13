@@ -275,7 +275,8 @@ def _present_storyboards(work_dir):
     return [n for n in _STORYBOARD_ARTIFACTS if _present(work_dir, n)]
 
 
-def cmd_state(work_dir, compact):
+def cmd_state(work_dir, compact=None):
+    del compact  # Retained for callers that used the pre-v0.4 rendering hint.
     work_dir = Path(work_dir)
     if not work_dir.exists():
         return {"error": f"work_dir 不存在: {work_dir}"}
@@ -530,7 +531,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.command == "state":
-        result = cmd_state(args.work_dir, args.compact)
+        result = cmd_state(args.work_dir)
         rendered = _render_state_md(result, args.compact)
     else:
         result = cmd_clip_map(args.work_dir, args.output_start, args.output_end,

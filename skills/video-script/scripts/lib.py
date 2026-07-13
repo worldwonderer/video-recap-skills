@@ -3,12 +3,9 @@ Merged from the shared core; reads the same env vars as the rest of the bundle."
 import json
 import hashlib
 import os
-import re
-import subprocess
 import time
 import urllib.request
 import urllib.error
-from pathlib import Path
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
@@ -296,9 +293,6 @@ CONFIG = {
     "subtitle_play_res_y": env_int("SUBTITLE_PLAY_RES_Y", 720, minimum=1),
 }
 
-SCRIPT_DIR = Path(__file__).parent
-PROMPTS_DIR = SCRIPT_DIR.parent / "references"
-
 def narration_tempo_budget(tts_rate_offset=0.0, *, config=None):
     """Return the canonical tempo budget shared by voiceover and assemble."""
     cfg = config or CONFIG
@@ -320,33 +314,6 @@ def narration_tempo_budget(tts_rate_offset=0.0, *, config=None):
 def log(msg):
     print(f"[video-recap] {msg}", flush=True)
 
-def run_cmd(cmd, **kwargs):
-    """运行命令，返回 CompletedProcess"""
-    if isinstance(cmd, list):
-        display_parts = []
-        for part in cmd:
-            text = str(part)
-            display_parts.append(text if len(text) <= 240 else text[:237] + "...")
-        display = " ".join(display_parts)
-    else:
-        display = str(cmd)
-        if len(display) > 2000:
-            display = display[:1997] + "..."
-    log(f"运行: {display}")
-    return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
-
-def get_video_duration(video_path):
-    """获取视频时长（秒）"""
-    cmd = ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-           "-of", "csv=p=0", str(video_path)]
-    result = run_cmd(cmd)
-    if result.returncode != 0:
-        return 0.0
-    try:
-        return float(result.stdout.strip())
-    except (TypeError, ValueError):
-        return 0.0
-
 def stable_json_dumps(value):
     """Serialize values deterministically for non-secret cache fingerprints."""
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
@@ -367,18 +334,6 @@ def file_fingerprint(path, chunk_size=1024 * 1024):
         for chunk in iter(lambda: f.read(chunk_size), b""):
             h.update(chunk)
     return h.hexdigest()
-def video_fingerprint(video_path):
-    """Full video content fingerprint used as the root pipeline asset print."""
-    return file_fingerprint(video_path)
-
-def step_cache_key(video_path, step_name, params_fingerprint=""):
-    """Build a cache key from video content, step name and step parameters."""
-    params_digest = params_fingerprint
-    if not isinstance(params_digest, str):
-        params_digest = stable_hash(params_digest)
-    payload = f"{video_fingerprint(video_path)}_{step_name}_{params_digest}"
-    return hashlib.md5(payload.encode("utf-8")).hexdigest()
-
 def _retry_after_seconds(value, fallback):
     """Parse Retry-After seconds or HTTP-date; return fallback on malformed input."""
     if not value:
@@ -421,45 +376,6 @@ def _prepare_api_payload(payload, api_provider=None, api_url=None):
         # The recap pipeline needs visible text, so disable thinking unless set explicitly.
         normalized["thinking"] = {"type": "disabled"}
     return normalized
-
-def _mimo_endpoint(kind):
-    """Return per-capability MiMo endpoint settings (video understanding / TTS / ASR)."""
-    by_kind = {
-        "video": ("mimo_video_api_url", "mimo_video_api_key", "mimo_video_api_key_source"),
-        "tts": ("mimo_tts_api_url", "mimo_tts_api_key", "mimo_tts_api_key_source"),
-        "asr": ("mimo_asr_api_url", "mimo_asr_api_key", "mimo_asr_api_key_source"),
-    }
-    if kind not in by_kind:
-        raise ValueError(f"Unsupported MiMo endpoint kind: {kind}")
-    url_key, key_key, src_key = by_kind[kind]
-    return {
-        "api_url": CONFIG.get(url_key) or CONFIG.get("mimo_api_url"),
-        "api_key": CONFIG.get(key_key) or CONFIG.get("mimo_api_key"),
-        "api_key_source": CONFIG.get(src_key, "MIMO_API_KEY"),
-    }
-
-def _call_mimo_endpoint(kind, payload, max_retries=10):
-    settings = _mimo_endpoint(kind)
-    return api_call(
-        payload,
-        max_retries=max_retries,
-        api_provider="mimo",
-        api_url=settings["api_url"],
-        api_key=settings["api_key"],
-        api_key_source=settings["api_key_source"],
-    )
-
-def mimo_video_api_call(payload, max_retries=10):
-    """Call the MiMo video-understanding endpoint."""
-    return _call_mimo_endpoint("video", payload, max_retries=max_retries)
-
-def mimo_tts_api_call(payload, max_retries=10):
-    """Call the MiMo TTS endpoint."""
-    return _call_mimo_endpoint("tts", payload, max_retries=max_retries)
-
-def mimo_asr_api_call(payload, max_retries=10):
-    """Call the MiMo speech-recognition (ASR) endpoint."""
-    return _call_mimo_endpoint("asr", payload, max_retries=max_retries)
 
 def api_call(payload, max_retries=8, *, api_provider=None, api_url=None, api_key=None, api_key_source=None):
     """调用 OpenAI-compatible API，带重试。
@@ -516,14 +432,3 @@ def api_call(payload, max_retries=8, *, api_provider=None, api_url=None, api_key
                 time.sleep(wait)
             else:
                 raise RuntimeError(f"API 调用失败 {max_retries} 次: {e}")
-
-def load_prompt(name):
-    """加载 prompt 模板"""
-    path = PROMPTS_DIR / "prompt-templates.md"
-    if not path.exists():
-        return None
-    content = path.read_text(encoding="utf-8")
-    # 用 ### NAME 和 ### 分隔提取对应 prompt
-    pattern = rf"### {name}\s*\n(.*?)(?=\n### |\Z)"
-    m = re.search(pattern, content, re.DOTALL)
-    return m.group(1).strip() if m else None

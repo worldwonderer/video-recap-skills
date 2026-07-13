@@ -459,10 +459,6 @@ def mimo_video_api_call(payload, max_retries=10):
     """Call the MiMo video-understanding endpoint."""
     return _call_mimo_endpoint("video", payload, max_retries=max_retries)
 
-def mimo_tts_api_call(payload, max_retries=10):
-    """Call the MiMo TTS endpoint."""
-    return _call_mimo_endpoint("tts", payload, max_retries=max_retries)
-
 def mimo_asr_api_call(payload, max_retries=10):
     """Call the MiMo speech-recognition (ASR) endpoint."""
     return _call_mimo_endpoint("asr", payload, max_retries=max_retries)

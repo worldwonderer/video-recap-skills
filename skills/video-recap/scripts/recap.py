@@ -448,7 +448,7 @@ def _write_run_manifest(work_dir, video, args):
     (work_dir / RUN_MANIFEST).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _build_multi_source_records(videos, work_dir, args):
+def _build_multi_source_records(videos, args):
     records = []
     for video in _coerce_videos(videos):
         fp = _file_fingerprint(video)
@@ -1127,7 +1127,7 @@ def _run_multi_cut(videos, work_dir, args):
     videos = _coerce_videos(videos)
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
-    source_records = _build_multi_source_records(videos, work_dir, args)
+    source_records = _build_multi_source_records(videos, args)
     narration_json = work_dir / "narration.json"
     clip_plan_json = work_dir / "clip_plan.json"
     edited_source = work_dir / "edited_source.mp4"

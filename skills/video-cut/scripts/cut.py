@@ -717,6 +717,7 @@ def snap_clips_off_shot_changes(plan, video, video_duration, margin, threshold, 
     a clip below `min_keep` are skipped. Recomputes the output timeline cursor-based. Advisory: any
     detection failure leaves that boundary as-is.
     """
+    del video_duration  # Positional compatibility for downstream direct callers.
     margin = float(margin)
     if margin <= 0 or not plan.get("clips"):
         return plan
@@ -827,8 +828,13 @@ def snap_multi_source_clips(plan, sources, work_dir, *, line_max_extend, scene_m
                 )
             mini = snap_clip_ends_to_lines(mini, silence, duration, line_max_extend)
         if do_scene_snap and source.get("source_path"):
-            mini = snap_clips_off_shot_changes(mini, source["source_path"], duration,
-                                               scene_margin, scene_threshold)
+            mini = snap_clips_off_shot_changes(
+                mini,
+                source["source_path"],
+                video_duration=duration,
+                margin=scene_margin,
+                threshold=scene_threshold,
+            )
         mini_boundary = ((mini.get("qc") or {}).get("boundary_status") or {})
         for key in boundary_accum:
             boundary_accum[key].extend([e for e in mini_boundary.get(key, []) if isinstance(e, dict)])
@@ -1633,9 +1639,9 @@ def main():
         validated_plan = snap_clips_off_shot_changes(
             validated_plan,
             args.video,
-            video_duration,
-            CONFIG.get("scene_cut_snap_margin", 0.5),
-            CONFIG.get("scene_cut_detect_threshold", 0.4),
+            video_duration=video_duration,
+            margin=CONFIG.get("scene_cut_snap_margin", 0.5),
+            threshold=CONFIG.get("scene_cut_detect_threshold", 0.4),
         )
 
     # Multi-source: snap each clip against ITS OWN source's pauses/shot-changes (single-source
