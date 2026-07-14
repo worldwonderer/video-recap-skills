@@ -2,69 +2,76 @@
 name: video-assemble
 user-invocable: false
 description: >
- Assemble a final recap video: mux narration audio over the source video, duck the original
- audio under the narration, render subtitles (SRT/ASS, optionally burned in), and loudness-
- normalize. Use as the last stage of the video-recap bundle. Consumes the source video +
- tts_meta.json (+ narration placement); produces recap_<name>.mp4 + subtitles.srt/.ass.
- 触发词: 视频合成, 混音, 字幕, 压字幕, assemble video, mux, ducking, subtitles, 成片.
+ 合成视频解说最终成片：把旁白音频铺到源视频上，按旁白窗口压低原声，生成 SRT / ASS 字幕并可烧录，
+ 最后做响度标准化。作为最终合成阶段使用。输入源视频、tts_meta.json 与旁白位置；
+ 输出 recap 成片和字幕。触发词：视频合成、混音、字幕、压字幕、assemble video、mux、ducking、subtitles、成片。
 ---
 
-## What this does
+## 1. 定位
 
-1. Mixes the narration audio segments onto the source video at their placed times.
-2. **Ducks** the original audio under narration (fixed / sidechain / zone modes).
-3. Renders **subtitles** from the narration placement → `subtitles.srt` (+ `subtitles.ass`
-   when burning, which is **on by default**; `--no-burn-subtitles` to disable).
-4. Optional final **loudness normalization** to a target LUFS.
+本技能负责最终合成：
 
-## Input contract
+1. 把各段旁白音频放到视频时间线上。
+2. 在旁白窗口内压低原声，支持 fixed / sidechain / zone 模式。
+3. 根据旁白位置生成 `subtitles.srt`；默认同时生成并烧录 `subtitles.ass`，`--no-burn-subtitles` 可关闭。
+4. 可选把最终响度标准化到目标 LUFS。
 
-- `<video>` — the source video (the original, or `edited_source.mp4` in cut mode).
-- `work_dir/tts_meta.json` — `{segments: [...]}` from **video-voiceover** (each segment carries
-  `audio_path`, timing, `pause_after_ms`, and `overlaps_speech`/placement used for ducking + subtitles).
+## 2. 声音收尾契约
 
-> **Running the scripts below** — the `scripts/…` paths are relative to this skill's own directory (the folder containing this `SKILL.md`). Claude Code runs commands from there, so they work as written. If your harness runs commands from the project root instead (opencode / Codex / OpenClaw commonly do), prefix this skill's absolute directory — e.g. `<skill-dir>/scripts/…`, using the directory your harness reports when it loads the skill. The scripts self-locate from their own path, so once started by the correct path they resolve their sibling skills and assets regardless of the working directory.
+合成阶段只实现创作决定，不凭空制造决定。Agent 在写旁白位置前，已在 `visual_audio_board.json` 为每个 beat 指定 `audio_owner`：
 
-## Run
+- `original_dialogue`
+- `action_sound`
+- `ambience` / `music`
+- `silence`
+- `narration`
+
+因此，旁白间隙是主动选择，不是必须填满的空白。不要为了“更满”而加入通用 BGM、压住必须听见的台词或消除有意义的沉默。
+
+当前渲染器不解析 `visual_audio_board.json`；Agent 通过旁白时间、`overlaps_speech`、原声留白与现有混音参数落实这些决定。
+
+## 3. 输入契约
+
+- `<video>`：源视频；cut 模式下为 `edited_source.mp4`。
+- `work_dir/tts_meta.json`：配音阶段写出的 `{segments: [...]}`。每段包含 `audio_path`、时间、`pause_after_ms`、`overlaps_speech` 和用于混音/字幕的位置。
+
+下面的 `scripts/...` 均相对于本技能目录。若执行器从仓库根目录启动，请给脚本路径加上本技能的绝对目录。脚本不从其他技能目录读取文件；外部输入仅限命令显式传入的视频、参数与 `work_dir` 产物。
+
+## 4. 运行命令
 
 ```bash
 python3 scripts/assemble.py <video> --work-dir <work_dir> \
-  [--recap-stem <name>] [--output-dir <dir>] [--no-burn-subtitles]
-  [--subtitle-y-top <inclusive-y> --subtitle-y-bot <exclusive-y>]
+  [--recap-stem <name>] [--output-dir <dir>] [--no-burn-subtitles] \
+  [--subtitle-y-top <inclusive-y> --subtitle-y-bot <exclusive-y>] \
   [--source-video <orig.mp4>] [--export-jianying [--jianying-out <dir>]]
 ```
 
-## Output contract
+## 5. 输出契约
 
-- `recap_<stem>.mp4` — the final recap video (written to `--output-dir` or `work_dir`'s parent). It is the stable output alias, overwritten in place on every run so iterating on the narration refreshes the same file.
-- `work_dir/output.mp4` — the in-place render.
-- `subtitles.srt` — narration subtitles; `subtitles.ass` when burning subtitles (on by default).
-- `timeline.json` — backend-neutral multi-track model (video / original-audio / narration / BGM / subtitle tracks with ducking automation). Always written.
-- `assembly_manifest.json` — a slim render record: the input/source paths, the cut-mode source fingerprint (proving a stale ambient `SOURCE_VIDEO` did not leak into a full-mode export), the render settings, and the final output path.
-- 剪映 draft folder (`recap_<stem>/draft_content.json` + `draft_info.json` + `draft_meta_info.json`) — only with `--export-jianying`.
+- `recap_<stem>.mp4`：稳定的最终输出别名；每次运行覆盖更新。
+- `work_dir/output.mp4`：工作目录内成片。
+- `subtitles.srt`：旁白字幕；烧录时另有 `subtitles.ass`。
+- `timeline.json`：后端无关的多轨模型，包含视频、原声、旁白、BGM、字幕和 ducking 自动化。
+- `assembly_manifest.json`：输入来源、cut 来源指纹、渲染设置与最终输出路径。
+- 剪映草稿目录：仅 `--export-jianying` 时生成，包含 `draft_content.json`、`draft_info.json` 与 `draft_meta_info.json`。
 
-## Notes
-- Audio is mixed as tracks (like a cut-software timeline): the original audio, an optional BGM bed, and the narration.
-- Optional 剪映/JianYing export: `--export-jianying` (or `EXPORT_JIANYING=1`) turns `timeline.json` into an editable draft with original clips, separate narration/BGM tracks, subtitle materials, native volume keyframes, and optional local photo overlays. It is fully decoupled and lazy-imported: the ffmpeg render never depends on it, and 剪映 need not be installed. In cut mode pass `--source-video <orig>` so the draft references real source ranges. Bundling is on by default and copies video/audio/photo to `Resources/local/{video,audio,image}`, writes placeholder paths plus `draft_meta_info.json` indexes, and keeps a cloned/moved draft self-contained; `--jianying-no-bundle-media` is only for reachable original paths. Overlapping overlays split onto numbered lanes, and a non-empty draft folder gets a numbered sibling instead of being overwritten. Constant speed, reverse, transforms, rich text, transition/mask/LUT, green-screen compound drafts, and explicit sound/sticker/text-template/video-effect/face-effect tracks are available through the documented timeline v2 authoring extensions. Resource-backed features require legal caller-supplied offline packages; no official catalog, demo credential, text-template adapter, or AutoJY desktop automation is bundled. The draft references the un-burned source, so its hardcoded subtitles remain visible (mask them in 剪映 if needed).
-- Subtitle look: `SUBTITLE_FONT_SIZE`, `SUBTITLE_MARGIN_V`, `SUBTITLE_MAX_CHARS`, etc.
-- Source-pinned subtitle look: `SUBTITLE_Y_TOP/BOT` places the ASS baseline on a measured source
-  band using half-open display-pixel coordinates `[top, bot)`. With an explicit mask policy, the band defaults to `SUBTITLE_MASK_OPACITY=0.6` and
-  `SOURCE_SUBTITLE_MASK_TIMING=narration`; `SUBTITLE_MASK_PADDING` controls pixel padding.
-- Ducking / loudness: the original swells to `IDLE_ORIG_VOLUME` in the gaps and ducks to `SPEECH_DUCKING_VOLUME` under narration (`DUCK_FADE_SECONDS` smooths the transition); also `DUCKING_MODE`, `ZONE_DUCKING_VOLUME`, `FINAL_LOUDNORM`, `TARGET_LUFS`.
-- BGM (optional): set `BGM_PATH` to any audio file; it loops to length and ducks under narration (`BGM_VOLUME` / `BGM_DUCKING_VOLUME`).
-- Burning subtitles requires an ffmpeg with `subtitles`/libass support; assemble (and the
-  recap orchestrator) preflight this and fail fast with a clear message if it is missing.
-- During original-audio blocks (the narration gaps), original dialogue is burned only when the
-  source mask actually covers those gaps, or when a user-supplied subtitle file explicitly asks
-  for replacement text. Narration-only masking otherwise leaves the source hard subtitles visible.
-  Replacement dialogue is wrapped in `「」` to set it apart from narration
-  (`SUBTITLE_ORIGINAL_IN_GAPS`, default on). Preferred source is the agent-calibrated
-  `original_subtitles.json` (OUTPUT-time `[{start,end,text}]`); without it, a conservative auto-ASR
-  mapping is used (cut mode remaps ASR source→output via the clip plan, assigns each line to the one
-  gap it lands in, and skips lines too dense to read).
+## 6. 合成规则
 
-## What this skill does NOT do
-- Does NOT generate narration or synthesize TTS.
-- Does NOT re-transcribe or alter timing decisions — it consumes placement from tts_meta.json.
-- Burning subtitles is **on by default** (`--no-burn-subtitles` to turn it off); when on, it
-  re-encodes the video to draw the subtitle band.
+- 音频按轨道混合：原声、可选 BGM 与旁白各自独立。
+- `--export-jianying` / `EXPORT_JIANYING=1` 可把 `timeline.json` 导出为可编辑草稿。cut 模式应传 `--source-video <orig>`，让草稿引用真实原片区间。
+- 剪映导出默认把视频、音频与图片复制到 `Resources/local/{video,audio,image}`，保持草稿可搬迁；`--jianying-no-bundle-media` 只适合原路径始终可访问的情况。
+- 重叠覆盖物会拆到编号轨道；非空目标目录不会覆盖，而会创建编号兄弟目录。
+- 常速、倒放、变换、富文本、转场、蒙版、LUT、绿幕复合草稿及显式特效轨道通过 timeline v2 扩展表达。需要素材包的功能只接受调用方合法提供的离线资源。
+- 剪映草稿引用未烧录的源视频，因此原片硬字幕仍会保留，必要时在剪映内另行遮罩。
+- 字幕外观可用 `SUBTITLE_FONT_SIZE`、`SUBTITLE_MARGIN_V`、`SUBTITLE_MAX_CHARS` 等控制。
+- `SUBTITLE_Y_TOP/BOT` 把 ASS 基线放到测得的原片字幕区域，坐标为半开 `[top, bot)`；显式遮罩策略下默认 `SUBTITLE_MASK_OPACITY=0.6`，`SOURCE_SUBTITLE_MASK_TIMING=narration`。
+- 原声在旁白间隙回到 `IDLE_ORIG_VOLUME`，旁白下压到 `SPEECH_DUCKING_VOLUME`；`DUCK_FADE_SECONDS` 控制过渡。还可配置 `DUCKING_MODE`、`ZONE_DUCKING_VOLUME`、`FINAL_LOUDNORM` 与 `TARGET_LUFS`。
+- 可通过 `BGM_PATH` 指定 BGM；它会循环到成片长度，并按 `BGM_VOLUME` / `BGM_DUCKING_VOLUME` 混音。不要在没有创作依据时设置通用 BGM。
+- 烧录字幕需要带 `subtitles` / libass 的 ffmpeg；合成阶段会预检并在缺失时明确失败。
+- 原声留白中的对白字幕优先读取 Agent 校对的 `original_subtitles.json`；否则保守映射 ASR。只有遮罩覆盖留白或用户字幕明确要求替换时才烧录原声对白，并用 `「」` 与旁白区分。
+
+## 7. 能力边界
+
+- 不生成旁白文字，也不合成 TTS。
+- 不重新转写视频，不擅自改变 Agent 的时间决定。
+- 字幕烧录默认开启；关闭时不会重编码绘制字幕区域。

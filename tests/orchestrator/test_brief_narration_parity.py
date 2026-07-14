@@ -1,39 +1,48 @@
-"""Anti-drift guard: video-understanding/brief.py and video-script/narration.py are
-INTENTIONAL byte-identical copies (the no-shared-code constraint forbids a shared module,
-so the narration logic is duplicated into both skills). Any edit to one must be applied to
-the other in lockstep — a one-sided edit reds this test. Uses absolute paths + byte read
-only (no imports), so it is immune to the per-skill sys.path isolation other tests rely on.
-"""
-import hashlib
+"""Anti-drift guards for files intentionally copied into self-contained skills."""
+
+import ast
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 BRIEF = ROOT / "skills" / "video-understanding" / "scripts" / "brief.py"
 NARRATION = ROOT / "skills" / "video-script" / "scripts" / "narration.py"
+UNDERSTANDING_DESLOP = ROOT / "skills" / "video-understanding" / "scripts" / "deslop_qc.py"
+SCRIPT_DESLOP = ROOT / "skills" / "video-script" / "scripts" / "deslop_qc.py"
+RECAP_CREATIVE_PLAYBOOK = ROOT / "skills" / "video-recap" / "references" / "creative-editing-playbook.md"
+SCRIPT_CREATIVE_PLAYBOOK = ROOT / "skills" / "video-script" / "references" / "creative-editing-playbook.md"
+
+SYNC_PAIRS = (
+    pytest.param(BRIEF, NARRATION, id="agent-brief-runtime"),
+    pytest.param(UNDERSTANDING_DESLOP, SCRIPT_DESLOP, id="deslop-qc"),
+    pytest.param(RECAP_CREATIVE_PLAYBOOK, SCRIPT_CREATIVE_PLAYBOOK, id="creative-playbook"),
+)
 
 
-def _md5(path):
-    return hashlib.md5(path.read_bytes()).hexdigest()
-
-
-def test_brief_and_narration_are_byte_identical():
-    assert BRIEF.exists() and NARRATION.exists()
-    assert _md5(BRIEF) == _md5(NARRATION), (
-        "brief.py and narration.py have drifted. They are intentional byte-identical "
-        "copies; apply the SAME diff to BOTH in one commit (see the plan's lockstep rule)."
+@pytest.mark.parametrize(("first", "second"), SYNC_PAIRS)
+def test_intentional_local_copies_stay_byte_identical(first, second):
+    assert first.is_file() and second.is_file()
+    assert first.read_bytes() == second.read_bytes(), (
+        f"Self-contained copies drifted: {first} != {second}. "
+        "Apply the same change to both local copies; do not replace them with a cross-skill path."
     )
 
 
+def _top_level_literal(path, name):
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{path}: missing top-level constant {name}")
+
+
 def test_asr_span_tol_matches_across_files():
-    """_ASR_SPAN_TOL is duplicated in consolidate.py and brief.py/narration.py (they cannot
-    import each other across skills). Guard that the literal stays in sync."""
-    import re
-    def tol(rel):
-        m = re.search(r"_ASR_SPAN_TOL\s*=\s*([0-9.]+)", (ROOT / rel).read_text(encoding="utf-8"))
-        return m.group(1) if m else None
-    vals = {
-        tol("skills/video-understanding/scripts/consolidate.py"),
-        tol("skills/video-understanding/scripts/brief.py"),
-        tol("skills/video-script/scripts/narration.py"),
+    paths = {
+        ROOT / "skills/video-understanding/scripts/consolidate.py",
+        BRIEF,
+        NARRATION,
     }
-    assert vals == {"0.05"}, f"_ASR_SPAN_TOL drifted across files: {vals}"
+    values = {str(path.relative_to(ROOT)): _top_level_literal(path, "_ASR_SPAN_TOL") for path in paths}
+
+    assert set(values.values()) == {0.05}, f"_ASR_SPAN_TOL drifted across files: {values}"

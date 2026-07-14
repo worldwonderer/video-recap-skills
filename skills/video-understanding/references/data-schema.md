@@ -99,7 +99,7 @@
 
 ## narration.json
 
-Agent 撰写的解说词。full 模式下使用原视频时间；**orchestrated cut 模式（`video-recap --edit-mode cut`）下，第二次暂停时已经先剪出 `edited_source.mp4`，因此 `narration.json` 必须直接使用剪后成片的 OUTPUT 时间轴（0..成片总时长），不会再生成或消费 `narration_mapped.json`。只有 legacy direct `video-cut` 单 pass 路径才会把原视频时间的 narration remap 成 `narration_mapped.json`：
+Agent 撰写的解说词。full 模式下使用原视频时间；**两阶段 cut 编排流程**在第二次暂停前已经剪出 `edited_source.mp4`，因此 `narration.json` 必须直接使用剪后成片的 OUTPUT 时间轴（0..成片总时长），不会再生成或消费 `narration_mapped.json`。只有旧版直接单阶段剪辑路径才会把原视频时间的 narration remap 成 `narration_mapped.json`：
 
 ```json
 [
@@ -109,7 +109,7 @@ Agent 撰写的解说词。full 模式下使用原视频时间；**orchestrated 
 
 ## narration_lint.json
 
-`--step script` 或续跑验证 `narration.json` 时生成的预检结果。它检查写稿、时间安全和解说密度。`metrics` 为 full 模式下的密度指标（cut 模式为空对象）。
+续跑验证 `narration.json` 时生成的预检结果。它检查写稿、时间安全和解说覆盖。`metrics` 为 full 模式下的诊断指标（cut 模式为空对象），不是要求命中某个旁白比例的创作配额；低覆盖 warning 应检查是否为有意的原声/沉默选择。
 
 ```json
 {
@@ -153,7 +153,7 @@ Agent 撰写的解说词。full 模式下使用原视频时间；**orchestrated 
 
 ## packaging_plan.json（Agent 撰写，可选）
 
-`packaging_plan.json` 是包装层契约：标题、封面帧/视觉钩子、首句、观众承诺、卖点和发布包装信息。它帮助 review 判断“包装承诺”和正文前 15 秒是否对齐。
+`packaging_plan.json` 是内容锁定后的可选包装层契约：标题、封面帧/视觉钩子、首句、观众承诺、卖点和发布包装信息。它帮助 review 判断“包装承诺”和正文前 15 秒是否对齐；不应反过来驱动故事取舍。
 
 它不是文风策略，不覆盖 `style_card.json` 的声音、节奏或表达规则；如果包装需要某个承诺，正文仍要用素材证据兑现。
 
@@ -191,8 +191,8 @@ Agent 撰写的解说词。full 模式下使用原视频时间；**orchestrated 
 
 报告分两层：
 
-- `blockers`：客观阻断项，会并入 `narration_lint.json` 的 error，例如 requirements 要求但缺少/损坏 `style_card.json`、破折号、占位符泄漏、模板化“不是……而是……”转折。
-- `advisories`：建议项，只提示可读性/口语化风险，例如套话密度、抽象总结词、解释链、比喻标记、过长段落；它们不自动阻断，也不自动改写。
+- `blockers`：客观阻断项，会并入 `narration_lint.json` 的 error，例如 requirements 要求但缺少/损坏 `style_card.json`、破折号、占位符泄漏。
+- `advisories`：建议项，只提示可读性/口语化风险，例如模板化“不是……而是……”转折、套话密度、抽象总结词、解释链、比喻标记、过长段落；它们不自动阻断，也不自动改写。
 
 ```json
 {
@@ -220,7 +220,7 @@ cut 模式下 Agent 选择要保留的原片片段，数组或 `{ "clips": [...]
 {
   "target_duration": "10m",
   "clips": [
-    {"start": 12.0, "end": 38.0, "reason": "冲突开端"}
+    {"start": 12.0, "end": 38.0, "reason": "b01 | hook | knowledge: unknown→threat | POV=主角 | 保留倾听反应 | 入点=问题已问出 | 出点=沉默落地"}
   ]
 }
 ```
@@ -245,7 +245,7 @@ CLI 校验 `clip_plan.json` 后写出，额外包含输出时间轴：
       "output_start": 0.0,
       "output_end": 26.0,
       "duration": 26.0,
-      "reason": "冲突开端"
+      "reason": "b01 | hook | knowledge: unknown→threat | POV=主角 | 保留倾听反应 | 入点=问题已问出 | 出点=沉默落地"
     }
   ],
   "total_duration": 26.0,
@@ -255,7 +255,7 @@ CLI 校验 `clip_plan.json` 后写出，额外包含输出时间轴：
 
 ## narration_mapped.json
 
-仅 legacy direct `video-cut` 单 pass 路径会生成。orchestrated cut 模式不使用它：Agent 在 pass2 直接按剪后成片 OUTPUT 时间轴写 `narration.json`。当 legacy 路径启用时，`start/end` 已变成短视频输出时间，`source_start/source_end` 保留原视频时间：
+仅旧版直接单阶段剪辑路径会生成。两阶段 cut 编排流程不使用它：Agent 在第二阶段直接按剪后成片 OUTPUT 时间轴写 `narration.json`。启用旧版路径时，`start/end` 已变成短视频输出时间，`source_start/source_end` 保留原视频时间：
 
 ```json
 [

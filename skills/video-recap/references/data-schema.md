@@ -109,7 +109,7 @@ Agent 撰写的解说词。full 模式下使用原视频时间；**orchestrated 
 
 ## narration_lint.json
 
-`--step script` 或续跑验证 `narration.json` 时生成的预检结果。它检查写稿、时间安全和解说密度。`metrics` 为 full 模式下的密度指标（cut 模式为空对象）。
+`--step script` 或续跑验证 `narration.json` 时生成的预检结果。它检查写稿、时间安全和解说覆盖。`metrics` 为 full 模式下的诊断指标（cut 模式为空对象），不是要求命中某个旁白比例的创作配额；低覆盖 warning 应回到 `visual_audio_board.json` 检查是否为有意的原声/沉默选择。
 
 ```json
 {
@@ -135,6 +135,12 @@ Agent 撰写的解说词。full 模式下使用原视频时间；**orchestrated 
 
 常见 code：`invalid_time`、`empty_narration`、`time_overlap`、`outside_clip_plan`、`over_budget`、`incomplete_sentence`、`slot_too_short`、`under_narrated`、`over_narrated`、`fragmented_beats`、`no_original_blocks`。
 
+## recap_story_plan.json / visual_audio_board.json（Agent 创作工作产物）
+
+这两个 JSON 是 skill 层的创作决策记录：前者保存导演意图、备选剪辑假设、POV/主线和 change-based beats；后者保存每拍的画面/表演选择、入点/出点、原声锚点、`audio_owner` 与 `narration_job`。完整字段与工作流见本技能的 `creative-editing-playbook.md`。
+
+CLI 不以它们作为渲染硬门禁，也不新增解析服务；建议型解说评审在文件存在时读取它们，Agent 则用它们保证 cut、旁白和声音选择没有偏离同一个创作意图。
+
 ## style_card.json（Agent 撰写，可选/按 brief 要求）
 
 `style_card.json` 是表达层契约：由 Agent 根据 `--style`、`--context`、素材证据、ASR 和用户偏好信号综合撰写。`--style` 是 freeform verbatim guidance（原样自由文本指导），不是枚举、preset、switch，也不是一组可穷举风格名；不要把它翻译成固定档位。
@@ -153,7 +159,7 @@ Agent 撰写的解说词。full 模式下使用原视频时间；**orchestrated 
 
 ## packaging_plan.json（Agent 撰写，可选）
 
-`packaging_plan.json` 是包装层契约：标题、封面帧/视觉钩子、首句、观众承诺、卖点和发布包装信息。它帮助 review 判断“包装承诺”和正文前 15 秒是否对齐。
+`packaging_plan.json` 是内容锁定后的可选包装层契约：标题、封面帧/视觉钩子、首句、观众承诺、卖点和发布包装信息。它帮助 review 判断“包装承诺”和正文前 15 秒是否对齐；不应反过来驱动故事取舍。
 
 它不是文风策略，不覆盖 `style_card.json` 的声音、节奏或表达规则；如果包装需要某个承诺，正文仍要用素材证据兑现。
 
@@ -191,8 +197,8 @@ Agent 撰写的解说词。full 模式下使用原视频时间；**orchestrated 
 
 报告分两层：
 
-- `blockers`：客观阻断项，会并入 `narration_lint.json` 的 error，例如 requirements 要求但缺少/损坏 `style_card.json`、破折号、占位符泄漏、模板化“不是……而是……”转折。
-- `advisories`：建议项，只提示可读性/口语化风险，例如套话密度、抽象总结词、解释链、比喻标记、过长段落；它们不自动阻断，也不自动改写。
+- `blockers`：客观阻断项，会并入 `narration_lint.json` 的 error，例如 requirements 要求但缺少/损坏 `style_card.json`、破折号、占位符泄漏。
+- `advisories`：建议项，只提示可读性/口语化风险，例如模板化“不是……而是……”转折、套话密度、抽象总结词、解释链、比喻标记、过长段落；它们不自动阻断，也不自动改写。
 
 ```json
 {
@@ -214,7 +220,7 @@ Agent 撰写的解说词。full 模式下使用原视频时间；**orchestrated 
 
 ## multi_source_manifest.json（多视频 cut）
 
-多视频剪辑模式下，项目级 `work_dir/multi_source_manifest.json` 是 `recap.py` / `cut.py` / `assemble.py` 的来源契约。`source_id` 默认由源文件 SHA-256 派生为 `src_<fingerprint[:12]>`；同一项目里重复 fingerprint 的不同路径会追加短 path hash 后缀。
+多视频剪辑模式下，项目级 `work_dir/multi_source_manifest.json` 是编排、剪辑与合成阶段共用的来源契约。`source_id` 默认由源文件 SHA-256 派生为 `src_<fingerprint[:12]>`；同一项目里重复 fingerprint 的不同路径会追加短 path hash 后缀。
 
 ```json
 {
@@ -240,7 +246,7 @@ cut 模式下 Agent 选择要保留的原片片段，数组或 `{ "clips": [...]
 {
   "target_duration": "10m",
   "clips": [
-    {"start": 12.0, "end": 38.0, "reason": "冲突开端"}
+    {"start": 12.0, "end": 38.0, "reason": "b01 | hook | knowledge: unknown→threat | POV=主角 | 保留倾听反应 | 入点=问题已问出 | 出点=沉默落地"}
   ]
 }
 ```
@@ -257,8 +263,8 @@ cut 模式下 Agent 选择要保留的原片片段，数组或 `{ "clips": [...]
 {
   "target_duration": "10m",
   "clips": [
-    {"source_id": "src_0123456789ab", "start": 12.0, "end": 38.0, "reason": "episode 1 hook"},
-    {"source_id": "src_fedcba987654", "start": 4.0, "end": 22.0, "reason": "episode 2 payoff"}
+    {"source_id": "src_0123456789ab", "start": 12.0, "end": 38.0, "reason": "b01 | setup | knowledge: unknown→clue | POV=主角 | 保留迟疑反应 | 入点=线索出现 | 出点=疑问成立"},
+    {"source_id": "src_fedcba987654", "start": 4.0, "end": 22.0, "reason": "b02 | payoff | power: suspect→hero | POV=主角 | 保留最终选择 | 入点=证据落下 | 出点=代价显现"}
   ]
 }
 ```
@@ -277,7 +283,7 @@ CLI 校验 `clip_plan.json` 后写出，额外包含输出时间轴：
       "output_start": 0.0,
       "output_end": 26.0,
       "duration": 26.0,
-      "reason": "冲突开端"
+      "reason": "b01 | hook | knowledge: unknown→threat | POV=主角 | 保留倾听反应 | 入点=问题已问出 | 出点=沉默落地"
     }
   ],
   "total_duration": 26.0,
@@ -299,7 +305,7 @@ CLI 校验 `clip_plan.json` 后写出，额外包含输出时间轴：
       "output_start": 0.0,
       "output_end": 26.0,
       "duration": 26.0,
-      "reason": "episode 1 hook"
+      "reason": "b01 | hook | knowledge: unknown→threat | POV=主角 | 保留倾听反应 | 入点=问题已问出 | 出点=沉默落地"
     }
   ]
 }
@@ -389,7 +395,7 @@ CLI 校验 `clip_plan.json` 后写出，额外包含输出时间轴：
 
 ## narration_review.json
 
-`video-script/scripts/review.py` 输出的 LLM-as-judge 评审。旧字段 `verdict/summary/findings` 仍然有效；新增一份 **advisory** 的内容效果 scorecard 与改稿清单。**scorecard 不改变 verdict、也不作硬门禁**——硬门禁仍是 `findings` 里的 error（事实矛盾/残句）经 `--require-narration-review` 严格模式拦截。`verdict` 词表为 `PASS|REVISE|FAIL`，`OK` 作为旧值的兼容别名。
+解说评审阶段输出 LLM-as-judge 结果。旧字段 `verdict/summary/findings` 仍然有效；新增一份 **advisory** 的内容效果 scorecard 与改稿清单。**scorecard 不改变 verdict、也不作硬门禁**——硬门禁仍是 `findings` 里的 error（事实矛盾/残句）经 `--require-narration-review` 严格模式拦截。`verdict` 词表为 `PASS|REVISE|FAIL`，`OK` 作为旧值的兼容别名。
 
 ```json
 {

@@ -38,17 +38,20 @@ MULTI_SOURCE_MANIFEST = "multi_source_manifest.json"
 
 
 CUT_TIMELINE_CRAFT_BULLETS = [
-    "- Build one story spine, not unordered highlights: 0–1 optional cold-open/high-impact clip may come first, then return to setup → turn → payoff in a coherent arc.",
-    "- Use clip `reason` as craft intent where useful: `cold_open`, `setup`, `turn`, or `payoff` plus a concrete why.",
-    "- Prefer causal/reveal/decision/emotional beats; skip credits, ads, repeated static filler, and watermark/无法描述 stretches.",
-    "- End clips on complete spoken lines or quiet windows so original audio does not enter/exit mid-sentence.",
+    "- 片段顺序必须服务同一条故事主线，而不是无序高光；可使用 0–1 个 cold open，随后回到 setup → turn → escalation → payoff。",
+    "- 每个片段必须对应 `recap_story_plan.json` 中的一个 change-based beat；删除后不损失因果、人物或情绪的片段通常不保留。",
+    "- `reason` 统一写成 `beat_id | function | change | POV | preferred moment | 入点 | 出点`，不能只写 hook、重要剧情或事件摘要。",
+    "- 优先保留因果、揭示、决定、关系移动、情绪转向与不可替代的表演/反应；跳过片尾、广告、重复静态画面和水印废片段。",
+    "- 片段长度服从具体时刻；在完整台词、完整动作或自然声音边界结束，避免原声从半句中切入或切出。",
 ]
 
 MULTI_SOURCE_NARRATION_CRAFT_BULLETS = [
-    "- Write against the OUTPUT timeline of edited_source.mp4 only; do not use original source timestamps for narration.json.",
-    "- Recap in BLOCKS of 2–4 complete sentences, not isolated caption fragments; each block should advance the same story spine.",
-    "- Leave deliberate original-audio gaps between blocks for strong source moments; tee up the gap before it plays and react to it after it plays.",
-    "- Use the kept-clip map and each source work_dir to retrieve source facts, names, ASR, and per-source brief context when a beat is unclear.",
+    "- `narration.json` 只使用 edited_source.mp4 的 OUTPUT 时间线，不使用任一原片时间。",
+    "- 先为每个 beat 指定 `audio_owner`，再决定是否需要旁白；允许 original_dialogue、action_sound、ambience、music、silence 或 narration 主导。",
+    "- 旁白只承担 context、causal_link、foreshadow、interpretation 或 transition；`narration_job=none` 的 beat 不写旁白。",
+    "- 7:3 不是配额，只是素材无法给出更好判断时的粗略回退；强对白、动作声、环境或沉默可以完整拥有一个 beat。",
+    "- 旁白拥有 beat 时才写成 2–4 个完整句子的连续 BLOCK；不要把每个 beat 都机械变成旁白块或固定原声留白。",
+    "- 使用 kept-clip map 与每个 source work_dir 核对人物、事实、ASR 和上下文；跨源转场必须有明确叙事任务。",
 ]
 
 
@@ -888,19 +891,77 @@ def _brief_excerpt(path, limit=1200):
         text = Path(path).read_text(encoding="utf-8")
     except OSError:
         return ""
-    return text[:limit]
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    if limit < 8:
+        return text[:limit]
+
+    def section(heading):
+        lines = text.splitlines()
+        try:
+            start = lines.index(heading)
+        except ValueError:
+            return ""
+        end = next(
+            (index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")),
+            len(lines),
+        )
+        return "\n".join(lines[start:end]).strip()
+
+    def clipped(value, budget):
+        if len(value) <= budget:
+            return value
+        marker = "\n…\n"
+        if budget <= len(marker) + 1:
+            return value[:budget]
+        usable = max(0, budget - len(marker))
+        head = max(1, round(usable * 0.7))
+        tail = max(0, usable - head)
+        suffix = value[-tail:].lstrip() if tail else ""
+        return value[:head].rstrip() + marker + suffix
+
+    # The generic writing contract occupies the front of every generated brief. A raw
+    # prefix therefore drops the source facts that multi-source planning actually needs.
+    # Give evidence-bearing sections equal space and retain both their opening and tail.
+    preferred = [
+        section("## Story context (from background_research.json)"),
+        section("## Understanding index (from consolidate.py)"),
+        section("## ASR writing chunks (semantic windows)"),
+        section("## Scene timing guide"),
+    ]
+    preferred = [value for value in preferred if value]
+    if preferred:
+        separators = 2 * (len(preferred) - 1)
+        per_section = max(1, (limit - separators) // len(preferred))
+        excerpt = "\n\n".join(clipped(value, per_section) for value in preferred)
+        return excerpt[:limit]
+
+    marker = "\n…\n"
+    usable = max(0, limit - len(marker))
+    head = max(1, usable // 4)
+    tail = max(0, usable - head)
+    suffix = text[-tail:].lstrip() if tail else ""
+    return text[:head].rstrip() + marker + suffix
 
 
 def _write_multi_source_clip_brief(work_dir, source_records, args):
     lines = [
         "# Multi-source Clip Plan Brief",
         "",
-        "你正在做多视频剪辑复盘。当前 MVP 只支持 `--edit-mode cut`：先写 `clip_plan.json`，下一步会剪出 `edited_source.mp4`，再对 OUTPUT 时间轴写 `narration.json`。",
+        "你正在做多视频剪辑复盘。当前 MVP 只支持 `--edit-mode cut`：先做跨素材的故事与视听决定，再写 `clip_plan.json`；下一步会剪出 `edited_source.mp4`，最后按 OUTPUT 时间轴写 `narration.json`。",
+        "",
+        "## 创作决定",
+        "",
+        "先比较至少两个可行剪辑假设，再写 `recap_story_plan.json` 与 `visual_audio_board.json`。前者记录观众承诺、POV、戏剧问题、选定主线及 change-based beats；后者记录每拍的具体画面/反应、入点/出点、原声锚点、`audio_owner` 与 `narration_job`。",
+        "",
+        "多视频不是把每个来源各做一段小总结。每个来源片段都必须服务同一条主线，并用 `source_id` 保留证据归属。这两份计划是 Agent 与建议型评审使用的工作记录，不是 CLI 渲染门禁。",
         "",
         "## 必须写入的格式",
         "",
         "```json",
-        "{\"target_duration\":\"10m\",\"clips\":[{\"source_id\":\"src_xxx\",\"start\":12.0,\"end\":38.0,\"reason\":\"hook\"}]}",
+        "{\"target_duration\":\"10m\",\"clips\":[{\"source_id\":\"src_xxx\",\"start\":12.0,\"end\":38.0,\"reason\":\"b01 | hook | knowledge: unknown→threat | POV=主角 | 保留倾听反应 | 入点=问题已问出 | 出点=沉默落地\"}]}",
         "```",
         "",
         "- 每个 clip 必须带 `source_id`。",
@@ -908,10 +969,10 @@ def _write_multi_source_clip_brief(work_dir, source_records, args):
         "- 不同 `source_id` 的相同时间段不算重叠；同一 `source_id` 内不要重复/重叠，除非你明确接受稀疏/重复剪辑风险。",
         "- 素材库是文件系统 JSON/MD/JSONL；需要找历史素材时直接 `grep -R \"关键词\" <material-library-dir>`。",
         "",
-        "## Cut craft",
+        "## 剪辑规则",
         *CUT_TIMELINE_CRAFT_BULLETS,
-        "- For multi-source, choose clips across sources to serve the shared story spine; do not let one source become a disconnected mini-recap unless that is the intended setup/turn/payoff.",
-        "- Use each source work_dir below (`sources/<source_id>`) to retrieve scenes.json, ASR, indexes, and per-source brief context before selecting clips.",
+        "- 跨来源选择必须服务共享主线；除非本来就是 setup / turn / payoff 的设计，不要让某个来源变成脱节的小复盘。",
+        "- 选片前使用下方 source work_dir（`sources/<source_id>`）核对 scenes.json、ASR、索引和逐来源 brief。",
     ]
     if args.target_duration:
         lines.append(f"- 目标时长：`{args.target_duration}`。")
@@ -940,17 +1001,23 @@ def _write_multi_source_output_brief(work_dir, source_records, validated_plan_pa
         "",
         "现在 `edited_source.mp4` 已经由多个源视频剪好。请对剪后成片的 OUTPUT 时间轴写 `narration.json`。",
         "",
+        "## 更新创作决定",
+        "",
+        "先查看 `edited_source.mp4` 与下方 kept-clip map，在 `visual_audio_board.json` 中补齐 OUTPUT 起止时间，并根据实际成片重新确认每拍的 `audio_owner`、原声锚点与 `narration_job`。如剪后顺序改变了主线或情绪路径，同时更新 `recap_story_plan.json`。",
+        "",
+        "beat 对应关系保留在视听板中；`narration.json` 仍只承载时间、文本与朗读参数，CLI 不声称校验计划映射。",
+        "",
         "## narration.json 格式",
         "",
         "```json",
-        "[{\"start\":0.0,\"end\":4.0,\"narration\":\"...\"}]",
+        "[{\"start\":0.0,\"end\":4.0,\"narration\":\"解说文本。\",\"pause_after_ms\":250,\"overlaps_speech\":true,\"emotion\":\"平静\"}]",
         "```",
         "",
         "注意：`start`/`end` 是剪后成片时间，不是原视频时间。",
         "",
-        "## Output narration craft",
+        "## 输出时间线写作规则",
         *MULTI_SOURCE_NARRATION_CRAFT_BULLETS,
-        "- Use BLOCK recap style: explain intent, stakes, subtext, relationships, and consequences; do not merely describe pixels.",
+        "- 旁白增加上下文、因果、预期、证据支持的解释或跨源过渡，不复述画面像素；先保人物与原声，再润色句子。",
         "",
         "## Kept clips (output → source)",
     ]

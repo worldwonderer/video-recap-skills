@@ -2945,9 +2945,11 @@ def _build_timed_narration(tts_segments, output_wav, video_duration, work_dir):
 
 
 def _ffmpeg_filters():
-    """ffmpeg's compiled-in filter names. Independent copy of
-    skills/video-recap/scripts/doctor.py:_ffmpeg_filters (skills share no code) — keep the
-    parse in sync with that copy."""
+    """Return ffmpeg's compiled-in filter names.
+
+    This skill keeps a local capability probe so it remains self-contained; keep the
+    parser behavior aligned through tests.
+    """
     import shutil
     import subprocess
     ffmpeg = shutil.which("ffmpeg")

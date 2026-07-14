@@ -20,29 +20,5 @@ jobs:
         run: python -m pip install ruff pytest
       - name: Lint (all skills + tests)
         run: ruff check skills tests scripts
-      - name: Tests (one isolated process per skill, cross-platform)
+      - name: Tests and packaging contracts (one isolated process per skill)
         run: python scripts/test.py
-      - name: SKILL.md frontmatter
-        shell: bash
-        run: |
-          for f in skills/*/SKILL.md; do
-            head -1 "$f" | grep -q '^---' || { echo "$f missing YAML frontmatter"; exit 1; }
-          done
-          echo "All SKILL.md have frontmatter"
-      - name: plugin.json has exactly the 4 Anthropic keys
-        run: |
-          python -c "import json; m=json.load(open('.claude-plugin/plugin.json', encoding='utf-8')); assert set(m)=={'name','version','description','author'}, m; print('plugin.json OK')"
-      - name: VLM prompt anchors resolve
-        shell: bash
-        run: |
-          python -c "
-          import re, glob
-          anchors = set()
-          for f in glob.glob('skills/video-understanding/scripts/*.py'):
-              for m in re.finditer(r'load_prompt\([\"\\x27](.+?)[\"\\x27]\)', open(f, encoding='utf-8').read()):
-                  anchors.add(m.group(1))
-          content = open('skills/video-understanding/references/prompt-templates.md', encoding='utf-8').read()
-          missing = [a for a in anchors if f'### {a}' not in content]
-          assert not missing, f'MISSING prompt anchors: {missing}'
-          print(f'All {len(anchors)} prompt anchors OK')
-          "

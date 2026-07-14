@@ -195,7 +195,7 @@ CONFIG = {
     "speech_rate": env_float("SPEECH_RATE", 3.9, minimum=0.5),  # 旧值 3.5 系统性偏低 ~10-17%
     "speech_safety_margin": env_float("SPEECH_SAFETY_MARGIN", 0.85, minimum=0.1),  # 保守系数：TTS 实际语速有 ±20% 波动
     # Block-coverage lint thresholds — promoted from inline .get() literals to real CONFIG keys (tunable; defaults unchanged)
-    "narration_coverage_target": 0.7,   # aim ~70% narrated:original (7:3)
+    "narration_coverage_target": 0.7,   # rough first-draft/diagnostic fallback; content-led audio decisions may differ (not a quota)
     "narration_coverage_min": 0.5,      # below this coverage → under_narrated
     "narration_block_seconds": 9.0,     # block cadence used to derive target block count
     "original_block_min_seconds": 2.5,  # a deliberate original-audio gap must be at least this long
