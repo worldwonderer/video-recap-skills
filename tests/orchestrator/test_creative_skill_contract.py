@@ -128,9 +128,30 @@ def test_research_guides_match_their_own_stage_timing():
     script_guide = (SKILLS_ROOT / "video-script" / "references" / "research-guide.md").read_text(encoding="utf-8")
 
     assert "开始视频理解**之前**" in recap_guide
+    assert "继续视频理解" in recap_guide
+    assert "继续写 `narration.json`" not in recap_guide
+    assert "直接写解说词" not in recap_guide
     assert "不会自动重跑或改写已有 VLM / ASR 产物" in script_guide
     assert "`context-only`" in script_guide
     assert "开始视频理解**之前**" not in script_guide
+    assert "回到当前创作阶段" in script_guide
+    assert "`recap_story_plan.json`" in script_guide
+    assert "`visual_audio_board.json`" in script_guide
+    assert "直接写解说词" not in script_guide
+
+
+def test_deslop_qc_schema_keeps_template_transitions_advisory():
+    marker = "模板化“不是……而是……”转折"
+    for schema_path in (
+        SKILLS_ROOT / "video-recap" / "references" / "data-schema.md",
+        SKILLS_ROOT / "video-understanding" / "references" / "data-schema.md",
+    ):
+        lines = schema_path.read_text(encoding="utf-8").splitlines()
+        blocker_line = next(line for line in lines if line.startswith("- `blockers`："))
+        advisory_line = next(line for line in lines if line.startswith("- `advisories`："))
+
+        assert marker not in blocker_line, schema_path
+        assert marker in advisory_line, schema_path
 
 
 def test_skill_json_examples_are_parseable_and_cut_reason_keeps_editorial_fields():

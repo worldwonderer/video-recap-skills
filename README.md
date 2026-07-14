@@ -6,7 +6,7 @@
 
 中文 · [English](README.en.md)
 
-**在 claude code 仅需一句话把视频剪辑成解说视频。** 本地只要 `ffmpeg` 加小米 MiMo Token Plan 的 API Key，不用 GPU、不用下载模型，macOS / Linux / Windows 均可运行。
+**在 Claude Code、Codex CLI、OpenCode 或 OpenClaw 里，用一句自然语言把视频变成中文解说成片。** 本地只需要 Python、`ffmpeg` 和一个小米 MiMo API Key；不用 GPU，不用下载模型，macOS / Linux / Windows 均可运行。
 
 ## 演示
 
@@ -34,178 +34,170 @@ flowchart LR
 
 ## 为什么用它
 
-- **一个 key 跑全程。** ASR、VLM、TTS 全走[小米 MiMo](https://platform.xiaomimimo.com)，本地除了 `ffmpeg` 没别的依赖。
+- **一个 key 跑全程。** ASR、VLM、TTS 全走[小米 MiMo](https://platform.xiaomimimo.com)；本地运行时只有 Python 标准库和 `ffmpeg`，不用 `pip install`。
 - **该查资料时先查。** 片名/剧情明确或 brief 提示素材偏薄时，把人物关系、剧情背景存进 `background_research.json`，VLM 才更容易认出谁是谁。
 - **先做创作决定，再分配声音。** Agent 先比较剪辑假设，锁定 POV、主线、具体画面与原声锚点；旁白有明确任务时才整块配音，强对白、动作声或沉默可以完整主导一个 beat。七三开只是在素材判断不足时的粗略回退，不是配额。
-- **先剪后配，画面对齐。** `--edit-mode cut` 先把长视频剪成成片，再对着成片写解说，时间轴天然对齐。
+- **先剪后配，画面对齐。** 剪辑模式先把长视频剪成成片，再对着成片写解说，时间轴天然对齐。
 - **多视频也能剪，分析可复用。** 一次传多个视频，按 `source_id` 选段剪成一个成片；每个视频的分析沉淀为文件系统素材库，下次 `grep` 复用、不重算。
 - **能接着在剪映里改。** 可选导出 schema-driven 的多轨剪映草稿，原片、解说、BGM、字幕和本地图片叠层都可编辑；视频/音频/图片默认打包进 `Resources/local` 并建立素材索引，clone 或搬目录后仍可用。ffmpeg 仍是最终成片的判定标准。
-- **可选 MiMo 成片顾问，不当门神。** `--mimo-qc pre-assemble|post-render|both` 把语义/审美建议写进 `mimo_qc.json` 给 Agent/用户看；缺 key、限流、超时或模型输出异常都只提示，绝不阻断或自动改片。
+- **可选 MiMo 成片顾问，不当门神。** 需要时可让 MiMo 在合成前或成片后给出语义/审美建议；缺 key、限流、超时或模型输出异常都只提示，绝不阻断或自动改片。
 
 ## 安装
 
-**① 装插件**——在 claude code 里添加本仓库为插件市场并安装：
+### 1. 通用前置
+
+- Python 3.10+
+- `PATH` 上可用的 `ffmpeg`；默认烧录字幕，因此需要带 libass / `subtitles` 滤镜
+- 一个[小米 MiMo](https://platform.xiaomimimo.com) API Key，同时驱动 ASR、VLM 和 TTS
+
+```bash
+brew install ffmpeg                         # macOS
+sudo apt install ffmpeg                    # Debian / Ubuntu
+choco install ffmpeg                       # Windows，也可用 scoop / winget
+
+export MIMO_API_KEY=your-mimo-key          # macOS / Linux
+export MIMO_TOKEN_PLAN_CLUSTER=cn          # tp-* key 可选：cn | sgp | ams
+```
+
+Windows PowerShell 使用 `$env:MIMO_API_KEY="your-mimo-key"`。按量付费的 `sk-*` key 默认连接 `https://api.xiaomimimo.com/v1`；模型、音色、响度和字幕等高级配置见[配置手册](skills/video-recap/references/config-playbook.md)。
+
+### 2. 选择 Agent 宿主
+
+#### Claude Code
+
+在 Claude Code 内执行：
 
 ```text
 /plugin marketplace add worldwonderer/video-recap-skills
 /plugin install video-recap-skills@video-recap
 ```
 
-> 也可以跳过命令，直接对 Claude Code 说：
->
-> ```text
-> 安装这个插件：https://github.com/worldwonderer/video-recap-skills
-> ```
+也可以直接说：
 
-**② 装 ffmpeg**（不用 `pip install`：纯标准库 + `PATH` 上的 `ffmpeg`，Python 3.10+）：
-
-```bash
-brew install ffmpeg                        # macOS
-sudo apt install ffmpeg                     # Debian/Ubuntu
-choco install ffmpeg                        # Windows（或 scoop / winget install ffmpeg）
+```text
+安装这个插件：https://github.com/worldwonderer/video-recap-skills
 ```
 
-字幕默认烧进画面，需要带 **libass（`subtitles` 滤镜）** 的 ffmpeg——上面这些包基本都自带。如果你的 ffmpeg 没编 libass，开跑前会立刻报错并提示（也可以加 `--no-burn-subtitles` 输出未遮黑条的 MP4 + `.srt` 外挂字幕）。用 `python3 skills/video-recap/scripts/recap.py --doctor` 自检。
-
-**③ 配 MiMo API Key**（一个 key 同时驱动 ASR / VLM / TTS；先在 [platform.xiaomimimo.com](https://platform.xiaomimimo.com) 注册获取）：
+#### Codex CLI
 
 ```bash
-export MIMO_API_KEY=your-mimo-key
-# tp-* 的 Token-Plan key 会自动连集群，可选 cn | sgp | ams：
-export MIMO_TOKEN_PLAN_CLUSTER=cn
+codex plugin marketplace add worldwonderer/video-recap-skills
+codex plugin add video-recap-skills@video-recap
 ```
 
-按量付费的 `sk-*` key 默认走 `https://api.xiaomimimo.com/v1`。其它都有默认值；想分别配 key/URL 或改模型、音色、响度、字幕等，可见
-[配置手册](skills/video-recap/references/config-playbook.md)。
+本地仓库可把第一条命令的源换成目录路径。以上流程已使用隔离的 `CODEX_HOME` 在 Codex CLI `0.144.1` 完成安装烟测。
 
-## 在其他 Agent 工具里用（opencode / Codex / OpenClaw）
+#### OpenCode
 
-引擎是纯 Python + ffmpeg + 一个 MiMo key，与具体 Agent 无关，所以也能在别的 Agent CLI 里跑。先备齐共同前置：`PATH` 上有 **ffmpeg**、设好 **`MIMO_API_KEY`**、**Python 3.10+**（同上）。
+[OpenCode 官方 Agent Skills 文档](https://opencode.ai/docs/skills/)规定项目级技能放在 `.opencode/skills/<name>/SKILL.md`。克隆仓库后，从仓库目录启动 OpenCode：
 
-- **Codex CLI**（已验证）——直接读本仓库的 `.claude-plugin/marketplace.json`：
+```bash
+git clone https://github.com/worldwonderer/video-recap-skills.git
+cd video-recap-skills
+mkdir -p .opencode
+ln -s ../skills .opencode/skills             # macOS / Linux
+opencode debug skill
+```
 
-  ```bash
-  codex plugin marketplace add worldwonderer/video-recap-skills
-  codex plugin add video-recap-skills@video-recap
-  ```
+Windows 可把 `skills\*` 复制到 `.opencode\skills\`。本 PR 已在 OpenCode `1.14.32` 上实际验证：`opencode debug skill` 能发现全部 6 个技能。日常端到端制作使用 `video-recap`；只做策划或写稿时可调用 `video-script`；其余四个技能负责工具阶段。
 
-  （仓库 push 后可用 `owner/repo` 形式；本地可用 `codex plugin marketplace add ./video-recap-skills`。）
+#### OpenClaw
 
-- **OpenClaw**（已验证）——直接导入 Claude 插件包。克隆本仓库后，把参数指向克隆出的目录运行：
+克隆仓库后导入 Claude 插件包，并检查技能列表：
 
-  ```bash
-  openclaw plugins install ./video-recap-skills
-  ```
+```bash
+openclaw plugins install ./video-recap-skills
+openclaw skills list
+```
 
-  6 个 skill 会成为原生、可自动触发的技能（`openclaw skills list` 可见）。
+不要把同一份技能同时注册到多个发现目录，否则可能出现重名或重复触发。
 
-- **opencode**（按其文档，未在本机实测）——opencode 自动发现 `.claude/skills` / `.agents/skills` / `.opencode/skills` 下的 skill。克隆本仓库后，把 `skills/` 暴露到其中之一即可：
+安装完成后，可以让 Agent 自检环境：
 
-  ```bash
-  mkdir -p .claude && ln -s ../skills .claude/skills   # macOS / Linux
-  # Windows：先建 .claude\skills 目录，再把 skills\* 复制进去
-  ```
-
-> 各 Agent 跑脚本的工作目录不一定是 skill 目录；每个 `SKILL.md` 的脚本路径章节说明了如何用绝对路径调起（脚本用 `__file__` 自定位）。
-> **别重复注册**：同一套 skill 经多条发现路径（仓库 `skills/`、`~/.agents/skills` 拷贝、各 Agent 的安装缓存）同时注册，会命名冲突或重复自动触发——只启用一条。
+```text
+检查 video-recap 的运行环境，告诉我 Python、ffmpeg/libass 和 MiMo 配置是否就绪。
+```
 
 ## 怎么用
 
-把视频丢给它，顺手给点视频背景：
+直接给出视频路径、期望成片和必要背景。用户不需要手动运行仓库里的 Python 脚本。
+
+**完整视频解说：**
 
 ```text
-给 /path/to/video.mp4 做个解说。这是《庆余年》第一集，主角是范闲。
+给 /path/to/video.mp4 做一个中文解说成片。这是《庆余年》第一集，主角是范闲，字幕烧进画面。
 ```
 
-它会分析视频，先制定故事与视听方案，再写解说并产出带字幕的 `recap_<名>.mp4`。
+**长视频剪成短解说：**
 
 ```text
-把 /path/to/long.mp4 剪成十分钟左右的解说短片，字幕压进画面。
+把 /path/to/long.mp4 剪成十分钟左右的解说短片，保留关键原声和人物反应。
 ```
 
-背后是编排器把几个阶段串起来跑，中间停下来让 Agent 写解说（剪辑模式会停两次：先写 `clip_plan.json` 挑片段，剪成成片后再对着成片写 `narration.json`）。第一次跑前可先自检环境：
+**多视频合成一个故事：**
 
-多视频剪辑 MVP 只支持剪辑模式：
-
-```bash
-python3 skills/video-recap/scripts/recap.py ep1.mp4 ep2.mp4 --edit-mode cut --target-duration 10m --work-dir work_dir_multi_story
+```text
+用 /path/to/ep1.mp4 和 /path/to/ep2.mp4 做一个十分钟解说，围绕同一条主线剪辑，不要分成两个小总结。
 ```
 
-它会在 `work_dir_multi_story/sources/<source_id>/` 分别沉淀每个源视频的理解产物，在项目级 `multi_source_manifest.json` 里记录 `source_id → source_path`，并要求 `clip_plan.json` 的每个片段写明 `source_id`。
+Agent 会自动完成理解、故事与视听规划、剪辑、写稿、配音和合成。剪辑模式内部会先确定保留片段，生成剪后成片后再按输出时间轴写旁白；这些暂停和续跑也由 Agent 处理。
 
-可选素材库也是纯文件系统，方便以后 grep 复用已分析素材：
+## 常用进阶需求
 
-```bash
-python3 skills/video-recap/scripts/recap.py ep1.mp4 --edit-mode cut \
-  --material-library-dir .video-materials --save-materials
+**复用已经分析过的素材：**
 
-grep -R "范闲" .video-materials
-
-python3 skills/video-recap/scripts/recap.py ep1.mp4 ep2.mp4 --edit-mode cut \
-  --material-library-dir .video-materials --use-materials
+```text
+分析 /path/to/ep1.mp4，并把可复用的理解产物保存到 /path/to/.video-materials；后续制作时优先复用这个素材库。
 ```
 
-素材库只保存 JSON/MD 小文件和追加式 `materials_index.jsonl`，不复制原始媒体、不建数据库、不做 embedding/语义搜索。
+素材库只保存 JSON / Markdown 和索引，不复制原始媒体、不建数据库、不做 embedding。需要检索时，Agent 直接在文件系统中查找。
 
-```bash
-python3 skills/video-recap/scripts/recap.py --doctor
+**增加建议型质量复核并导出剪映草稿：**
+
+```text
+给 /path/to/video.mp4 做解说，合成前和成片后都做 MiMo 质量复核，并导出可继续编辑的剪映草稿。
 ```
 
-需要额外的建议性质量审阅时显式开启（默认关闭）：
+MiMo 复核始终是 advisory：每个阶段最多一次请求，失败开放，不会自动修改或阻断成片。
 
-```bash
-python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --work-dir work_dir_video \
-  --mimo-qc both
+**让新字幕贴合原片硬字幕位置：**
+
+```text
+先检测 /path/to/video.mp4 的原片字幕区域并让我确认预览，再把解说字幕贴到同一区域生成成片。
 ```
 
-每个阶段最多一次请求，相同内容命中缓存；`--mimo-qc-refresh` 可刷新。成片阶段最多临时抽 6 张、最长边 768px 的 JPEG，base64 不落盘。`mimo_qc.json` 永远是 advisory artifact，不参与 blocker 判定。
+检测结果会保存在 `.subtitle_measure/` 下供确认；当前要求方形像素视频和底部对齐字幕。该能力适配自 [ops120/video-recap-skills-plus](https://github.com/ops120/video-recap-skills-plus)。
 
-## 效果增强：贴源字幕与克隆音色解说
+**克隆有授权的参考音色：**
 
-本节效果增强适配自 [ops120/video-recap-skills-plus](https://github.com/ops120/video-recap-skills-plus)；感谢 [@ops120](https://github.com/ops120) 公开并维护该下游实现。
-
-让新字幕贴到原视频烧录字幕的位置（自动启用该字幕带遮罩；默认 **0.6 半透明且只在解说时出现**，原声留白保持干净画面）：
-
-```bash
-python3 tools/measure_subtitle.py /path/to/video.mp4 --accept-detected
-python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 \
-  --subtitle-y-top 610 --subtitle-y-bot 660
+```text
+用 /path/to/voice-ref.wav 的音色给 /path/to/video.mp4 做解说；我已获得音色所有者授权。
 ```
 
-第一条命令仅依赖现有的 Python 标准库 + ffmpeg，会为每个源视频生成 `.subtitle_measure/<视频名-source-id>/preview/` 网格红框预览与带来源信息的 `subtitle_positions.json`；不加 `--accept-detected` 可查看预览后手动确认坐标。坐标属于 ffmpeg 自动旋转后的显示画布，使用半开区间 `[top, bot)`，当前仅支持方形像素（SAR `1:1`）视频，并要求底部对齐字幕（`SUBTITLE_ALIGNMENT=1|2|3`）。遮罩可用 `SUBTITLE_MASK_OPACITY`（`0..1`）和 `SOURCE_SUBTITLE_MASK_TIMING=all|narration` 调整；烧录校订版原声字幕时，对应时间窗会自动使用全不透明遮罩，避免和原片硬字幕重影。
+参考音频会发送给 MiMo 用于合成，其内容指纹参与缓存校验。仅在获得音色所有者授权时使用。
 
-用任意参考音频克隆解说音色（与整轨翻译的 `--edit-mode dub` 不同，这是给 recap 旁白换音色）：
-
-```bash
-python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --voice-ref /path/to/voice-ref.wav
-```
-
-参考音频仅在需要生成新 TTS 时转成一次 24 kHz 单声道 WAV，之后所有解说段复用；全量命中缓存时不转码。参考文件内容也进入 TTS 缓存指纹，替换音频后不会误用旧配音。**仅在获得音色所有者授权时使用；参考音频会发送给 MiMo 服务用于合成。**
-
-## 英语视频→中文配音 · 保留原音色
-
-把英文视频翻译成中文，并用**原说话人的音色**配音（克隆，而非固定音色），画面不变。这与「解说」不同：解说在原声上叠加中文评述，配音则把原始台词**替换**成忠实翻译的中文。和解说一样用自然语言触发：
+**英语视频译成中文并保留原音色：**
 
 ```text
 把 /path/to/english.mp4 翻译成中文配音，保留原说话人的声音。
 ```
 
-它先做英文识别、按句切分、取一段参考音，然后停下来让 Agent 逐句写中文译稿；继续运行即用 `mimo-v2.5-tts-voiceclone` 克隆原音色逐句配音，按**原句时间轴**贴合（只在会超出下一句时才压速，绝不整体提速，避免人声比画面提前结束），整轨替换后输出 `dub_<名>.mp4`。v1：单说话人、整轨替换（暂不保留背景音乐）。
+这会替换原始台词，而不是在原声上叠加解说。当前版本支持单说话人整轨替换，暂不分离背景音乐。
 
 ## 架构
 
 | Skill | 职责 | 输入 → 输出（`work_dir` 契约） |
 |---|---|---|
-| **video-understanding** | 场景检测 · 抽帧 · ASR（`mimo-v2.5-asr`）· VLM（`mimo-v2.5`）· 时间轴融合 · 生成 brief（`--consolidate` 索引默认开） | `视频` → `scenes / asr_result / vlm_analysis / silence_periods / timeline_fusion / agent_narration_brief.md` |
+| **video-understanding** | 场景检测 · 抽帧 · ASR（`mimo-v2.5-asr`）· VLM（`mimo-v2.5`）· 时间轴融合 · 生成 brief | `视频` → `scenes / asr_result / vlm_analysis / silence_periods / timeline_fusion / agent_narration_brief.md` |
 | **video-script** | 导演/故事/画面/声音方案 + 解说写作 + 建议型评审 + lint/校验 | `brief + 索引` → `recap_story_plan.json + visual_audio_board.json + [clip_plan.json] + narration.json` |
 | **video-cut** | 片段计划 → 拼剪成片（剪辑模式先剪后配，解说按成片时间轴写，无需重映射） | `clip_plan.json + 视频` → `edited_source.mp4` |
 | **video-voiceover** | 合成解说音频（MiMo TTS，`mimo-v2.5-tts`） | `narration.json` → `tts_segments/ + tts_meta.json` |
 | **video-assemble** | 混音 · 压低原声 · 渲染字幕 · 多轨时间线（可选导出剪映） | `视频 + tts_meta` → `recap_<名>.mp4 + subtitles.srt/.ass + timeline.json` |
-| **video-recap** | 编排器 + `--doctor` | `视频` → `recap_<名>.mp4` |
+| **video-recap** | 编排器与环境诊断 | `视频` → `recap_<名>.mp4` |
 
 ## 输出
 
-- `recap_<名>.mp4`：成片（固定输出名，每次运行原地覆盖）。`subtitles.srt`（默认烧录字幕，同时产出 `subtitles.ass`；`--no-burn-subtitles` 关闭）
+- `recap_<名>.mp4`：成片（固定输出名，每次运行原地覆盖）；字幕默认烧录，同时产出 `subtitles.srt` 与 `subtitles.ass`
 - `work_dir/narration.json`：解说脚本（`narration_lint.json` 时间诊断、`narration_review.md` 评审意见）
 - `work_dir/recap_story_plan.json` · `visual_audio_board.json`：Agent 的故事、画面与声音决定；供续写和建议型评审使用，不是渲染硬门禁
 - `work_dir/agent_narration_brief.md`：给 Agent 的时间和场景 brief
@@ -229,7 +221,7 @@ python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --voice-ref /path
 
 - 各 skill 的契约：每个 `skills/<skill>/SKILL.md`（写作规则在 video-script 的 SKILL.md 里）
 - [数据结构](skills/video-recap/references/data-schema.md) · [配置手册](skills/video-recap/references/config-playbook.md) · [多轨时间线 / 剪映导出](skills/video-recap/references/timeline-and-jianying.md)
-- [背景调研指南](skills/video-understanding/references/research-guide.md) · [VLM prompt 模板](skills/video-understanding/references/prompt-templates.md)
+- [背景调研指南](skills/video-recap/references/research-guide.md) · [VLM prompt 模板](skills/video-understanding/references/prompt-templates.md)
 
 ## 致谢
 

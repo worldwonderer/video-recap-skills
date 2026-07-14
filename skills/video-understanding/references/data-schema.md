@@ -191,8 +191,8 @@ Agent 撰写的解说词。full 模式下使用原视频时间；**两阶段 cut
 
 报告分两层：
 
-- `blockers`：客观阻断项，会并入 `narration_lint.json` 的 error，例如 requirements 要求但缺少/损坏 `style_card.json`、破折号、占位符泄漏、模板化“不是……而是……”转折。
-- `advisories`：建议项，只提示可读性/口语化风险，例如套话密度、抽象总结词、解释链、比喻标记、过长段落；它们不自动阻断，也不自动改写。
+- `blockers`：客观阻断项，会并入 `narration_lint.json` 的 error，例如 requirements 要求但缺少/损坏 `style_card.json`、破折号、占位符泄漏。
+- `advisories`：建议项，只提示可读性/口语化风险，例如模板化“不是……而是……”转折、套话密度、抽象总结词、解释链、比喻标记、过长段落；它们不自动阻断，也不自动改写。
 
 ```json
 {

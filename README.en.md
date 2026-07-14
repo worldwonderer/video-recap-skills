@@ -6,7 +6,7 @@
 
 [中文](README.md) · English
 
-**One sentence in Claude Code turns any video into a Chinese-narration recap.** All it needs locally is `ffmpeg` and one Xiaomi MiMo API key — no GPU, no model downloads, runs on macOS / Linux / Windows.
+**In Claude Code, Codex CLI, OpenCode, or OpenClaw, one natural-language request turns a video into a Chinese-narration recap.** It needs only Python, `ffmpeg`, and one Xiaomi MiMo API key locally: no GPU, no model downloads, and it runs on macOS / Linux / Windows.
 
 ## Demo
 
@@ -34,196 +34,170 @@ flowchart LR
 
 ## Why use it
 
-- **One key, runs anywhere.** ASR, VLM, and TTS all go through [Xiaomi MiMo](https://platform.xiaomimimo.com); `ffmpeg` is the only local dependency.
+- **One key, runs anywhere.** ASR, VLM, and TTS all go through [Xiaomi MiMo](https://platform.xiaomimimo.com); the local runtime uses only Python's standard library and `ffmpeg`, with no `pip install`.
 - **Research when it matters.** When the title/story context is known or the brief notes the material is thin, put character relationships and plot background in `background_research.json` so the VLM knows who's who.
 - **Make the editorial decision before allocating sound.** The agent first compares edit hypotheses and locks the POV, story spine, exact picture moments, and original-audio anchors. Narration is voiced as a block only when it has a defined job; strong dialogue, action sound, or silence may own an entire beat. A 7:3 split is only a rough fallback, never a quota.
-- **Cut first, frames aligned.** `--edit-mode cut` renders the cut first, then you narrate against that timeline, so picture and voice stay in sync.
+- **Cut first, frames aligned.** Cut mode renders the shortened video first, then writes narration against that output timeline, so picture and voice stay in sync.
 - **Multi-video cut, reusable analysis.** Feed several videos at once, pick ranges by `source_id`, and render one recap; each video's analysis is saved to a filesystem material library you can `grep` and reuse next time.
 - **Keep editing in 剪映.** Optionally export a schema-driven draft with editable original clips, narration, BGM, subtitles, and local image overlays. Video/audio/images are bundled under `Resources/local` with a material index, so a clone or moved draft stays usable. ffmpeg remains the canonical render.
-- **Optional MiMo adviser, never a gatekeeper.** `--mimo-qc pre-assemble|post-render|both` writes semantic/aesthetic suggestions for the agent/user to `mimo_qc.json`. Missing keys, rate limits, timeouts, and malformed model output are warnings only—never blockers or automatic edits.
+- **Optional MiMo adviser, never a gatekeeper.** On request, MiMo can review the project before assembly or after rendering. Missing keys, rate limits, timeouts, and malformed model output are warnings only, never blockers or automatic edits.
 
 ## Installation
 
-**① Install the plugin** — add this repo as a marketplace and install, inside Claude Code:
+### 1. Shared prerequisites
+
+- Python 3.10+
+- `ffmpeg` on `PATH`; subtitle burn-in is enabled by default and requires libass / the `subtitles` filter
+- One [Xiaomi MiMo](https://platform.xiaomimimo.com) API key for ASR, VLM, and TTS
+
+```bash
+brew install ffmpeg                         # macOS
+sudo apt install ffmpeg                    # Debian / Ubuntu
+choco install ffmpeg                       # Windows; scoop or winget also work
+
+export MIMO_API_KEY=your-mimo-key          # macOS / Linux
+export MIMO_TOKEN_PLAN_CLUSTER=cn          # optional for tp-* keys: cn | sgp | ams
+```
+
+In Windows PowerShell, use `$env:MIMO_API_KEY="your-mimo-key"`. Pay-as-you-go `sk-*` keys default to `https://api.xiaomimimo.com/v1`. See the [config playbook](skills/video-recap/references/config-playbook.md) for model, voice, loudness, subtitle, and per-capability settings.
+
+### 2. Choose an agent host
+
+#### Claude Code
+
+Run inside Claude Code:
 
 ```text
 /plugin marketplace add worldwonderer/video-recap-skills
 /plugin install video-recap-skills@video-recap
 ```
 
-> Or skip the commands and tell Claude Code:
->
-> ```text
-> Install this plugin: https://github.com/worldwonderer/video-recap-skills
-> ```
+Or simply ask:
 
-**② Install ffmpeg** (no `pip install`: pure standard library + `ffmpeg` on `PATH`, Python 3.10+):
-
-```bash
-brew install ffmpeg                        # macOS
-sudo apt install ffmpeg                     # Debian/Ubuntu
-choco install ffmpeg                        # Windows (or scoop / winget install ffmpeg)
+```text
+Install this plugin: https://github.com/worldwonderer/video-recap-skills
 ```
 
-Subtitles are burned into the picture by default, which needs an ffmpeg built with **libass (the `subtitles` filter)** — the packages above include it in almost all cases. If yours lacks libass, the run fails fast at the start with a clear message (or pass `--no-burn-subtitles` to keep the MP4 unmasked and subtitles as a sidecar `.srt`). Run `python3 skills/video-recap/scripts/recap.py --doctor` to self-check.
-
-**③ Set your MiMo API key** (one key powers ASR / VLM / TTS — register at [platform.xiaomimimo.com](https://platform.xiaomimimo.com), then keep it in an env var, never in the repo):
+#### Codex CLI
 
 ```bash
-export MIMO_API_KEY=your-mimo-key
-# tp-* Token-Plan keys auto-connect to a cluster: cn | sgp | ams
-export MIMO_TOKEN_PLAN_CLUSTER=cn
+codex plugin marketplace add worldwonderer/video-recap-skills
+codex plugin add video-recap-skills@video-recap
 ```
 
-Pay-as-you-go `sk-*` keys default to `https://api.xiaomimimo.com/v1`. Everything else has a default; to change the model, voice, loudness, or subtitles, or set a key/URL per capability, see the
-[config playbook](skills/video-recap/references/config-playbook.md).
+For a local checkout, replace the marketplace source in the first command with its directory. This flow was smoke-tested with an isolated `CODEX_HOME` on Codex CLI `0.144.1`.
 
-## Use it in other agent harnesses (opencode / Codex / OpenClaw)
+#### OpenCode
 
-The engine is plain Python + ffmpeg + one MiMo key — harness-agnostic — so it also runs under other agent CLIs. Get the shared prerequisites first: **ffmpeg** on `PATH`, **`MIMO_API_KEY`** set, **Python 3.10+** (as above).
+The official [OpenCode Agent Skills documentation](https://opencode.ai/docs/skills/) defines project skills under `.opencode/skills/<name>/SKILL.md`. Clone the repository and start OpenCode from that directory:
 
-- **Codex CLI** (verified) — it reads this repo's `.claude-plugin/marketplace.json` directly:
+```bash
+git clone https://github.com/worldwonderer/video-recap-skills.git
+cd video-recap-skills
+mkdir -p .opencode
+ln -s ../skills .opencode/skills             # macOS / Linux
+opencode debug skill
+```
 
-  ```bash
-  codex plugin marketplace add worldwonderer/video-recap-skills
-  codex plugin add video-recap-skills@video-recap
-  ```
+On Windows, copy `skills\*` into `.opencode\skills\`. This PR was run-verified on OpenCode `1.14.32`: `opencode debug skill` discovered all 6 skills. Use `video-recap` for normal end-to-end production, `video-script` for planning or writing only, and the other four skills as tool stages.
 
-  (The `owner/repo` form works once the repo is published; locally use `codex plugin marketplace add ./video-recap-skills`.)
+#### OpenClaw
 
-- **OpenClaw** (verified) — it imports the Claude plugin bundle directly. After cloning, point the argument at the cloned directory:
+After cloning, import the Claude plugin bundle and check the discovered skills:
 
-  ```bash
-  openclaw plugins install ./video-recap-skills
-  ```
+```bash
+openclaw plugins install ./video-recap-skills
+openclaw skills list
+```
 
-  All 6 skills become native, auto-triggering skills (`openclaw skills list`).
+Do not register the same checkout through multiple discovery paths; duplicate registration can cause name collisions or repeated triggers.
 
-- **opencode** (per its docs; not run-verified here) — opencode auto-discovers skills under `.claude/skills` / `.agents/skills` / `.opencode/skills`. After cloning, expose `skills/` under one of them:
+After installation, ask the agent to check the environment:
 
-  ```bash
-  mkdir -p .claude && ln -s ../skills .claude/skills   # macOS / Linux
-  # Windows: create .claude\skills first, then copy skills\* into it
-  ```
-
-> Harnesses don't always run commands from the skill's directory; each `SKILL.md` has a script-path section showing how to invoke commands by absolute path (the scripts self-locate via `__file__`).
-> **Don't double-register**: registering the same skills through more than one discovery path (the repo's `skills/`, a copy under `~/.agents/skills`, a harness install cache) can cause name clashes or double auto-triggering — enable just one.
+```text
+Check the video-recap environment and tell me whether Python, ffmpeg/libass, and MiMo are ready.
+```
 
 ## Usage
 
-Point it at a video and give it whatever story context you have:
+Give the agent the video paths, desired result, and any useful story context. Users do not need to run the repository's Python scripts directly.
+
+**Full-video recap:**
 
 ```text
-Make a recap of /path/to/video.mp4. It's 庆余年 episode 1; the lead is 范闲.
+Make a Chinese-narration recap of /path/to/video.mp4. It is episode 1 of 庆余年, the lead is 范闲, and subtitles should be burned in.
 ```
 
-It analyzes the video, makes a story/picture/audio plan, writes narration against that plan, and produces `recap_<name>.mp4` with subtitles.
+**Cut a long video into a shorter recap:**
 
 ```text
-Turn /path/to/long.mp4 into a ~10-minute cut-down recap and burn the subtitles in.
+Turn /path/to/long.mp4 into a roughly ten-minute recap while preserving key original dialogue and character reactions.
 ```
 
-Behind the scenes the orchestrator chains the stages, pausing so the agent can write the narration (cut mode pauses twice: first write `clip_plan.json` to pick the footage, then — once the cut is rendered — write `narration.json` against that output). Before the first run, check your setup:
+**Build one story from multiple videos:**
 
-Multi-video recap is an MVP for cut mode only:
-
-```bash
-python3 skills/video-recap/scripts/recap.py ep1.mp4 ep2.mp4 --edit-mode cut --target-duration 10m --work-dir work_dir_multi_story
+```text
+Use /path/to/ep1.mp4 and /path/to/ep2.mp4 to make one ten-minute recap with a shared story spine, not two separate summaries.
 ```
 
-Each source is analyzed under `work_dir_multi_story/sources/<source_id>/`; the project-level `multi_source_manifest.json` records `source_id → source_path`, and each `clip_plan.json` clip must include `source_id`.
+The agent handles understanding, story and audiovisual planning, editing, narration, voiceover, and assembly. In cut mode it first chooses footage, renders the shortened video, and only then writes narration on the output timeline; the agent also handles the internal pauses and resume steps.
 
-The optional material library is filesystem-only and grep-friendly:
+## Common advanced requests
 
-```bash
-python3 skills/video-recap/scripts/recap.py ep1.mp4 --edit-mode cut \
-  --material-library-dir .video-materials --save-materials
+**Reuse previously analyzed material:**
 
-grep -R "hero" .video-materials
-
-python3 skills/video-recap/scripts/recap.py ep1.mp4 ep2.mp4 --edit-mode cut \
-  --material-library-dir .video-materials --use-materials
+```text
+Analyze /path/to/ep1.mp4 and save reusable understanding artifacts under /path/to/.video-materials. Prefer that material library in later projects.
 ```
 
-It stores small JSON/MD artifacts plus an append-only `materials_index.jsonl`; it does not copy raw media, create a DB, or use embeddings/semantic search.
+The library contains JSON, Markdown, and an index only. It does not copy raw media, create a database, or use embeddings; the agent searches it directly on the filesystem.
 
-```bash
-python3 skills/video-recap/scripts/recap.py --doctor
+**Add advisory quality review and export a JianYing draft:**
+
+```text
+Make a recap of /path/to/video.mp4, run MiMo quality review before assembly and after rendering, and export an editable JianYing draft.
 ```
 
-Explicitly opt into advisory quality review (off by default):
+MiMo review is always advisory: at most one request per selected stage, fail-open, and never an automatic edit or render blocker.
 
-```bash
-python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --work-dir work_dir_video \
-  --mimo-qc both
+**Align new subtitles with the source's burned-in subtitle band:**
+
+```text
+Detect the source subtitle band in /path/to/video.mp4 and let me confirm the preview before rendering recap subtitles in the same region.
 ```
 
-Each selected stage makes at most one request and uses a content cache;
-`--mimo-qc-refresh` bypasses it. Post-render review temporarily samples at most
-six JPEGs, each at most 768px on its longest side, and never persists base64.
-`mimo_qc.json` is always advisory and cannot become a blocker.
+The measurement preview is stored under `.subtitle_measure/`. It currently requires square-pixel video and bottom-aligned source subtitles. This capability is adapted from [ops120/video-recap-skills-plus](https://github.com/ops120/video-recap-skills-plus).
 
-## Enhanced rendering: source-pinned subtitles and cloned narration voice
+**Clone an authorized reference voice:**
 
-These enhancements are adapted from
-[ops120/video-recap-skills-plus](https://github.com/ops120/video-recap-skills-plus). Thanks to
-[@ops120](https://github.com/ops120) for publishing and maintaining the downstream implementation.
-
-Pin recap subtitles to the source video's burned-in subtitle band (this explicitly enables
-masking for that measured band; the enhanced default is **60% opacity during narration only**,
-leaving original-audio gaps clean):
-
-```bash
-python3 tools/measure_subtitle.py /path/to/video.mp4 --accept-detected
-python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 \
-  --subtitle-y-top 610 --subtitle-y-bot 660
+```text
+Use the voice from /path/to/voice-ref.wav for the recap of /path/to/video.mp4. I have the voice owner's authorization.
 ```
 
-The measurement tool still uses only stdlib + ffmpeg. For each source it writes grid/red-band
-previews under `.subtitle_measure/<video-source-id>/preview/` plus a source-identified
-`subtitle_positions.json`; omit `--accept-detected` to inspect and confirm the coordinates
-interactively. Coordinates use a half-open `[top, bot)` interval on ffmpeg's auto-rotated display canvas and currently require
-square-pixel (SAR `1:1`) video plus bottom-aligned subtitles (`SUBTITLE_ALIGNMENT=1|2|3`). Tune with
-`SUBTITLE_MASK_OPACITY` (`0..1`) and
-`SOURCE_SUBTITLE_MASK_TIMING=all|narration`. Windows containing replacement original-dialogue
-subtitles are masked opaquely so they cannot stack over the source hard subtitles.
+The reference audio is sent to MiMo for synthesis and its content fingerprint participates in cache validation. Use voice cloning only with the voice owner's authorization.
 
-Clone an arbitrary reference voice for recap narration (distinct from full-track translation in
-`--edit-mode dub`):
-
-```bash
-python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --voice-ref /path/to/voice-ref.wav
-```
-
-The reference is normalized to 24 kHz mono once, lazily when fresh TTS is needed; a fully cached
-rerun does not transcode it. Its content hash is part of the TTS cache fingerprint, so replacing
-the file cannot silently reuse old speech. **Use voice cloning only with the voice owner's
-authorization. The reference audio is sent to the MiMo service for synthesis.**
-
-## English video → Chinese dub · original voice
-
-Translate an English video into Chinese and voice it in the **original speaker's timbre** (cloned, not a fixed voice), leaving the picture unchanged. Unlike "recap" (Chinese commentary over ducked audio), dubbing **replaces** the original speech with a faithful Chinese translation. Trigger it in natural language, like recap:
+**Dub an English video into Chinese while preserving the voice:**
 
 ```text
 Dub /path/to/english.mp4 into Chinese, keeping the original speaker's voice.
 ```
 
-It runs English ASR, splits into complete sentences, pulls one reference clip, then pauses for the agent to write the per-sentence Chinese translation; rerunning clones the original voice line by line (`mimo-v2.5-tts-voiceclone`) and time-fits each to its **source-sentence** window (anchored at the source start; sped up only if it would overrun the next line — never globally, so the voice never finishes ahead of the picture), full-track replaces the audio, and writes `dub_<name>.mp4`. v1: single speaker, full-track replace (no background-music separation).
+This replaces the original speech instead of overlaying commentary. The current version supports one speaker and full-track replacement without background-music separation.
 
 ## Architecture
 
 | Skill | Does | In → Out (the `work_dir` contract) |
 |---|---|---|
-| **video-understanding** | scene detect · frame extract · ASR (`mimo-v2.5-asr`) · VLM (`mimo-v2.5`) · fuse timeline · build brief (`--consolidate` index on by default) | `video` → `scenes / asr_result / vlm_analysis / silence_periods / timeline_fusion / agent_narration_brief.md` |
+| **video-understanding** | scene detect · frame extract · ASR (`mimo-v2.5-asr`) · VLM (`mimo-v2.5`) · fuse timeline · build brief | `video` → `scenes / asr_result / vlm_analysis / silence_periods / timeline_fusion / agent_narration_brief.md` |
 | **video-script** | directing/story/picture/audio plan + narration + advisory review + lint/validate | `brief + index` → `recap_story_plan.json + visual_audio_board.json + [clip_plan.json] + narration.json` |
 | **video-cut** | clip plan → render the cut (cut-first/narrate-second; narration is written on the output timeline, no remap) | `clip_plan.json + video` → `edited_source.mp4` |
 | **video-voiceover** | synthesize narration audio (MiMo TTS, `mimo-v2.5-tts`) | `narration.json` → `tts_segments/ + tts_meta.json` |
 | **video-assemble** | mux · duck original audio · render subtitles · multi-track timeline (optional 剪映 export) | `video + tts_meta` → `recap_<name>.mp4 + subtitles.srt/.ass + timeline.json` |
-| **video-recap** | orchestrator + `--doctor` | `video` → `recap_<name>.mp4` |
+| **video-recap** | orchestration and environment diagnostics | `video` → `recap_<name>.mp4` |
 
 ## Output
 
-- `recap_<name>.mp4`: the final recap; a stable alias overwritten in place on every run. `subtitles.srt` (plus `subtitles.ass`; subtitle burn-in is on by default, `--no-burn-subtitles` to disable)
+- `recap_<name>.mp4`: the final recap, written to a stable name; subtitles are burned in by default and also written as `subtitles.srt` and `subtitles.ass`
 - `work_dir/narration.json`: the narration script (`narration_lint.json` timing diagnostics, `narration_review.md` review notes)
 - `work_dir/recap_story_plan.json` · `visual_audio_board.json`: agent-authored story, picture, and audio decisions for resume/advisory review; not a render gate
 - `work_dir/agent_narration_brief.md`: timing and scene brief for the agent
@@ -247,7 +221,7 @@ Priority: **your file › the agent-proofread `original_subtitles.json` › ASR 
 
 - Per-skill contracts: each `skills/<skill>/SKILL.md` (the writing rules are in video-script's SKILL.md)
 - [Data schema](skills/video-recap/references/data-schema.md) · [Config playbook](skills/video-recap/references/config-playbook.md) · [Multi-track timeline / 剪映 export](skills/video-recap/references/timeline-and-jianying.md)
-- [Background research guide](skills/video-understanding/references/research-guide.md) · [VLM prompt templates](skills/video-understanding/references/prompt-templates.md)
+- [Background research guide](skills/video-recap/references/research-guide.md) · [VLM prompt templates](skills/video-understanding/references/prompt-templates.md)
 
 ## Acknowledgements
 
