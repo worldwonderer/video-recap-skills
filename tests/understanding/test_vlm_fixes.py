@@ -3,6 +3,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-understanding' / 'scripts'))
 """Regression tests for vlm.py bug fixes (null content, retry header, partial chunk cache)."""
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -71,6 +72,34 @@ def test_null_content_falls_back_to_reasoning(monkeypatch, tmp_path):
     # On the old code raw_response would be None -> AttributeError -> "(VLM 分析失败...)".
     assert "VLM 分析失败" not in analyses[0]["description"]
     assert analyses[0]["description"] == "男子拿起茶壶"
+
+
+def test_analyze_scenes_sends_the_editorial_evidence_prompt_to_vlm(monkeypatch, tmp_path):
+    frame = _make_frame(tmp_path)
+    captured = {}
+
+    monkeypatch.setitem(CONFIG, "fps", 1.0)
+    monkeypatch.setitem(CONFIG, "vlm_model", "mimo-v2.5")
+    monkeypatch.setitem(CONFIG, "vlm_workers", 1)
+    monkeypatch.setitem(CONFIG, "context_info", "")
+
+    def fake_api_call(payload):
+        captured["prompt"] = payload["messages"][0]["content"][-1]["text"]
+        return {"choices": [{"message": {"content": "【描述】人物对峙\n【深层分析】关系发生变化"}}]}
+
+    monkeypatch.setattr("vlm.api_call", fake_api_call)
+
+    analyses = analyze_scenes([{"start": 0.0, "end": 2.0}], [frame], tmp_path)
+    numbered_items = {
+        int(number): text
+        for number, text in re.findall(r"(?m)^(\d+)\.\s+(.+)$", captured["prompt"])
+    }
+
+    assert analyses[0]["description"] == "人物对峙"
+    assert {1, 2, 3, 4, 5} <= set(numbered_items)
+    assert "变化" in numbered_items[3]
+    assert "视角" in numbered_items[4]
+    assert "反应" in numbered_items[4]
 
 
 def _three_scene_setup(monkeypatch, tmp_path, workers):

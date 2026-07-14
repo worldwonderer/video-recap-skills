@@ -2,7 +2,7 @@
 """video-script validation entrypoint.
 
 Validate (and, in full mode, time-align) an agent-written narration.json against the
-understanding index produced by video-understanding. Writes narration_lint.json and,
+local understanding index. Writes narration_lint.json and,
 in full mode, rewrites narration.json with quiet-window alignment applied.
 """
 import argparse
@@ -38,7 +38,7 @@ def _load_cut_clip_plan(work_dir):
         and validated.get("raw_plan_fingerprint") == stable_hash(raw)
     ):
         return validated
-    # The orchestrator validates before video-cut refreshes clip_plan_validated.json.
+    # Validation may run before the cut stage refreshes clip_plan_validated.json.
     # Without a matching raw-plan provenance fingerprint, lint against the current
     # raw plan even when mtimes are equal or misleading.
     return raw

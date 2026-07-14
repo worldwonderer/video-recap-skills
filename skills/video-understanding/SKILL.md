@@ -2,71 +2,74 @@
 name: video-understanding
 user-invocable: false
 description: >
- Analyze a video into a structured understanding index: scene detection, ASR transcript,
- per-scene visual (VLM) analysis, silence windows, a fused timeline, and a narration-writing
- brief. Use to understand / index / summarize what happens in a video, or as the first stage
- of the video-recap bundle before writing narration. Input: a video file. Output: scenes.json,
- asr_result.json, vlm_analysis.json, silence_periods.json, timeline_fusion.json,
- agent_narration_brief.md. 触发词: 视频理解, 视频分析, 视频索引, video understanding, analyze video, 看懂视频.
+ 把视频分析为结构化理解索引：场景检测、ASR 转写、逐场景 VLM 观察、静音窗口、融合时间线和写作 brief。
+ 用于理解、索引或总结视频，也作为后续创作前的分析阶段。输入视频文件；输出 scenes.json、
+ asr_result.json、vlm_analysis.json、silence_periods.json、timeline_fusion.json、agent_narration_brief.md。
+ 触发词：视频理解、视频分析、视频索引、video understanding、analyze video、看懂视频。
 ---
 
-## What this does
+## 1. 定位
 
-Turns a source video into an **understanding index** an agent (or a downstream stage) can read:
-1. **Scene detection** — `scenes.json` (cut points, durations) + junk-scene filtering.
-2. **Frame extraction** — sampled frames for the visual analysis.
-3. **ASR** — `asr_result.json` (timestamped dialogue) via MiMo `mimo-v2.5-asr`.
-4. **Silence detection** — `silence_periods.json` (quiet windows, `has_speech` flag).
-5. **VLM analysis** — `vlm_analysis.json` (per-scene description, depth analysis, `frame_facts`).
-6. **Timeline fusion + brief** — `timeline_fusion.json`, `asr_writing_chunks.json`, `agent_narration_brief.md`.
+本技能把源视频转成 Agent 与下游阶段可读取的理解索引。它的创作角色是**素材观察员 / 场记**，不是导演：
 
-Stateless: reusable stages are skipped only when their output and provenance sidecar match
-the current source video plus output-affecting settings. `--force` recomputes.
+- 先观察，再解释；事实与推断分开。
+- 除了“发生了什么”，还要让下游看见知识、权力、目标、关系或情绪在哪一刻变化。
+- 标出由谁的 POV 承载变化、哪个反应或表演不可替代，以及哪里存在完整台词/动作的自然剪辑边界。
+- 证据不足时保留不确定性，不制造戏剧结论。
 
-## Requirements
+## 2. 处理阶段
+
+1. **场景检测**：写 `scenes.json`，包含切点、时长和废片段过滤结果。
+2. **抽帧**：为视觉分析提取代表帧。
+3. **ASR**：通过 `mimo-v2.5-asr` 写时间戳对白 `asr_result.json`。
+4. **静音检测**：写 `silence_periods.json`，标注安静窗口与 `has_speech`。
+5. **VLM 观察**：写 `vlm_analysis.json`，包含场景描述、深层分析和 `frame_facts`。
+6. **时间线融合与创作 brief**：写 `timeline_fusion.json`、`asr_writing_chunks.json` 和 `agent_narration_brief.md`。
+
+各阶段只有在输出产物与 provenance sidecar 同时匹配当前视频及影响结果的设置时才会复用；`--force` 强制重算。
+
+## 3. 环境要求
 
 ```bash
 # ffmpeg: brew install ffmpeg | apt install ffmpeg | choco install ffmpeg
-export MIMO_API_KEY=***          # one key drives ASR (mimo-v2.5-asr) + VLM (mimo-v2.5)
+export MIMO_API_KEY=***
 ```
 
-ASR uses MiMo `mimo-v2.5-asr`; pass `--skip-asr` to skip dialogue transcription. The full understanding run still requires `MIMO_API_KEY` for VLM scene analysis.
-Optional MiMo scene-chunk video understanding: `--mimo-video-overview`.
+ASR 使用 `mimo-v2.5-asr`；VLM 使用 `mimo-v2.5`。`--skip-asr` 可跳过对白转写，但完整理解仍需要 `MIMO_API_KEY` 运行 VLM。`--mimo-video-overview` 可开启按场景块的视频概览。
 
-If `work_dir/background_research.json` exists (story research the agent did first, see
-`references/research-guide.md`), its synopsis and named characters are folded into the VLM
-context, so scene descriptions can name people and read scenes with plot knowledge. Combine with
-`--context` for a quick inline hint.
+若 `work_dir/background_research.json` 存在，本技能会把剧情梗概和角色名折入 VLM 上下文；`--context` 可补充一条简短提示。
 
-> **Running the scripts below** — the `scripts/…` paths are relative to this skill's own directory (the folder containing this `SKILL.md`). Claude Code runs commands from there, so they work as written. If your harness runs commands from the project root instead (opencode / Codex / OpenClaw commonly do), prefix this skill's absolute directory — e.g. `<skill-dir>/scripts/…`, using the directory your harness reports when it loads the skill. The scripts self-locate from their own path, so once started by the correct path they resolve their sibling skills and assets regardless of the working directory.
+下面的 `scripts/...` 均相对于本技能目录。若执行器从仓库根目录启动，请给脚本路径加上本技能的绝对目录。脚本不从其他技能目录读取文件；外部输入仅限命令显式传入的视频、参数与 `work_dir` 产物。
 
-## Run
+## 4. 运行命令
 
 ```bash
 python3 scripts/understand.py <video> --work-dir <work_dir> \
   [--context "节目名/角色名"] [--scene-threshold 0.1] [--skip-asr] [--mimo-video-overview] [--force]
 ```
 
-## Output contract
+## 5. 输出契约
 
-| File | Content |
-|------|---------|
-| `scenes.json` | scene cut list (start/end/duration) |
-| `asr_result.json` | `[{start, end, text}]` timestamped transcript |
-| `vlm_analysis.json` | per-scene description / depth / `frame_facts` |
-| `silence_periods.json` | `[{start, end, duration, has_speech}]` quiet windows |
-| `timeline_fusion.json` | VLM + ASR + silence overlap, unified timeline |
-| `asr_writing_chunks.json` | ASR split at sentence boundaries, scene-aligned |
-| `agent_narration_brief.md` | the human/agent-facing writing brief (read this first) |
+| 文件 | 内容 |
+|------|------|
+| `scenes.json` | 场景切点、起止时间与时长 |
+| `asr_result.json` | `[{start, end, text}]` 时间戳对白 |
+| `vlm_analysis.json` | 逐场景描述、深层分析与 `frame_facts` |
+| `silence_periods.json` | `[{start, end, duration, has_speech}]` 安静窗口 |
+| `timeline_fusion.json` | VLM、ASR 与静音信息的统一时间线 |
+| `asr_writing_chunks.json` | 按句界和场景切分的 ASR 写作块 |
+| `agent_narration_brief.md` | Agent 首先阅读的创作简报 |
 
-Downstream, **video-script** reads the brief + index to write `narration.json`.
+后续写作阶段根据创作简报与索引制定方案并写 `narration.json`。
 
-## References
-- Background research before writing: `references/research-guide.md` (writes `background_research.json`).
-- Output JSON shapes: `references/data-schema.md`.
+## 6. 参考资料
 
-## What this skill does NOT do
-- Does NOT write narration / 解说词 or score it — that is video-script.
-- Does NOT cut, edit, voice, or render video.
-- Does NOT invent plot the signal doesn't support — it emits a substrate warning when ASR/VLM are thin, rather than fabricating.
-- Does NOT publish or schedule anything; it writes artifacts to work_dir and stops.
+- 背景调研：`references/research-guide.md`，产出 `background_research.json`。
+- JSON 结构：`references/data-schema.md`。
+
+## 7. 能力边界
+
+- 不写解说词，也不做解说评分；只负责生成理解索引与创作简报。
+- 不剪辑、不配音、不合成视频。
+- 不编造信号无法支持的剧情；当 ASR / VLM 过薄时输出素材警告。
+- 不发布、不调度，只向 `work_dir` 写产物并停止。

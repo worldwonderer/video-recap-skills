@@ -22,7 +22,7 @@ Beyond the rendered MP4, you can export a **剪映/JianYing draft** to keep edit
 flowchart LR
     video(["Video"]) --> understand["① Understand<br/>scenes · ASR · VLM"]
     research["Story research · optional"] -.-> understand
-    understand --> script["② Script<br/>agent"] --> voiceover["③ Voiceover<br/>MiMo TTS"] --> assemble["④ Assemble<br/>mux · subtitles"] --> output(["Recap"])
+    understand --> script["② Direct · Edit · Script<br/>agent"] --> voiceover["③ Voiceover<br/>MiMo TTS"] --> assemble["④ Assemble<br/>mux · subtitles"] --> output(["Recap"])
     understand -. cut mode · cut first .-> cut["Cut<br/>render first"] -.-> script
     classDef io fill:#4f86c6,stroke:#3a6298,color:#fff;
     classDef stage fill:#eef6ff,stroke:#4f86c6,color:#1f2937;
@@ -36,7 +36,7 @@ flowchart LR
 
 - **One key, runs anywhere.** ASR, VLM, and TTS all go through [Xiaomi MiMo](https://platform.xiaomimimo.com); `ffmpeg` is the only local dependency.
 - **Research when it matters.** When the title/story context is known or the brief notes the material is thin, put character relationships and plot background in `background_research.json` so the VLM knows who's who.
-- **Narration in blocks, original in blocks.** Narration plays in connected blocks, each voiced in one pass; in the gaps, the original audio returns at full volume — roughly 7:3.
+- **Make the editorial decision before allocating sound.** The agent first compares edit hypotheses and locks the POV, story spine, exact picture moments, and original-audio anchors. Narration is voiced as a block only when it has a defined job; strong dialogue, action sound, or silence may own an entire beat. A 7:3 split is only a rough fallback, never a quota.
 - **Cut first, frames aligned.** `--edit-mode cut` renders the cut first, then you narrate against that timeline, so picture and voice stay in sync.
 - **Multi-video cut, reusable analysis.** Feed several videos at once, pick ranges by `source_id`, and render one recap; each video's analysis is saved to a filesystem material library you can `grep` and reuse next time.
 - **Keep editing in 剪映.** Optionally export a schema-driven draft with editable original clips, narration, BGM, subtitles, and local image overlays. Video/audio/images are bundled under `Resources/local` with a material index, so a clone or moved draft stays usable. ffmpeg remains the canonical render.
@@ -106,7 +106,7 @@ The engine is plain Python + ffmpeg + one MiMo key — harness-agnostic — so i
   # Windows: create .claude\skills first, then copy skills\* into it
   ```
 
-> Harnesses don't always run commands from the skill's directory; the "Running the scripts" note at the top of each `SKILL.md` shows how to invoke them by absolute path (the scripts self-locate via `__file__`).
+> Harnesses don't always run commands from the skill's directory; each `SKILL.md` has a script-path section showing how to invoke commands by absolute path (the scripts self-locate via `__file__`).
 > **Don't double-register**: registering the same skills through more than one discovery path (the repo's `skills/`, a copy under `~/.agents/skills`, a harness install cache) can cause name clashes or double auto-triggering — enable just one.
 
 ## Usage
@@ -117,7 +117,7 @@ Point it at a video and give it whatever story context you have:
 Make a recap of /path/to/video.mp4. It's 庆余年 episode 1; the lead is 范闲.
 ```
 
-It analyzes the video, writes the narration against that context, and produces `recap_<name>.mp4` with subtitles.
+It analyzes the video, makes a story/picture/audio plan, writes narration against that plan, and produces `recap_<name>.mp4` with subtitles.
 
 ```text
 Turn /path/to/long.mp4 into a ~10-minute cut-down recap and burn the subtitles in.
@@ -215,7 +215,7 @@ It runs English ASR, splits into complete sentences, pulls one reference clip, t
 | Skill | Does | In → Out (the `work_dir` contract) |
 |---|---|---|
 | **video-understanding** | scene detect · frame extract · ASR (`mimo-v2.5-asr`) · VLM (`mimo-v2.5`) · fuse timeline · build brief (`--consolidate` index on by default) | `video` → `scenes / asr_result / vlm_analysis / silence_periods / timeline_fusion / agent_narration_brief.md` |
-| **video-script** | writing rules (SKILL.md) + review (LLM-as-judge) + lint/validate | `brief + index` → `narration.json` |
+| **video-script** | directing/story/picture/audio plan + narration + advisory review + lint/validate | `brief + index` → `recap_story_plan.json + visual_audio_board.json + [clip_plan.json] + narration.json` |
 | **video-cut** | clip plan → render the cut (cut-first/narrate-second; narration is written on the output timeline, no remap) | `clip_plan.json + video` → `edited_source.mp4` |
 | **video-voiceover** | synthesize narration audio (MiMo TTS, `mimo-v2.5-tts`) | `narration.json` → `tts_segments/ + tts_meta.json` |
 | **video-assemble** | mux · duck original audio · render subtitles · multi-track timeline (optional 剪映 export) | `video + tts_meta` → `recap_<name>.mp4 + subtitles.srt/.ass + timeline.json` |
@@ -225,6 +225,7 @@ It runs English ASR, splits into complete sentences, pulls one reference clip, t
 
 - `recap_<name>.mp4`: the final recap; a stable alias overwritten in place on every run. `subtitles.srt` (plus `subtitles.ass`; subtitle burn-in is on by default, `--no-burn-subtitles` to disable)
 - `work_dir/narration.json`: the narration script (`narration_lint.json` timing diagnostics, `narration_review.md` review notes)
+- `work_dir/recap_story_plan.json` · `visual_audio_board.json`: agent-authored story, picture, and audio decisions for resume/advisory review; not a render gate
 - `work_dir/agent_narration_brief.md`: timing and scene brief for the agent
 - `work_dir/vlm_analysis.json` · `asr_result.json` · `silence_periods.json` · `timeline_fusion.json`: understanding artifacts
 - `work_dir/clip_plan.json` · `edited_source.mp4` · `recap_phase.json`: cut-mode artifacts (narration is written on the output timeline; `recap_phase.json` records cut/narrate progress for deterministic resume)

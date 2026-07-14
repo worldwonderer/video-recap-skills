@@ -261,10 +261,20 @@ def test_parse_review_scorecard_does_not_downgrade_weak_pass():
 
 def test_build_review_messages_includes_planning_artifacts_when_present(tmp_path):
     (tmp_path / "packaging_plan.json").write_text(json.dumps({"viewer_promise": "看到反转"}, ensure_ascii=False), encoding="utf-8")
-    (tmp_path / "recap_story_plan.json").write_text(json.dumps({"spine": "他如何翻盘"}, ensure_ascii=False), encoding="utf-8")
-    (tmp_path / "visual_audio_board.json").write_text(json.dumps({"items": [{"beat_id": "b01"}]}, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "recap_story_plan.json").write_text(json.dumps({
+        "director_intent": {"pov": "女主", "dramatic_question": "他如何翻盘"},
+        "beats": [{"beat_id": "b01", "change": "knowledge: doubt→proof"}],
+    }, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "visual_audio_board.json").write_text(json.dumps({
+        "items": [{"beat_id": "b01", "audio_owner": "silence", "narration_job": "none"}],
+    }, ensure_ascii=False), encoding="utf-8")
     content = review.build_review_messages([{"start": 0, "end": 3, "narration": "测试。"}], [], [], work_dir=tmp_path)[0]["content"]
-    assert "看到反转" in content and "他如何翻盘" in content and "visual_audio_board.json" in content
+
+    assert "看到反转" in content
+    assert "女主" in content and "他如何翻盘" in content and "knowledge: doubt→proof" in content
+    assert "visual_audio_board.json" in content and '"audio_owner": "silence"' in content
+    assert '"narration_job": "none"' in content
+    assert "7:3 不是配额" in content
 
 
 def test_parse_review_scorecard_marks_unscored_dimensions():

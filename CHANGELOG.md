@@ -5,6 +5,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## [Unreleased]
 
+### 改进
+
+- **内容驱动的创作流程。** Agent 在剪辑或写稿前先比较剪辑假设，记录 POV、戏剧问题、change-based beats、具体画面/反应、`audio_owner` 与 `narration_job`；`recap_story_plan.json` / `visual_audio_board.json` 同时覆盖单视频与多视频 cut。旁白比例改为素材决定，`7:3` 只保留为粗略回退而非配额。
+- **阶段技能完全自包含。** 阶段说明与本地参考不再引用兄弟技能的路径或名称；写稿阶段拥有独立的补充调研指南与 `deslop_qc.py`，不会假装新调研已被既有 VLM 消费。
+- **多视频证据更可用。** 项目 brief 优先摘取逐来源的背景、索引、ASR 与场景证据，不再只截取通用写作说明。
+
+### 测试
+
+- 测试入口统一到跨平台 `scripts/test.py`；CI 中 frontmatter、manifest、prompt anchor 与隔离导入契约全部改为 pytest 行为/结构测试。
+- 合并重复测试并增加动态 skill 发现、精确重复测试体检测、测试组注册、自包含边界、创作 JSON 结构与 multi-source brief 回归覆盖。
+
 ## [0.4.0] - 2026-07-13
 
 汇总 `v0.3.3` 之后的多源剪辑、QC、字幕与配音改进，并扩展可携带剪映草稿能力。

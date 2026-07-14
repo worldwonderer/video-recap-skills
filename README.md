@@ -22,7 +22,7 @@
 flowchart LR
     video(["视频"]) --> understand["① 理解<br/>场景 · ASR · VLM"]
     research["背景调研 · 可选"] -.-> understand
-    understand --> script["② 写稿<br/>Agent"] --> voiceover["③ 配音<br/>MiMo TTS"] --> assemble["④ 组装<br/>混音 · 字幕"] --> output(["Recap"])
+    understand --> script["② 导演 · 剪辑 · 写稿<br/>Agent"] --> voiceover["③ 配音<br/>MiMo TTS"] --> assemble["④ 组装<br/>混音 · 字幕"] --> output(["Recap"])
     understand -. 剪辑模式 · 先剪后配 .-> cut["剪辑<br/>先剪成片"] -.-> script
     classDef io fill:#4f86c6,stroke:#3a6298,color:#fff;
     classDef stage fill:#eef6ff,stroke:#4f86c6,color:#1f2937;
@@ -36,7 +36,7 @@ flowchart LR
 
 - **一个 key 跑全程。** ASR、VLM、TTS 全走[小米 MiMo](https://platform.xiaomimimo.com)，本地除了 `ffmpeg` 没别的依赖。
 - **该查资料时先查。** 片名/剧情明确或 brief 提示素材偏薄时，把人物关系、剧情背景存进 `background_research.json`，VLM 才更容易认出谁是谁。
-- **解说成块，原声也成块。** 解说一段段连着讲、整块一次配音，段间留白把精彩原声整段放回满音量——大致七三开。
+- **先做创作决定，再分配声音。** Agent 先比较剪辑假设，锁定 POV、主线、具体画面与原声锚点；旁白有明确任务时才整块配音，强对白、动作声或沉默可以完整主导一个 beat。七三开只是在素材判断不足时的粗略回退，不是配额。
 - **先剪后配，画面对齐。** `--edit-mode cut` 先把长视频剪成成片，再对着成片写解说，时间轴天然对齐。
 - **多视频也能剪，分析可复用。** 一次传多个视频，按 `source_id` 选段剪成一个成片；每个视频的分析沉淀为文件系统素材库，下次 `grep` 复用、不重算。
 - **能接着在剪映里改。** 可选导出 schema-driven 的多轨剪映草稿，原片、解说、BGM、字幕和本地图片叠层都可编辑；视频/音频/图片默认打包进 `Resources/local` 并建立素材索引，clone 或搬目录后仍可用。ffmpeg 仍是最终成片的判定标准。
@@ -106,7 +106,7 @@ export MIMO_TOKEN_PLAN_CLUSTER=cn
   # Windows：先建 .claude\skills 目录，再把 skills\* 复制进去
   ```
 
-> 各 Agent 跑脚本的工作目录不一定是 skill 目录；每个 `SKILL.md` 顶部的「Running the scripts」说明了如何用绝对路径调起（脚本用 `__file__` 自定位）。
+> 各 Agent 跑脚本的工作目录不一定是 skill 目录；每个 `SKILL.md` 的脚本路径章节说明了如何用绝对路径调起（脚本用 `__file__` 自定位）。
 > **别重复注册**：同一套 skill 经多条发现路径（仓库 `skills/`、`~/.agents/skills` 拷贝、各 Agent 的安装缓存）同时注册，会命名冲突或重复自动触发——只启用一条。
 
 ## 怎么用
@@ -117,7 +117,7 @@ export MIMO_TOKEN_PLAN_CLUSTER=cn
 给 /path/to/video.mp4 做个解说。这是《庆余年》第一集，主角是范闲。
 ```
 
-它会分析视频、照背景写解说，产出带字幕的 `recap_<名>.mp4`。
+它会分析视频，先制定故事与视听方案，再写解说并产出带字幕的 `recap_<名>.mp4`。
 
 ```text
 把 /path/to/long.mp4 剪成十分钟左右的解说短片，字幕压进画面。
@@ -197,7 +197,7 @@ python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --voice-ref /path
 | Skill | 职责 | 输入 → 输出（`work_dir` 契约） |
 |---|---|---|
 | **video-understanding** | 场景检测 · 抽帧 · ASR（`mimo-v2.5-asr`）· VLM（`mimo-v2.5`）· 时间轴融合 · 生成 brief（`--consolidate` 索引默认开） | `视频` → `scenes / asr_result / vlm_analysis / silence_periods / timeline_fusion / agent_narration_brief.md` |
-| **video-script** | 写作规则（SKILL.md）+ 评审（LLM 评委）+ lint/校验 | `brief + 索引` → `narration.json` |
+| **video-script** | 导演/故事/画面/声音方案 + 解说写作 + 建议型评审 + lint/校验 | `brief + 索引` → `recap_story_plan.json + visual_audio_board.json + [clip_plan.json] + narration.json` |
 | **video-cut** | 片段计划 → 拼剪成片（剪辑模式先剪后配，解说按成片时间轴写，无需重映射） | `clip_plan.json + 视频` → `edited_source.mp4` |
 | **video-voiceover** | 合成解说音频（MiMo TTS，`mimo-v2.5-tts`） | `narration.json` → `tts_segments/ + tts_meta.json` |
 | **video-assemble** | 混音 · 压低原声 · 渲染字幕 · 多轨时间线（可选导出剪映） | `视频 + tts_meta` → `recap_<名>.mp4 + subtitles.srt/.ass + timeline.json` |
@@ -207,6 +207,7 @@ python3 skills/video-recap/scripts/recap.py /path/to/video.mp4 --voice-ref /path
 
 - `recap_<名>.mp4`：成片（固定输出名，每次运行原地覆盖）。`subtitles.srt`（默认烧录字幕，同时产出 `subtitles.ass`；`--no-burn-subtitles` 关闭）
 - `work_dir/narration.json`：解说脚本（`narration_lint.json` 时间诊断、`narration_review.md` 评审意见）
+- `work_dir/recap_story_plan.json` · `visual_audio_board.json`：Agent 的故事、画面与声音决定；供续写和建议型评审使用，不是渲染硬门禁
 - `work_dir/agent_narration_brief.md`：给 Agent 的时间和场景 brief
 - `work_dir/vlm_analysis.json` · `asr_result.json` · `silence_periods.json` · `timeline_fusion.json`：理解产物
 - `work_dir/clip_plan.json` · `edited_source.mp4` · `recap_phase.json`：剪辑模式产物（解说在成片时间轴上写，`recap_phase.json` 记录剪/配进度供断点续跑）

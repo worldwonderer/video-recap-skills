@@ -171,8 +171,8 @@ def _strip_reasoning_residue(text):
 
     Thinking-disable is not applied to -asr models (lib._prepare_api_payload), so the reasoning
     model can leak a <think> block — full, truncated/unclosed, or a leading orphan/residual tag
-    (a bare "think>" prefix) — into the transcript. Independent copy of the same strip in
-    video-voiceover/scripts/dub.py (skills share no code); keep the two in sync.
+    (a bare "think>" prefix) — into the transcript. The dubbing implementation carries its own
+    copy of this policy; keep behavior aligned through tests.
     """
     text = re.sub(r"(?is)<think\b.*?</think\s*>", "", text)  # full <think>…</think> block
     text = re.sub(r"(?is)<think\b.*\Z", "", text)            # unclosed/truncated <think tail

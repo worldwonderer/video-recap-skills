@@ -42,6 +42,24 @@ def test_brief_noop_without_consolidation(tmp_path):
     assert (tmp_path / "timeline_fusion.json").exists()
 
 
+def test_agent_brief_writes_asr_chunks_and_timeline_fusion(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "edit_mode", "full")
+    monkeypatch.setitem(CONFIG, "target_duration", "")
+    monkeypatch.setitem(CONFIG, "context_info", "")
+    monkeypatch.setitem(CONFIG, "asr_chunk_min_chars", 5)
+    monkeypatch.setitem(CONFIG, "asr_chunk_max_chars", 12)
+
+    brief = build_agent_brief(SCENES, ASR, SILENCE, 6.0, tmp_path)
+
+    text = brief.read_text(encoding="utf-8")
+    assert "ASR writing chunks" in text
+    assert "Timeline fusion" in text
+    chunks = json.loads((tmp_path / "asr_writing_chunks.json").read_text(encoding="utf-8"))
+    fusion = json.loads((tmp_path / "timeline_fusion.json").read_text(encoding="utf-8"))
+    assert chunks
+    assert fusion[0]["dialogue_segments"][0]["text"] == ASR[0]["text"]
+
+
 def test_chunk_asr_tolerates_mixed_int_str_scene_ids():
     """Regression (cut-mode pass2): _remap_brief_evidence_to_output_timeline gives a SPLIT
     scene a str id like '5.0' while unsplit scenes keep int ids. A chunk spanning both must
@@ -54,6 +72,28 @@ def test_chunk_asr_tolerates_mixed_int_str_scene_ids():
     chunks = _chunk_asr_for_writing(asr, scenes)  # must not raise TypeError
     ids = chunks[0]["scene_ids"]
     assert 5 in ids and "5.0" in ids  # both id types survive the type-safe sort
+
+
+def test_asr_chunks_split_on_sentences_and_track_scene_ids(monkeypatch):
+    monkeypatch.setitem(CONFIG, "asr_chunk_min_chars", 8)
+    monkeypatch.setitem(CONFIG, "asr_chunk_max_chars", 16)
+    chunks = _chunk_asr_for_writing(
+        [{
+            "start": 0.0,
+            "end": 40.0,
+            "text": "第一句很重要。第二句继续推进。第三句制造悬念。第四句收尾。",
+        }],
+        [
+            {"scene_id": 0, "start": 0.0, "end": 20.0},
+            {"scene_id": 1, "start": 20.0, "end": 40.0},
+        ],
+    )
+
+    assert len(chunks) >= 2
+    assert chunks[0]["text"].endswith("。")
+    assert all(chunk["char_count"] <= 16 for chunk in chunks)
+    assert chunks[0]["scene_ids"] == [0]
+    assert chunks[-1]["scene_ids"] == [1]
 
 
 def test_optional_stage_warnings_surface_failed_overview_and_consolidation(tmp_path):
@@ -235,53 +275,6 @@ def test_brief_ignores_stale_mimo_overview_when_disabled_or_chunk_mismatch(monke
     monkeypatch.setitem(CONFIG, "mimo_video_overview", True)
     mismatch_text = build_agent_brief(SCENES, ASR, SILENCE, 6.0, tmp_path).read_text(encoding="utf-8")
     assert "STALE MIMO OVERVIEW" not in mismatch_text
-
-
-def test_build_agent_brief_cut_mode_sizes_to_output(monkeypatch, tmp_path):
-    """Cut mode sizes the beat target to the OUTPUT, not the source (brief.py copy)."""
-    monkeypatch.setitem(CONFIG, "edit_mode", "cut")
-    monkeypatch.setitem(CONFIG, "target_duration", "1m")
-    monkeypatch.setitem(CONFIG, "context_info", "")
-    scenes = [{"scene_id": i, "start": i * 60.0, "end": i * 60.0 + 60.0, "description": "画面"} for i in range(10)]
-    text = build_agent_brief(scenes, [], [], 600.0, tmp_path).read_text(encoding="utf-8")
-    assert "CUT OUTPUT" in text
-    assert "narration BLOCKS across the ~1min CUT OUTPUT" in text   # sized to 1min output
-    assert "47 narration BLOCKS" not in text                        # NOT the source-sized (10min) count
-    assert "step 1 of 2" in text           # A1: cut-first, write clip_plan only (no edited_source yet)
-
-
-def test_cut_pass1_brief_encourages_cold_open_but_preserves_story_spine(monkeypatch, tmp_path):
-    monkeypatch.setitem(CONFIG, "edit_mode", "cut")
-    monkeypatch.setitem(CONFIG, "target_duration", "1m")
-    monkeypatch.setitem(CONFIG, "context_info", "")
-    text = build_agent_brief(SCENES, ASR, SILENCE, 60.0, tmp_path).read_text(encoding="utf-8")
-
-    assert "0–1 optional cold-open/high-impact clip" in text
-    assert "story spine, not unordered highlights" in text
-    assert "cold_open" in text and "setup" in text and "turn" in text and "payoff" in text
-    assert "not a flat highlights reel" in text
-
-
-def test_build_agent_brief_preserves_freeform_style_and_artifact_contract(tmp_path):
-    style = "悬疑冷幽默，但每句都像朋友复盘：别端着，保留东北味儿"
-
-    text = build_agent_brief(SCENES, ASR, SILENCE, 6.0, tmp_path, style=style).read_text(encoding="utf-8")
-
-    assert f"- Style (--style, freeform verbatim guidance): {style}" in text
-    assert "Do not translate `--style` into a preset, enum, switch, or fallback ladder" in text
-    assert "style_card.json" in text
-    assert "packaging_plan.json" in text
-    assert "deterministic report-only tool QC" in text
-    assert "not treat it as an AIGC detector" in text
-    assert "do not auto-rewrite" in text
-    assert "not a preset enum, fixed taxonomy" in text
-
-
-def test_understanding_brief_does_not_leak_hardcoded_example_entities(tmp_path):
-    text = build_agent_brief(SCENES, ASR, SILENCE, 6.0, tmp_path, style="纪实复盘").read_text(encoding="utf-8")
-
-    for leaked in ["范闲", "监察院", "五竹", "京都"]:
-        assert leaked not in text
 
 
 def test_index_prompt_fingerprint_tracks_consolidate_source_of_truth():

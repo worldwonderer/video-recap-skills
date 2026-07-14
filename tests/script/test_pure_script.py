@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-script' / 'scripts'))
 import json
+import re
 import narration
 import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
@@ -164,7 +165,14 @@ def test_build_agent_brief_cut_mode_sizes_to_output(monkeypatch, tmp_path):
     assert "narration BLOCKS across the ~1min CUT OUTPUT" in text   # sized to 1min output (~5 blocks)
     assert "47 narration BLOCKS" not in text                        # NOT the source-sized (10min) count
     assert "step 1 of 2" in text           # A1: cut-first, write clip_plan only (no edited_source yet)
-    assert '"target_duration": "1m"' in text
+    examples = [json.loads(raw) for raw in re.findall(r"```json\s*\n(.*?)\n```", text, re.DOTALL)]
+    clip_plan = next(item for item in examples if isinstance(item, dict) and "clips" in item)
+    reason_parts = [part.strip() for part in clip_plan["clips"][0]["reason"].split("|")]
+    assert clip_plan["target_duration"] == "1m"
+    assert len(reason_parts) == 7
+    assert reason_parts[0].startswith("b") and "→" in reason_parts[2]
+    assert reason_parts[3].startswith("POV=")
+    assert reason_parts[-2].startswith("入点=") and reason_parts[-1].startswith("出点=")
 
 
 def test_build_agent_brief_cut_pass2_is_output_timeline(monkeypatch, tmp_path):
@@ -183,6 +191,47 @@ def test_build_agent_brief_cut_pass2_is_output_timeline(monkeypatch, tmp_path):
     assert "Kept clips on the OUTPUT timeline" in text
     assert "OUTPUT 0.0–10.0s ← SOURCE[0] 10.0–20.0s" in text
     assert "step 1 of 2" not in text
+
+
+def test_build_agent_brief_keeps_plan_linkage_in_the_board_not_narration_schema(monkeypatch, tmp_path):
+    monkeypatch.setitem(CONFIG, "edit_mode", "full")
+    monkeypatch.setitem(CONFIG, "target_duration", "")
+    monkeypatch.setitem(CONFIG, "context_info", "")
+
+    text = build_agent_brief(
+        [{"scene_id": 0, "start": 0.0, "end": 8.0, "description": "人物作出选择"}],
+        [{"start": 1.0, "end": 3.0, "text": "我决定留下。"}],
+        [],
+        8.0,
+        tmp_path,
+    ).read_text(encoding="utf-8")
+    examples = [json.loads(raw) for raw in re.findall(r"```json\s*\n(.*?)\n```", text, re.DOTALL)]
+    narration = next(item for item in examples if isinstance(item, list) and item and "narration" in item[0])
+
+    assert set(narration[0]) == {"start", "end", "narration", "pause_after_ms", "overlaps_speech", "emotion"}
+    assert "beat 对应关系记录在 `visual_audio_board.json`" in text
+    assert "`narration.json` 仍只承载时间、文本与朗读参数" in text
+
+
+def test_build_agent_brief_preserves_freeform_style_and_artifact_contract(tmp_path):
+    style = "悬疑冷幽默，但每句都像朋友复盘：别端着，保留东北味儿"
+
+    text = build_agent_brief(
+        [{"scene_id": 0, "start": 0.0, "end": 6.0, "description": "门口对峙"}],
+        [{"start": 1.0, "end": 5.0, "text": "第一句对白。第二句反击。"}],
+        [{"start": 0.0, "end": 1.0, "duration": 1.0, "has_speech": False}],
+        6.0,
+        tmp_path,
+        style=style,
+    ).read_text(encoding="utf-8")
+
+    assert f"- Style (--style, freeform verbatim guidance): {style}" in text
+    assert "Do not translate `--style` into a preset, enum, switch, or fallback ladder" in text
+    assert "style_card.json" in text and "packaging_plan.json" in text
+    assert "deterministic report-only tool QC" in text
+    assert "not treat it as an AIGC detector" in text
+    assert "do not auto-rewrite" in text
+    assert "not a preset enum, fixed taxonomy" in text
 
 
 
@@ -478,8 +527,9 @@ def test_build_agent_brief_rich_density_is_a_guide_not_quota(monkeypatch, tmp_pa
     asr = [{"start": 1.0, "end": 5.0, "text": "对" * 250}]  # >= 200 chars -> a real story spine -> rich
     assert assess_understanding_substrate(scenes, asr)["level"] == "rich"
     text = build_agent_brief(scenes, asr, [], 36.0, tmp_path).read_text(encoding="utf-8")
-    assert "Narration in BLOCKS, ~7:3" in text       # block model is the headline guidance
-    assert "never pad with" in text                  # still framed as a guide, not a quota
+    assert "Content-led audio allocation" in text    # story/sound decisions, not ratio, are the headline
+    assert "not a quota or quality target" in text   # 7:3 remains only a rough fallback
+    assert "never pad" in text                       # timing fallback is still not a quota
     assert "Narration density target:" not in text  # the old hard-quota phrasing is gone
 
 

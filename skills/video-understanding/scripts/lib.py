@@ -193,9 +193,8 @@ CONFIG = {
     "mimo_disable_thinking": env_bool("MIMO_DISABLE_THINKING", True),
     "mimo_disable_thinking_source": "env" if os.environ.get("MIMO_DISABLE_THINKING") else "default",
     "fps": 0,  # 0 = 自动（≤60s→2fps, ≤5min→1.5fps, >5min→1fps）
-    # Storyboard contact sheets (advisory): generated only in video-understanding (owns frames+fps).
-    # Kept ONLY here, matching the bundle convention that each lib.py carries the keys ITS skill uses
-    # (video-cut's lib.py is deliberately minimal); no other skill reads storyboard_*.
+    # Storyboard contact sheets are advisory and generated locally where frames/fps are owned.
+    # Keep these keys only in the stage that consumes them; other stages do not read storyboard_*.
     "storyboard": env_bool("STORYBOARD", True),  # generate source/edited storyboard contact sheets
     "storyboard_max_tiles": env_int("STORYBOARD_MAX_TILES", 30, minimum=1),  # cap tiles per sheet for legibility
     "storyboard_columns": env_int("STORYBOARD_COLUMNS", 6, minimum=1),  # tile grid columns
@@ -204,7 +203,7 @@ CONFIG = {
     "speech_rate": env_float("SPEECH_RATE", 3.9, minimum=0.5),  # 旧值 3.5 系统性偏低 ~10-17%
     "speech_safety_margin": env_float("SPEECH_SAFETY_MARGIN", 0.85, minimum=0.1),  # 保守系数：TTS 实际语速有 ±20% 波动
     # Block-coverage lint thresholds — promoted from inline .get() literals to real CONFIG keys (tunable; defaults unchanged)
-    "narration_coverage_target": 0.7,   # aim ~70% narrated:original (7:3)
+    "narration_coverage_target": 0.7,   # rough first-draft/diagnostic fallback; content-led audio decisions may differ (not a quota)
     "narration_coverage_min": 0.5,      # below this coverage → under_narrated
     "narration_block_seconds": 9.0,     # block cadence used to derive target block count
     "original_block_min_seconds": 2.5,  # a deliberate original-audio gap must be at least this long

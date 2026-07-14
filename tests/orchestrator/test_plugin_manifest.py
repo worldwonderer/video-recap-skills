@@ -2,9 +2,10 @@
 the 4 pure-tool stage skills are hidden (user-invocable: false) so video-recap is the router,
 and marketplace.json is the single Claude-compatible marketplace catalog (also imported by
 OpenClaw's `plugins install`); the plugin version stays single-sourced in plugin.json (bump it
-on each shipped change so installed users receive the update)."""
+during explicit release preparation so installed users receive each shipped version)."""
 import json
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -13,6 +14,9 @@ def test_plugin_manifest_has_exactly_four_keys():
     manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     assert set(manifest.keys()) == {"name", "version", "description", "author"}
     assert manifest["name"] == "video-recap-skills"
+    assert re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", manifest["version"])
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert f"## [{manifest['version']}]" in changelog
 
 
 def test_marketplace_json_present_and_valid():
@@ -32,14 +36,51 @@ def test_marketplace_json_present_and_valid():
     assert "version" not in entry
 
 
-def test_stage_skills_hidden_router_visible():
-    def fm(skill):
-        return (ROOT / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
-    for hidden in ("video-understanding", "video-cut", "video-voiceover", "video-assemble"):
-        assert "user-invocable: false" in fm(hidden), f"{hidden} should be hidden"
-    for visible in ("video-script", "video-recap"):
-        assert "user-invocable: false" not in fm(visible), f"{visible} should stay invocable"
+def _frontmatter(skill_name):
+    path = ROOT / "skills" / skill_name / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    match = re.match(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n|\Z)", text, re.DOTALL)
+    assert match, f"{path} must start with YAML frontmatter"
+
+    values = {}
+    for line in match.group(1).splitlines():
+        if not line or line[0].isspace():
+            continue
+        key, separator, raw_value = line.partition(":")
+        assert separator, (path, line)
+        value = raw_value.strip()
+        if value in {"true", "false"}:
+            values[key] = value == "true"
+        else:
+            values[key] = value.strip("\"'")
+    return values
 
 
-def test_config_playbook_exists():
-    assert (ROOT / "skills" / "video-recap" / "references" / "config-playbook.md").exists()
+def test_every_discovered_skill_has_matching_frontmatter_identity():
+    skill_dirs = sorted(
+        path
+        for path in (ROOT / "skills").iterdir()
+        if path.is_dir() and (path / "SKILL.md").is_file()
+    )
+    assert skill_dirs
+    for skill_dir in skill_dirs:
+        frontmatter = _frontmatter(skill_dir.name)
+        assert frontmatter.get("name") == skill_dir.name
+        if "user-invocable" in frontmatter:
+            assert isinstance(frontmatter["user-invocable"], bool)
+
+
+def test_skill_frontmatter_exposes_only_the_router_and_writing_skill():
+    expected_invocability = {
+        "video-recap": True,
+        "video-script": True,
+        "video-understanding": False,
+        "video-cut": False,
+        "video-voiceover": False,
+        "video-assemble": False,
+    }
+
+    for skill_name, expected in expected_invocability.items():
+        frontmatter = _frontmatter(skill_name)
+        assert frontmatter["name"] == skill_name
+        assert frontmatter.get("user-invocable", True) is expected

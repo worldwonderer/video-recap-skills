@@ -3,7 +3,6 @@ import importlib.util
 import json
 import math
 import re
-import shlex
 from pathlib import Path
 
 from lib import CONFIG, file_fingerprint, stable_hash
@@ -12,7 +11,7 @@ from lib import log
 try:
     from deslop_qc import analyze_deslop_qc
 except ModuleNotFoundError:
-    _deslop_qc_path = Path(__file__).resolve().parents[1].parent / "video-script" / "scripts" / "deslop_qc.py"
+    _deslop_qc_path = Path(__file__).with_name("deslop_qc.py")
     _deslop_qc_spec = importlib.util.spec_from_file_location("deslop_qc", _deslop_qc_path)
     if _deslop_qc_spec is None or _deslop_qc_spec.loader is None:
         raise
@@ -558,12 +557,9 @@ def lint_narration(narration, scenes_analysis=None, *, clip_plan=None, mode="ful
             ))
 
     # Block-coverage check (full mode only; cut-mode density is measured on the mapped output
-    # timeline, not the source timestamps used here). Model: narration is delivered in BLOCKS — each
-    # beat is a few sentences synthesized as ONE fluent TTS utterance — and the deliberate stretches
-    # BETWEEN blocks are "original-audio blocks" that play at full volume. We aim for roughly 7:3
-    # narrated:original, so we flag (a) wall-to-wall narration that never lets the original breathe,
-    # (b) long under-narrated stretches, (c) no deliberate original-audio gaps at all, and (d) beats
-    # fragmented into single short sentences that would synthesize as choppy per-sentence audio.
+    # timeline, not the source timestamps used here). Coverage is diagnostic, not a creative quota:
+    # flag wall-to-wall or sparse drafts so the Agent consciously checks the visual/audio board,
+    # plus missing original-audio gaps and fragmented one-sentence TTS blocks.
     metrics = {}
     if mode == "full" and len(sorted_segments) >= 2:
         span = sorted_segments[-1]["end"] - sorted_segments[0]["start"]
@@ -601,15 +597,16 @@ def lint_narration(narration, scenes_analysis=None, *, clip_plan=None, mode="ful
             warnings.append(_lint_issue(
                 "warning", None, "no_original_blocks",
                 "Narration is nearly wall-to-wall — the original audio never gets to breathe. Pull back at a "
-                "few strong moments and write NO narration there so the original plays at full volume "
-                "(aim ~7:3 narrated:original).",
+                "few strong moments and write NO narration there so the original plays at full volume. "
+                "Choose those moments by audio_owner, not by a fixed ratio.",
                 narration_coverage=round(coverage, 2), coverage_max=cov_max,
             ))
         elif coverage < cov_min:
             warnings.append(_lint_issue(
                 "warning", None, "under_narrated",
-                "Large stretches have no narration — the recap goes quiet too long. Add blocks so narration "
-                "covers most of the timeline (aim ~7:3 narrated:original).",
+                "Narration coverage is sparse. This is not automatically wrong: verify that every long gap is "
+                "intentionally owned by original dialogue/action/ambience/music/silence in visual_audio_board.json. "
+                "Only add a block when it has a specific narration job.",
                 narration_coverage=round(coverage, 2), coverage_min=cov_min,
             ))
         if original_blocks == 0 and span >= 3 * orig_min:
@@ -1224,8 +1221,8 @@ _ASR_SPAN_TOL = 0.05
 
 
 def _clean_asr_fresh(out_path, source_path):
-    # canonical: understand._fresh — inlined so video-script's byte-identical narration.py
-    # copy (which cannot import a video-understanding module) stays in lockstep.
+    # Local freshness check kept inline so the separately shipped byte-identical copy
+    # stays self-contained and in lockstep.
     try:
         return out_path.exists() and source_path.exists() and (
             out_path.stat().st_mtime >= source_path.stat().st_mtime)
@@ -1469,8 +1466,8 @@ def _format_optional_stage_warnings(work_dir, *, mimo_overview_enabled=None, mim
 def _parse_target_seconds(value):
     """Parse a cut-mode target duration ("30m" / "600" / "1h5m" / "00:30:00") to seconds.
 
-    Mirrors video-cut's parser closely enough to size the brief; returns None on anything
-    unparseable so the brief simply falls back to the source duration.
+    Mirrors the local clip-plan contract closely enough to size the brief; returns None
+    on unparseable input so the brief simply falls back to the source duration.
     """
     if value is None:
         return None
@@ -1760,9 +1757,8 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
             target_seconds = _parse_target_seconds(CONFIG.get("target_duration"))
             if target_seconds:
                 output_seconds = min(video_duration, target_seconds)
-    # Block count from coverage, not beats/min: narrate ~coverage_target of the timeline in blocks of
-    # ~block_seconds each, leaving the rest as original-audio blocks. Big blocks ⇒ far fewer beats
-    # than the old per-sentence model (a 5min recap ⇒ ~20 blocks, not ~48 sentences).
+    # A loose first-draft timing fallback, not a creative quota. The Agent's beat map and audio-owner
+    # decisions determine the real count; this only prevents accidental per-sentence fragmentation.
     cov_target = CONFIG.get("narration_coverage_target", 0.7)
     block_seconds = CONFIG.get("narration_block_seconds", 9.0)
     target_count = max(1, round(output_seconds * cov_target / block_seconds))
@@ -1794,36 +1790,37 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         )
     else:
         lines.append(
-            "- Narration in BLOCKS, ~7:3. Write narration as BLOCKS — each beat is a few sentences (one "
-            "continuous thought) that gets synthesized as ONE fluent TTS utterance. Aim for narration to "
-            "cover roughly 70% of the timeline and leave ~30% as deliberate ORIGINAL-AUDIO blocks: "
-            "multi-second gaps with NO narration where a strong original moment (a key line, an action beat, "
-            "the music) plays at full volume."
+            "- Content-led audio allocation. Assign every beat to picture/original dialogue/action sound/"
+            "ambience/music/silence/narration BEFORE writing prose. When narration owns a beat, write it as "
+            "one fluent BLOCK. A 7:3 narration/original split is only a rough fallback when the material gives "
+            "no clearer answer; it is not a quota or quality target."
         )
         lines.append(
-            "- A block alternates with an original block: speak a block, then step back for a few seconds and "
-            "let the scene play, then the next block. What is FORBIDDEN is the per-sentence stutter — one "
-            "short sentence, a gap, one short sentence, a gap — and wall-to-wall talk that never lets the "
-            "original breathe. Size each block's window to its own text (chars / the speech budget above)."
+            "- Narration must have a job: context, causal_link, foreshadow, interpretation, or transition. "
+            "Use none when picture, original audio, or silence already carries the beat. Avoid per-sentence "
+            "stutter and wall-to-wall talk; size each authored block to its text and dramatic task."
         )
     if edit_mode == "cut":
         lines.append(
-            f"- Aim for {beat_count_phrase} narration BLOCKS across the ~{output_label} CUT OUTPUT "
-            f"(sized to the kept clips, NOT the {source_label} source), ~7:3 over the original audio"
+            f"- Timing fallback only: {beat_count_phrase} narration BLOCKS across the ~{output_label} CUT OUTPUT "
+            f"(sized to the kept clips, NOT the {source_label} source). The beat map may justify fewer or more; never pad to hit this number."
         )
     else:
         lines.append(
-            f"- Aim for {beat_count_phrase} narration BLOCKS across the timeline, ~7:3 narrated:original audio"
+            f"- Timing fallback only: {beat_count_phrase} narration BLOCKS across the timeline. "
+            "The beat map and audio owners decide the real count; never pad to hit this number."
         )
     lines.extend([
         f"- Default pause between beats: {target_pause_ms}ms",
         f"- Context: {CONFIG.get('context_info') or '(none)'}",
         "",
-        "## Shared expression / packaging artifacts",
+        "## Creative decisions before expression / packaging",
         "",
-        "Before final narration, author `style_card.json` and `packaging_plan.json` from `--style`, `--context`, source materials, ASR, scene evidence, and user preference signals.",
-        "- `style_card.json` owns freeform voice, pacing, payoff shape, subtitle/read posture, and evidence-backed expression intent. It is not a preset enum, fixed taxonomy, title plan, cover plan, or packaging promise.",
-        "- `packaging_plan.json` owns title, cover-frame/visual hook, first-line, viewer promise, packaging metadata, and packaging-to-story alignment. It must not override `style_card.json` voice or pacing policy.",
+        "Before `clip_plan.json` or final narration, author `recap_story_plan.json` and `visual_audio_board.json` from the director intent, competing hypotheses, beat changes, and picture/audio decisions described below.",
+        "- `recap_story_plan.json` owns director intent, at least two editorial hypotheses, the chosen POV/spine, and beats defined by changes in knowledge/power/goal/relationship/emotion/risk.",
+        "- `visual_audio_board.json` owns the exact picture/performance/reaction, entry/exit reason, original-audio anchor, `audio_owner`, and `narration_job` for each beat.",
+        "- Only after the story/edit decisions are coherent, author `style_card.json` from `--style`, evidence, and user preference. It owns voice and pacing, not story structure, and is not a preset enum, fixed taxonomy, title plan, or packaging promise.",
+        "- `packaging_plan.json` is optional and deferred until content lock unless the user explicitly asks for packaging. It must express the story's truthful promise, never drive or distort it.",
         "- `deslop_qc.json` is deterministic report-only tool QC: do not hand-author it, do not treat it as an AIGC detector, and do not auto-rewrite from it. Corrections remain human/agent rewrite work guided by objective blockers and advisory readability signals.",
         "",
     ])
@@ -1874,9 +1871,11 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
             # rendered, so it can be written against the real OUTPUT timeline — no source->output
             # mapping, no silent drop/clamp, no desync.
             lines.extend([
-                "## Cut mode — step 1 of 2: write `clip_plan.json` ONLY",
+                "## Cut mode — step 1 of 2: direct the story, then write `clip_plan.json` ONLY",
                 "",
-                f"Goal: a ~{output_label} recap cut from a {source_label} source. First choose the footage; the CLI",
+                f"Goal: a ~{output_label} recap cut from a {source_label} source. First compare two editorial hypotheses,",
+                "choose the viewer promise/POV/dramatic question, and write `recap_story_plan.json` + `visual_audio_board.json`.",
+                "Then choose the footage; the CLI",
                 "then renders the cut and asks you to narrate against that real output. Do NOT write narration.json yet.",
                 "How to choose clips (use the Scene timing guide + ASR + index below):",
                 "- Build ONE complete arc: a hook, the key turns of the plot, and a cliffhanger/payoff at the end — not a flat highlights reel.",
@@ -1884,8 +1883,8 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
                 "- SKIP non-story footage: 片头/片尾 credits, 演职员表, 广告/赞助, 台标/水印 stretches, and any scene the analysis marks rejected/无法描述 (often a watermark) — they look bad on screen and add nothing.",
                 "- Prefer scenes that have a real visual description in the guide; favor faces, action and dialogue over scenery.",
                 "- Clip order is the story spine, not unordered highlights: you may use 0–1 optional cold-open/high-impact clip first, then return to the coherent main arc (setup → turn → payoff) and escalate to the ending.",
-                "- Use the `reason` field as craft intent where useful: `cold_open`, `setup`, `turn`, or `payoff` plus a short concrete why. Example: `cold_open: trial explosion reveals the stakes`.",
-                "- Clip length ~3–15s; vary the pace; after any cold-open, order clips by causality so the cut reads as one coherent story, not a flat highlights reel.",
+                "- Use `reason` to preserve the actual edit decision: `beat_id | function | change | POV | preferred moment | 入点 | 出点`, not merely 'important plot'. Function is `cold_open`, `setup`, `turn`, `escalation`, or `payoff`.",
+                "- Clip length follows the moment. Vary pace; after any cold-open, order clips by causality so the cut reads as one coherent story, not a flat highlights reel.",
                 "- End a clip on a COMPLETE spoken line — set the clip end at or just after an ASR line-end (or inside the quiet window that follows it), never mid-sentence, so the original dialogue is never chopped off. Use the ASR [start–end] times + Quiet windows below as safe cut points; the CLI also snaps clip ends to the nearest line-end as a safety net.",
                 "",
                 "### clip_plan.json shape (original source timestamps)",
@@ -1894,7 +1893,7 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
                 "{",
                 f"  \"target_duration\": \"{cut_target_example}\",",
                 "  \"clips\": [",
-                "    {\"start\": 12.0, \"end\": 38.0, \"reason\": \"关键冲突开端\"}",
+                "    {\"start\": 12.0, \"end\": 38.0, \"reason\": \"b01 | hook | knowledge: unknown→threat | POV=主角 | 保留倾听反应 | 入点=问题已问出 | 出点=沉默落地\"}",
                 "  ]",
                 "}",
                 "```",
@@ -1905,15 +1904,16 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
             lines.extend([
                 "## Cut mode — step 2 of 2: write `narration.json` in OUTPUT time",
                 "",
+                "Inspect the edited storyboard first. Update `visual_audio_board.json` with OUTPUT ranges and re-assign `audio_owner` / `narration_job` based on the cut that actually exists.",
                 f"The cut is rendered as `edited_source.mp4` (~{output_label}). Write narration timed to THAT output",
                 "timeline (0 .. total), NOT the original source — your timestamps play exactly where you put them, with",
                 "no mapping and no dropping. Use the kept-clip OUTPUT ranges above to know what is on screen when, tell",
-                "one continuous arc across the cut, and aim for the density guide in the header.",
+                "one continuous arc across the cut, following the planned beat and audio-owner decisions.",
                 "",
                 "### narration.json shape (OUTPUT timestamps, 0..total)",
                 "",
-                "Each beat is a BLOCK (a few sentences spoken as one fluent utterance); size end-start to the",
-                "block's text, then leave a few-second gap before the next block for an original-audio moment.",
+                "Each authored narration item is one fluent BLOCK; beats owned by picture, original audio, or silence",
+                "have no narration item. Size end-start to the text and preserve every planned original-audio anchor.",
                 "```json",
                 "[",
                 "  {\"start\": 2.0, \"end\": 13.0, \"narration\": \"【主角】表面只是旁观者，暗中却握着关键线索。这一次，TA要赌上全部去查清旧案真相。\", \"pause_after_ms\": 250, \"overlaps_speech\": true, \"emotion\": \"紧张\"}",
@@ -1924,8 +1924,9 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         lines.extend([
             "## Required JSON shape",
             "",
-            "Each beat is a BLOCK (a few sentences spoken as one fluent utterance); size end-start to the",
-            "block's text, then leave a few-second gap before the next block for an original-audio moment.",
+            "Before narration, write `recap_story_plan.json` and `visual_audio_board.json`, then use the board to decide which planned beats need narration.",
+            "beat 对应关系记录在 `visual_audio_board.json`；`narration.json` 仍只承载时间、文本与朗读参数，不声明 CLI 会校验计划映射。",
+            "Each authored narration item is one fluent BLOCK; beats owned by picture, original audio, or silence have no narration item.",
             "```json",
             "[",
             "  {\"start\": 5.0, \"end\": 16.0, \"narration\": \"【主角】表面只是旁观者，暗中却握着关键线索。这一次，TA要赌上全部去查清旧案真相。\", \"pause_after_ms\": 250, \"overlaps_speech\": true, \"emotion\": \"平静\"}",
@@ -1935,19 +1936,19 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
 
     lines.extend([
         "",
-        "## Writing rules (block recap style)",
+        "## Writing rules (creative decisions first; blocks are delivery form)",
         "",
-        "1. Narrate in BLOCKS, ~7:3. Tell the story as a sequence of narration BLOCKS over the original audio; in cut mode that means across the kept clips, in output order. Leave ~30% of the timeline as deliberate original-audio blocks (no narration) where a strong moment plays at full volume.",
-        "2. Follow the density line near the top of this brief: it already accounts for thin substrate and cut output. Narration should cover most (~70%) of the timeline, but never pad with filler just to hit a number; a meaningful block beats a filler block.",
-        "3. Default `overlaps_speech` to true. The CLI auto-marks a beat as non-overlapping only when it actually lands inside a real silent window.",
-        "4. Make each beat a BLOCK of 2-4 COMPLETE sentences (one continuous thought), NOT a lone short fragment — the whole block is synthesized in ONE TTS call, so write it to read aloud naturally end-to-end; that connected prosody is what makes the voice flow instead of sounding choppy. Size its end-start to fit the block's text at the speech budget above.",
-        "5. Do not describe what the viewer can already see; explain intent, stakes, subtext, relationships, and story logic.",
-        "6. Keep timing visually local: anchor each block's start/end to the stretch of footage it covers; don't let a block run far past what is on screen.",
-        "7. In cut mode, select clips for plot causality, key dialogue, reveals, and emotional turns; avoid filler and repeated shots.",
-        "8. Give every block an `emotion` that fits its whole arc; keep it STEADY across the block (it is one utterance) and shift only at a real emotional turn between blocks. Use a calm base (平静/深沉/严肃) for most of a section and save 震惊/悲伤/紧张 for the actual turns.",
-        "9. Between blocks, leave a gap of a few seconds with NO narration so the original audio plays alone — pick those spots at genuinely strong original moments, not arbitrarily. BRIDGE them: the block right BEFORE a gap must lead INTO that original moment (end on a line that makes the viewer want to hear what comes next), and the block right AFTER it must pick UP / react to what the original just said or showed — the narration and the original it brackets are ONE continuous beat, not 各说各的.",
+        "1. Assign `audio_owner` and `narration_job` before prose. No clear narration job means no narration for that beat.",
+        "2. When narration owns a beat, write one BLOCK of 2-4 COMPLETE sentences as a continuous thought for one TTS call; never fragment it into one-sentence utterances.",
+        "3. 7:3 is a rough fallback, never a coverage quota. A strong dialogue/performance/action/silence beat may contain no narration; an exposition bridge may be narration-led.",
+        "4. Default `overlaps_speech` to true only for authored narration windows. Do not cover a must-hear original-audio anchor; leave that beat un-narrated or place narration around it.",
+        "5. Do not describe what the viewer can already see; narration may add context, causal links, foreshadowing, evidence-grounded interpretation, or transitions.",
+        "6. Keep timing visually local: anchor each block to the planned beat and exact footage it covers; don't let prose run past the change it explains.",
+        "7. Preserve performance: consider the listener/reaction instead of the speaker/action, and leave enough time for an irreplaceable look, pause, mistake, or action sound to land.",
+        "8. Give every block an `emotion` that fits its whole arc; keep it STEADY across the block and shift only at a real emotional turn between blocks.",
+        "9. Bridge narration and original audio as one dramatic beat: tee up a must-hear moment before it plays, then let the next block react to the change it caused.",
         "10. 不要在解说文本里使用破折号（——、—）：破折号烧进字幕里很突兀，该停顿就用逗号，该断句就用句号；同理 `original_subtitles.json` 里也不要用破折号。",
-        f"11. After writing, run: `python3 {shlex.quote(str(Path(__file__).resolve().parents[2] / 'video-recap' / 'scripts' / 'recap.py'))} <video> --work-dir <work_dir>`.",
+        "11. 写完后停止并把控制权交还调用方；本技能只写工作产物，不调用其他技能脚本。",
         "",
         "## 原声留白字幕 `original_subtitles.json`（校对原声台词）",
         "",
@@ -1967,8 +1968,8 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         "",
         "## Recap craft (what separates a real recap from captions)",
         "",
-        "- Hook: the first 1-2 beats must create a question or stakes, not set the scene. Make the viewer need the next line.",
-        "- Through-line: pick ONE spine (a goal, a relationship, a mystery) and let every beat advance it; don't reset each scene.",
+        "- Hook: the opening must create a truthful dramatic question or stakes that this edit actually pays off; do not manufacture an unrelated retention line.",
+        "- Through-line: follow the chosen POV/spine from `recap_story_plan.json`; every beat must change knowledge, power, goal, relationship, emotion, or risk.",
         "- Escalation: raise the stakes or reveal new information as you go; later beats should land harder than earlier ones.",
         "- Curiosity gaps: tease consequences before they happen (\"他还不知道，这一步会要命\") and pay them off later.",
         "- Payoff: the final 1-2 beats must resolve or twist the spine, leaving an aftertaste — never trail off on a generic line.",
@@ -1976,7 +1977,9 @@ def build_agent_brief(scenes_analysis, asr_result, silence_periods, video_durati
         "- Voice: concrete nouns and verbs, specific names; cut adjectives and vague grandeur (\"危机四伏\"/\"震撼人心\" are filler).",
         "- Use the real names, relationships and stakes from the Story context / index above — never generic labels like 男子/白衣女子.",
         "- Show motive and consequence, not actions: say WHY a character does it and what it costs, not what they are doing on screen.",
+        "- Performance: when the reaction carries more emotion than the line, let the reaction own the picture and avoid explaining it away.",
         "- 衔接 hand-off: a narration block and the original-audio gap beside it are ONE beat — tee up the original before it plays, then have the next block answer what it showed; never let a block end self-contained and the original come in cold.",
+        "- Counterfactual review before TTS: remove each beat, compare speaker vs listener, mute narration, listen audio-only, and replace prose with original audio/silence where that is stronger. Apply the 1-3 highest-return changes first.",
         "",
         "看图说话 (bad) vs recap (good) — same shot:",
         "- ✗ \"一个蒙眼的男人抱着一个篮子走在雨里。\"  (just describes the frame)",

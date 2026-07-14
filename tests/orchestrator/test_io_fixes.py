@@ -2,6 +2,7 @@ import sys
 import os
 from argparse import Namespace
 from pathlib import Path
+import re
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-recap' / 'scripts'))
 import json
 import pytest  # noqa: F401
@@ -1375,10 +1376,20 @@ def test_multi_source_briefs_include_clip_and_narration_craft(tmp_path):
 
     recap._write_multi_source_clip_brief(work, records, args)
     clip_text = (work / "agent_narration_brief.md").read_text(encoding="utf-8")
-    assert "cold-open/high-impact" in clip_text
-    assert "story spine" in clip_text
-    assert "cold_open" in clip_text and "setup" in clip_text and "turn" in clip_text and "payoff" in clip_text
-    assert "source work_dir" in clip_text and "sources/<source_id>" in clip_text
+    clip_headings = set(re.findall(r"(?m)^## (.+)$", clip_text))
+    clip_examples = [json.loads(raw) for raw in re.findall(r"```json\s*\n(.*?)\n```", clip_text, re.DOTALL)]
+    clip_example = next(item for item in clip_examples if isinstance(item, dict) and "clips" in item)
+    reason_parts = [part.strip() for part in clip_example["clips"][0]["reason"].split("|")]
+
+    assert {"创作决定", "必须写入的格式", "Sources"} <= clip_headings
+    assert "recap_story_plan.json" in clip_text and "visual_audio_board.json" in clip_text
+    assert len(reason_parts) == 7
+    assert reason_parts[0].startswith("b")
+    assert "→" in reason_parts[2]
+    assert reason_parts[3].startswith("POV=")
+    assert reason_parts[-2].startswith("入点=")
+    assert reason_parts[-1].startswith("出点=")
+    assert "sources/<source_id>" in clip_text
 
     plan = work / "clip_plan_validated.json"
     plan.write_text(json.dumps({"clips": [{
@@ -1388,10 +1399,37 @@ def test_multi_source_briefs_include_clip_and_narration_craft(tmp_path):
     }]}), encoding="utf-8")
     recap._write_multi_source_output_brief(work, records, plan)
     out_text = (work / "agent_narration_brief.md").read_text(encoding="utf-8")
-    assert "OUTPUT timeline" in out_text
-    assert "BLOCKS" in out_text and "story spine" in out_text
-    assert "original-audio gaps" in out_text
-    assert "source work_dir" in out_text
+    output_headings = set(re.findall(r"(?m)^## (.+)$", out_text))
+    narration_example = next(
+        item
+        for item in (json.loads(raw) for raw in re.findall(r"```json\s*\n(.*?)\n```", out_text, re.DOTALL))
+        if isinstance(item, list)
+    )
+
+    assert {"更新创作决定", "narration.json 格式", "Kept clips (output → source)"} <= output_headings
+    assert set(narration_example[0]) == {"start", "end", "narration", "pause_after_ms", "overlaps_speech", "emotion"}
+    assert "visual_audio_board.json" in out_text
+    assert "audio_owner" in out_text and "narration_job" in out_text
+    assert "7:3" in out_text and "不是配额" in out_text
+    assert "OUTPUT 时间线" in out_text
+
+
+def test_multi_source_excerpt_preserves_source_evidence_from_a_long_brief(tmp_path):
+    brief = tmp_path / "agent_narration_brief.md"
+    unique_fact = "SOURCE_FACT_女主在雨中把钥匙交给弟弟"
+    brief.write_text(
+        "# Agent Narration Brief\n\n"
+        + ("通用写作说明，不是本片证据。\n" * 300)
+        + "\n## Scene timing guide\n\n"
+        + f"- 12.0–18.0s: {unique_fact}\n",
+        encoding="utf-8",
+    )
+
+    excerpt = recap._brief_excerpt(brief, limit=1200)
+
+    assert len(excerpt) <= 1200
+    assert "## Scene timing guide" in excerpt
+    assert unique_fact in excerpt
 
 
 def test_cut_qc_summary_surfaces_and_blocks_failures(tmp_path, capsys):
