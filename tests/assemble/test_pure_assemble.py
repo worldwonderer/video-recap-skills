@@ -4,9 +4,70 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-a
 import json
 import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
-from assemble import _split_subtitle_chunks, _subtitle_entries, _adjust_tts_speed, _apply_narration_speed, _assembly_manifest_payload, _build_audio_filter_complex, _build_timed_narration, _build_video_clips, _emit_timeline, _resolve_final_output, _value_fingerprint, _escape_ass_text, _generate_ass, _generate_srt, _seconds_to_ass_time, _seconds_to_srt_time, _source_subtitle_mask_filter, _subtitle_burn_filter, _output_downscale_filter, assemble_video, assembly_settings_fingerprint, final_loudnorm_filter
+import assembly_contract
+import audio_mix
+import media
+import narration_audio
+import render_preflight
+import source_subtitles
+import subtitle_render
+import timeline_emit
+import visual_render
+from artifacts import _value_fingerprint
+from assemble import assemble_video
+from assembly_contract import _resolve_final_output
+from assembly_settings import assembly_settings_fingerprint
+from audio_mix import _build_audio_filter_complex, final_loudnorm_filter
+from media import _build_video_clips
+from subtitle_core import _split_subtitle_chunks, _subtitle_entries, _seconds_to_ass_time, _seconds_to_srt_time
+from subtitle_render import _escape_ass_text, _generate_ass, _generate_srt
+from timeline_emit import _emit_timeline
+from visual_render import _output_downscale_filter, _source_subtitle_mask_filter, _subtitle_burn_filter
 from lib import CONFIG
 import assemble
+
+
+def _assembly_manifest_payload(input_video, tts_segments, work_dir, output_path,
+                               tts_meta_path=None, final_output=None):
+    return assembly_contract._assembly_manifest_payload(
+        input_video,
+        tts_segments,
+        work_dir,
+        output_path,
+        tts_meta_path=tts_meta_path,
+        final_output=final_output,
+        settings_fingerprint=assembly_settings_fingerprint,
+    )
+
+
+def _adjust_tts_speed(*args, **kwargs):
+    return narration_audio._adjust_tts_speed(
+        *args,
+        command_runner=narration_audio.run_cmd,
+        duration_probe=narration_audio.get_video_duration,
+        logger=narration_audio.log,
+        **kwargs,
+    )
+
+
+def _apply_narration_speed(*args, **kwargs):
+    return narration_audio._apply_narration_speed(
+        *args,
+        command_runner=narration_audio.run_cmd,
+        duration_probe=narration_audio.get_video_duration,
+        logger=narration_audio.log,
+        **kwargs,
+    )
+
+
+def _build_timed_narration(*args, **kwargs):
+    return narration_audio._build_timed_narration(
+        *args,
+        adjust_speed=narration_audio._adjust_tts_speed,
+        command_runner=narration_audio.run_cmd,
+        logger=narration_audio.log,
+        **kwargs,
+    )
 
 
 def _volume_expr_from_filter(filter_complex):
@@ -45,8 +106,8 @@ def test_adjust_tts_speed_derives_outputs_from_audio_name_only(monkeypatch, tmp_
         Path(cmd[-1]).write_bytes(b"adjusted")
         return CompletedProcess(cmd, 0, "", "")
 
-    monkeypatch.setattr("assemble.get_video_duration", lambda path: 2.2 if Path(path) == src else 2.0)
-    monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
+    monkeypatch.setattr(narration_audio, "get_video_duration", lambda path: 2.2 if Path(path) == src else 2.0)
+    monkeypatch.setattr(narration_audio, "run_cmd", fake_run_cmd)
 
     adjusted, actual_dur, meta = _adjust_result_parts(
         _adjust_tts_speed(src, target_duration=2.0, work_dir=tmp_path)
@@ -72,8 +133,8 @@ def test_adjust_tts_speed_no_safe_fit_keeps_source_audio_and_metadata(monkeypatc
 
     monkeypatch.setitem(CONFIG, "narration_speed", 1.2)
     monkeypatch.setitem(CONFIG, "narration_cumulative_tempo_max", 1.35)
-    monkeypatch.setattr("assemble.get_video_duration", lambda path: 10.0 if Path(path) == src else 1.0)
-    monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
+    monkeypatch.setattr(narration_audio, "get_video_duration", lambda path: 10.0 if Path(path) == src else 1.0)
+    monkeypatch.setattr(narration_audio, "run_cmd", fake_run_cmd)
 
     adjusted, actual_dur, meta = _adjust_result_parts(
         _adjust_tts_speed(src, target_duration=1.0, work_dir=tmp_path)
@@ -214,6 +275,7 @@ def test_assemble_main_applies_explicit_measured_subtitle_band(monkeypatch, tmp_
             "mask": CONFIG["mask_source_subtitles"],
             "policy": CONFIG["source_subtitle_mask_policy"],
             "declared": CONFIG["source_subtitle_mask_policy_declared"],
+            "opacity": CONFIG["subtitle_mask_opacity"],
         })
         Path(output_path).write_bytes(b"mp4")
         return output_path
@@ -224,9 +286,10 @@ def test_assemble_main_applies_explicit_measured_subtitle_band(monkeypatch, tmp_
         "mask_source_subtitles": False,
         "source_subtitle_mask_policy": "off",
         "source_subtitle_mask_policy_declared": False,
+        "subtitle_mask_opacity": 0.6,
     }.items():
         monkeypatch.setitem(CONFIG, key, value)
-    monkeypatch.setattr(assemble, "_preflight_burn_subtitles", lambda: None)
+    monkeypatch.setattr(render_preflight, "_preflight_burn_subtitles", lambda: None)
     monkeypatch.setattr(assemble, "assemble_video", fake_assemble)
     monkeypatch.setattr(sys, "argv", [
         "assemble.py", str(video), "--work-dir", str(work),
@@ -241,7 +304,43 @@ def test_assemble_main_applies_explicit_measured_subtitle_band(monkeypatch, tmp_
         "mask": True,
         "policy": "opt_in",
         "declared": True,
+        "opacity": 1.0,
     }
+
+
+def test_assemble_main_preserves_explicit_measured_mask_opacity(monkeypatch, tmp_path):
+    video = tmp_path / "input.mp4"
+    video.write_bytes(b"video")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "tts_meta.json").write_text('{"segments": []}', encoding="utf-8")
+    captured = {}
+
+    def fake_assemble(input_video, tts_segments, work_dir, output_path):
+        captured["opacity"] = CONFIG["subtitle_mask_opacity"]
+        Path(output_path).write_bytes(b"mp4")
+        return output_path
+
+    for key, value in {
+        "subtitle_y_top": -1,
+        "subtitle_y_bot": -1,
+        "mask_source_subtitles": False,
+        "source_subtitle_mask_policy": "off",
+        "source_subtitle_mask_policy_declared": False,
+    }.items():
+        monkeypatch.setitem(CONFIG, key, value)
+    monkeypatch.setenv("SUBTITLE_MASK_OPACITY", "0.75")
+    monkeypatch.setitem(CONFIG, "subtitle_mask_opacity", 0.75)
+    monkeypatch.setattr(render_preflight, "_preflight_burn_subtitles", lambda: None)
+    monkeypatch.setattr(assemble, "assemble_video", fake_assemble)
+    monkeypatch.setattr(sys, "argv", [
+        "assemble.py", str(video), "--work-dir", str(work),
+        "--subtitle-y-top", "610", "--subtitle-y-bot", "660",
+    ])
+
+    assemble.main()
+
+    assert captured["opacity"] == 0.75
 
 
 def test_resolve_final_output_overwrites_stable_alias(tmp_path):
@@ -469,8 +568,8 @@ def test_apply_narration_speed_atempos_each_segment(monkeypatch, tmp_path):
         return CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setitem(CONFIG, "narration_speed", 1.12)
-    monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
-    monkeypatch.setattr("assemble.get_video_duration", lambda p: 4.46)
+    monkeypatch.setattr(narration_audio, "run_cmd", fake_run_cmd)
+    monkeypatch.setattr(narration_audio, "get_video_duration", lambda p: 4.46)
 
     _apply_narration_speed(segs, tmp_path)
 
@@ -488,7 +587,7 @@ def test_apply_narration_speed_noop_at_1x(monkeypatch, tmp_path):
         raise AssertionError("must not re-encode at speed 1.0")
 
     monkeypatch.setitem(CONFIG, "narration_speed", 1.0)
-    monkeypatch.setattr("assemble.run_cmd", boom)
+    monkeypatch.setattr(narration_audio, "run_cmd", boom)
     _apply_narration_speed(segs, tmp_path)
     assert segs[0]["audio_path"] == str(src)  # unchanged
 
@@ -601,6 +700,27 @@ def test_build_timed_narration_clamps_delay_to_slot(monkeypatch, tmp_path):
     assert segment["actual_place_end"] == pytest.approx(0.9, abs=0.02)
 
 
+def test_narration_start_has_no_hidden_default_delay(monkeypatch, tmp_path):
+    import wave
+
+    wav = tmp_path / "narr.wav"
+    with wave.open(str(wav), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\0\0" * 8000)
+    segment = {
+        "index": 0, "start": 5.81, "end": 7.0, "narration": "句末切入。",
+        "audio_path": str(wav), "audio_duration": 0.5,
+    }
+    monkeypatch.setitem(CONFIG, "narration_delay_seconds", 0.0)
+    monkeypatch.setitem(CONFIG, "narration_tail_pad_seconds", 0.1)
+
+    _build_timed_narration([segment], tmp_path / "out.wav", 8.0, tmp_path)
+
+    assert segment["actual_place_start"] == pytest.approx(5.81, abs=0.01)
+
+
 def test_subtitle_burn_filter_escapes_path():
     path = Path("/tmp/video recap/a:b,c[1].ass")
     filt = _subtitle_burn_filter(path)
@@ -624,9 +744,9 @@ def test_assemble_video_burns_ass_subtitles(monkeypatch, tmp_path):
 
     monkeypatch.setitem(CONFIG, "burn_subtitles", True)
     monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)  # isolate burn behavior from the mask default
-    monkeypatch.setattr("assemble.get_video_duration", lambda path: 4.0)
-    monkeypatch.setattr("assemble._build_timed_narration", lambda segments, out, duration, wd: Path(out).write_bytes(b"narration"))
-    monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
+    monkeypatch.setattr("assemble.lib.get_video_duration", lambda path: 4.0)
+    monkeypatch.setattr(narration_audio, "_build_timed_narration", lambda segments, out, duration, wd: Path(out).write_bytes(b"narration"))
+    monkeypatch.setattr("assemble.lib.run_cmd", fake_run_cmd)
 
     assemble_video(video, [{
         "start": 0.0,
@@ -671,13 +791,14 @@ def test_assemble_video_uses_filter_script_for_long_timed_mask(monkeypatch, tmp_
     monkeypatch.setitem(CONFIG, "subtitle_mask_opacity", 0.6)
     monkeypatch.setitem(CONFIG, "subtitle_y_top", 610)
     monkeypatch.setitem(CONFIG, "subtitle_y_bot", 660)
-    monkeypatch.setattr("assemble.get_video_duration", lambda path: 3800.0)
-    monkeypatch.setattr("assemble._apply_narration_speed", lambda segments, work_dir: None)
+    monkeypatch.setattr("assemble.lib.get_video_duration", lambda path: 3800.0)
+    monkeypatch.setattr(narration_audio, "_apply_narration_speed", lambda segments, work_dir: None)
     monkeypatch.setattr(
-        "assemble._build_timed_narration",
+        narration_audio,
+        "_build_timed_narration",
         lambda segments, out, duration, wd: Path(out).write_bytes(b"narration"),
     )
-    monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
+    monkeypatch.setattr("assemble.lib.run_cmd", fake_run_cmd)
 
     segments = [{
         "index": i,
@@ -712,9 +833,10 @@ def test_emit_timeline_failure_is_not_swallowed(monkeypatch, tmp_path):
     def boom(*args, **kwargs):
         raise RuntimeError("timeline schema failure")
 
-    monkeypatch.setattr("assemble._probe_canvas", lambda path: {"width": 1280, "height": 720, "fps": 30.0})
+    monkeypatch.setattr(timeline_emit, "_probe_canvas", lambda path: {"width": 1280, "height": 720, "fps": 30.0})
     monkeypatch.setattr(
-        "assemble._build_video_clips",
+        timeline_emit,
+        "_build_video_clips",
         lambda input_video, work_dir, duration_s: [{
             "source_path": str(input_video),
             "source_start": 0.0,
@@ -723,7 +845,7 @@ def test_emit_timeline_failure_is_not_swallowed(monkeypatch, tmp_path):
             "timeline_end": 1.0,
         }],
     )
-    monkeypatch.setattr("assemble.build_timeline", boom)
+    monkeypatch.setattr(timeline_emit, "build_timeline", boom)
 
     with pytest.raises(RuntimeError, match="timeline schema failure"):
         _emit_timeline(tmp_path / "input.mp4", [{"start": 0.0, "end": 1.0}], tmp_path, 1.0, False)
@@ -745,9 +867,9 @@ def test_assemble_video_without_burn_keeps_video_copy(monkeypatch, tmp_path):
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
     monkeypatch.setitem(CONFIG, "force_video_reencode", False)
     monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)  # nothing should force a re-encode here
-    monkeypatch.setattr("assemble.get_video_duration", lambda path: 4.0)
-    monkeypatch.setattr("assemble._build_timed_narration", lambda segments, out, duration, wd: Path(out).write_bytes(b"narration"))
-    monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
+    monkeypatch.setattr("assemble.lib.get_video_duration", lambda path: 4.0)
+    monkeypatch.setattr(narration_audio, "_build_timed_narration", lambda segments, out, duration, wd: Path(out).write_bytes(b"narration"))
+    monkeypatch.setattr("assemble.lib.run_cmd", fake_run_cmd)
 
     assemble_video(video, [{
         "start": 0.0,
@@ -780,9 +902,9 @@ def test_assemble_video_no_burn_ignores_source_mask_default(monkeypatch, tmp_pat
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
     monkeypatch.setitem(CONFIG, "force_video_reencode", False)
     # mask_source_subtitles left at its default (True) on purpose
-    monkeypatch.setattr("assemble.get_video_duration", lambda path: 4.0)
-    monkeypatch.setattr("assemble._build_timed_narration", lambda segments, out, duration, wd: Path(out).write_bytes(b"narration"))
-    monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
+    monkeypatch.setattr("assemble.lib.get_video_duration", lambda path: 4.0)
+    monkeypatch.setattr(narration_audio, "_build_timed_narration", lambda segments, out, duration, wd: Path(out).write_bytes(b"narration"))
+    monkeypatch.setattr("assemble.lib.run_cmd", fake_run_cmd)
 
     assemble_video(video, [{
         "start": 0.0,
@@ -1073,10 +1195,10 @@ def test_assemble_video_uses_silent_original_track_when_source_has_no_audio(monk
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
     monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)
     monkeypatch.setitem(CONFIG, "final_loudnorm", False)
-    monkeypatch.setattr("assemble.get_video_duration", lambda path: 4.0)
-    monkeypatch.setattr("assemble._has_audio_stream", lambda path: False)
-    monkeypatch.setattr("assemble._build_timed_narration", lambda segments, out, duration, wd: Path(out).write_bytes(b"narration"))
-    monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
+    monkeypatch.setattr("assemble.lib.get_video_duration", lambda path: 4.0)
+    monkeypatch.setattr(media, "_has_audio_stream", lambda path: False)
+    monkeypatch.setattr(narration_audio, "_build_timed_narration", lambda segments, out, duration, wd: Path(out).write_bytes(b"narration"))
+    monkeypatch.setattr("assemble.lib.run_cmd", fake_run_cmd)
 
     assemble_video(video, [{
         "start": 0.0,
@@ -1105,6 +1227,16 @@ def test_split_subtitle_chunks_breaks_block_into_short_one_line_pieces():
     # a short block stays a single chunk
     assert _split_subtitle_chunks("他叫范闲。", max_chars=20) == ["他叫范闲。"]
     assert _split_subtitle_chunks("   ", max_chars=20) == []
+
+
+def test_split_subtitle_chunks_balances_hard_wrap_without_orphan_character():
+    clause = "十八岁的詹姆斯在选秀夜举起骑士二十三号球衣"
+    chunks = _split_subtitle_chunks(clause, max_chars=20)
+
+    assert "".join(chunks) == clause
+    assert all(len(chunk) <= 20 for chunk in chunks)
+    assert min(map(len, chunks)) > 1
+    assert max(map(len, chunks)) - min(map(len, chunks)) <= 1
 
 
 def test_subtitle_entries_keep_timing_topology_when_stripping_display_punctuation():
@@ -1212,7 +1344,7 @@ def test_output_crf_zero_is_not_overridden_to_default():
     try:
         _lib.CONFIG["output_crf"] = 0
         importlib.reload(assemble)  # assemble reads CONFIG from the reloaded lib at call time
-        assert str(assemble.CONFIG.get("output_crf", 18)) == "0"
+        assert str(assemble.lib.CONFIG.get("output_crf", 18)) == "0"
     finally:
         importlib.reload(_lib)
         importlib.reload(assemble)
@@ -1272,8 +1404,8 @@ def test_p0_adjust_tts_speed_respects_cumulative_tempo_cap(monkeypatch, tmp_path
 
     monkeypatch.setitem(CONFIG, "narration_speed", 1.2)
     monkeypatch.setitem(CONFIG, "narration_cumulative_tempo_max", 1.35)
-    monkeypatch.setattr("assemble.get_video_duration", lambda path: 11.2 if Path(path) == src else 10.0)
-    monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
+    monkeypatch.setattr(narration_audio, "get_video_duration", lambda path: 11.2 if Path(path) == src else 10.0)
+    monkeypatch.setattr(narration_audio, "run_cmd", fake_run_cmd)
 
     out, dur, meta = _adjust_result_parts(
         _adjust_tts_speed(src, target_duration=10.0, work_dir=tmp_path, tts_rate_offset=0.05)
@@ -1300,8 +1432,8 @@ def test_p0_adjust_tts_speed_no_safe_fit_does_not_time_cut(monkeypatch, tmp_path
 
     monkeypatch.setitem(CONFIG, "narration_speed", 1.2)
     monkeypatch.setitem(CONFIG, "narration_cumulative_tempo_max", 1.35)
-    monkeypatch.setattr("assemble.get_video_duration", lambda path: 15.0 if Path(path) == src else 10.0)
-    monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
+    monkeypatch.setattr(narration_audio, "get_video_duration", lambda path: 15.0 if Path(path) == src else 10.0)
+    monkeypatch.setattr(narration_audio, "run_cmd", fake_run_cmd)
 
     out, dur, meta = _adjust_result_parts(
         _adjust_tts_speed(src, target_duration=10.0, work_dir=tmp_path, tts_rate_offset=0.05)
@@ -1338,7 +1470,7 @@ def test_p0_build_timed_narration_propagates_no_safe_fit_metadata(monkeypatch, t
     monkeypatch.setitem(CONFIG, "narration_delay_seconds", 0.0)
     monkeypatch.setitem(CONFIG, "narration_tail_pad_seconds", 0.0)
     monkeypatch.setitem(CONFIG, "narration_tighten", False)
-    monkeypatch.setattr("assemble._adjust_tts_speed", fake_adjust)
+    monkeypatch.setattr(narration_audio, "_adjust_tts_speed", fake_adjust)
     seg = {
         "index": 0,
         "start": 0.0,
@@ -1386,7 +1518,7 @@ def test_build_timed_narration_accepts_legacy_two_item_adjust_result(monkeypatch
     monkeypatch.setitem(CONFIG, "narration_delay_seconds", 0.0)
     monkeypatch.setitem(CONFIG, "narration_tail_pad_seconds", 0.0)
     monkeypatch.setitem(CONFIG, "narration_tighten", False)
-    monkeypatch.setattr("assemble._adjust_tts_speed", fake_adjust)
+    monkeypatch.setattr(narration_audio, "_adjust_tts_speed", fake_adjust)
     segment = {
         "index": 0,
         "start": 0.0,
@@ -1402,12 +1534,33 @@ def test_build_timed_narration_accepts_legacy_two_item_adjust_result(monkeypatch
     assert segment["fit_status"] == "tempo_adjusted"
     assert segment["blocking"] is False
     assert segment["placed_audio_duration"] == pytest.approx(0.8)
+    placed = Path(segment["placed_audio_path"])
+    assert placed.exists()
+    with wave.open(str(placed), "rb") as wav:
+        assert wav.getnframes() / wav.getframerate() == pytest.approx(0.8)
 
 
-def test_p0_build_timed_narration_trims_subframe_overrun_instead_of_dropping(monkeypatch, tmp_path):
-    """Regression: a rounding-level overrun (<=50ms of post-atempo tail) must be trimmed and
-    PLACED, not dropped as no_safe_fit — which would lose the whole narration block and trip
-    final QC. Previously any 0.00-0.01s overrun discarded the block."""
+def test_emit_timeline_uses_exact_placed_audio_not_longer_prefit_source(monkeypatch, tmp_path):
+    original = tmp_path / "long-prefit.wav"
+    placed = tmp_path / "complete-fitted.wav"
+    original.write_bytes(b"long")
+    placed.write_bytes(b"fit")
+    monkeypatch.setattr(timeline_emit, "_probe_canvas", lambda _: {"width": 1280, "height": 720, "fps": 30})
+    monkeypatch.setattr(timeline_emit, "_timeline_subtitle_segments", lambda *args: [])
+    monkeypatch.setitem(CONFIG, "ducking_mode", "none")
+
+    timeline = _emit_timeline(
+        tmp_path / "input.mp4",
+        [{"audio_path": str(original), "placed_audio_path": str(placed),
+          "actual_place_start": 1.0, "actual_place_end": 2.0, "narration": "完整一句。"}],
+        tmp_path, 3.0, False,
+    )
+    narration_track = next(track for track in timeline["tracks"] if track.get("name") == "narration")
+    assert narration_track["segments"][0]["source_path"] == str(placed)
+
+
+def test_build_timed_narration_never_trims_even_subframe_speech_overrun(monkeypatch, tmp_path):
+    """A few milliseconds may contain the final phoneme; block instead of trimming."""
     import wave
     wav = tmp_path / "orig.wav"
     with wave.open(str(wav), "wb") as wf:
@@ -1433,7 +1586,7 @@ def test_p0_build_timed_narration_trims_subframe_overrun_instead_of_dropping(mon
     monkeypatch.setitem(CONFIG, "narration_delay_seconds", 0.0)
     monkeypatch.setitem(CONFIG, "narration_tail_pad_seconds", 0.0)
     monkeypatch.setitem(CONFIG, "narration_tighten", False)
-    monkeypatch.setattr("assemble._adjust_tts_speed", fake_adjust)
+    monkeypatch.setattr(narration_audio, "_adjust_tts_speed", fake_adjust)
     seg = {
         "index": 0,
         "start": 0.0,
@@ -1447,11 +1600,134 @@ def test_p0_build_timed_narration_trims_subframe_overrun_instead_of_dropping(mon
 
     _build_timed_narration([seg], tmp_path / "narration.wav", 2.0, tmp_path)
 
-    assert seg["fit_status"] != "no_safe_fit"
-    assert seg.get("blocking") is not True
-    assert seg["truncate_reason"] == "tail_trim_tolerance"
-    assert seg["placed_audio_duration"] > 1.9
-    assert seg["narration"] == "一段刚好超出零点几帧的解说。"  # authored text is preserved, only the tail is trimmed
+    assert seg["fit_status"] == "no_safe_fit"
+    assert seg.get("blocking") is True
+    assert seg["truncate_reason"] == "no_safe_boundary"
+    assert seg["placed_audio_duration"] == 0.0
+    assert seg["narration"] == "一段刚好超出零点几帧的解说。"
+
+
+def test_speech_safe_fades_do_not_attenuate_edge_phonemes():
+    sample_rate = 1000
+    # Constant non-silent tone right to both edges: only the 5ms anti-click ramp is allowed.
+    tone = (1000).to_bytes(2, "little", signed=True) * 1000
+    assert narration_audio._speech_safe_fade_lengths(tone, 1000, sample_rate, 120) == (5, 5)
+
+    # 80ms trailing silence may own the fade; speech before it remains untouched.
+    with_tail = (1000).to_bytes(2, "little", signed=True) * 920 + b"\0\0" * 80
+    assert narration_audio._speech_safe_fade_lengths(with_tail, 1000, sample_rate, 120) == (5, 80)
+
+
+def test_source_handoff_restores_only_at_next_sentence_anchor(monkeypatch, tmp_path):
+    (tmp_path / "speech_boundary_anchors.json").write_text(json.dumps({
+        "sentence_anchors": [
+            {"time": 5.81, "pause_start": 5.22, "confidence": "high"},
+            {"time": 14.34, "pause_start": 13.74, "confidence": "high"},
+            {"time": 22.86, "pause_start": 22.27, "confidence": "high"},
+        ],
+    }), encoding="utf-8")
+    (tmp_path / "asr_result.json").write_text(json.dumps([
+        {"start": 0, "end": 30, "text": "持续原声。"},
+    ]), encoding="utf-8")
+    monkeypatch.setitem(CONFIG, "duck_fade_seconds", 0.3)
+    seg = {
+        "index": 0, "actual_place_start": 5.81, "actual_place_end": 12.0,
+        "overlaps_speech": True,
+    }
+
+    report = audio_mix._apply_source_sentence_handoffs([seg], tmp_path, 30.0)
+
+    assert report[0]["status"] == "sentence_boundary"
+    assert seg["source_duck_end"] == pytest.approx(13.74)
+    assert seg["source_restore_at"] == pytest.approx(14.34)
+    assert seg.get("source_handoff_blocking") is not True
+
+    expr = audio_mix._duck_envelope([seg], 1.0, 0.2, 0.12, 0.3, bridge=1.5)
+    env = {"__builtins__": {}}
+    names = {"min": min, "max": max, "between": lambda value, lo, hi: 1.0 if lo <= value <= hi else 0.0}
+    assert eval(expr, env, {**names, "t": 13.70}) == pytest.approx(0.2)
+    assert 0.2 < eval(expr, env, {**names, "t": 14.04}) < 1.0
+    assert eval(expr, env, {**names, "t": 14.34}) == pytest.approx(1.0)
+
+    from timeline import build_timeline
+    model = build_timeline(
+        {"width": 1280, "height": 720, "fps": 30}, 30.0,
+        [{"source_path": "source.mp4", "source_start": 0.0, "source_end": 30.0,
+          "timeline_start": 0.0, "timeline_end": 30.0}],
+        [{"source_path": "narr.wav", "timeline_start": 5.81, "timeline_end": 12.0,
+          "source_duck_end": 13.74, "source_restore_at": 14.34, "overlaps_speech": True}],
+        ducking={"idle": 1.0, "speech": 0.2, "quiet": 0.12, "fade": 0.3, "bridge": 1.5},
+    )
+    keyframes = model["tracks"][0]["clips"][0]["audio"]["volume_keyframes"]
+    assert {"t": 13.74, "gain": 0.2} in keyframes
+    assert {"t": 14.34, "gain": 1.0} in keyframes
+
+
+def test_source_handoff_holds_to_end_when_no_later_sentence_anchor(monkeypatch, tmp_path):
+    (tmp_path / "speech_boundary_anchors.json").write_text(json.dumps({
+        "sentence_anchors": [{"time": 22.86, "confidence": "high"}],
+    }), encoding="utf-8")
+    (tmp_path / "asr_result.json").write_text(json.dumps([
+        {"start": 0, "end": 30, "text": "持续原声。"},
+    ]), encoding="utf-8")
+    seg = {
+        "index": 0, "actual_place_start": 22.86, "actual_place_end": 27.5,
+        "overlaps_speech": True,
+    }
+
+    report = audio_mix._apply_source_sentence_handoffs([seg], tmp_path, 30.0)
+
+    assert report[0]["status"] == "held_to_timeline_end"
+    assert seg["source_duck_end"] == 30.0
+    assert seg["source_restore_at"] == 30.0
+
+    monkeypatch.setitem(CONFIG, "duck_fade_seconds", 0.3)
+    monkeypatch.setitem(CONFIG, "duck_bridge_seconds", 1.5)
+    monkeypatch.setitem(CONFIG, "idle_orig_volume", 1.0)
+    monkeypatch.setitem(CONFIG, "speech_ducking_volume", 0.2)
+    expr = audio_mix._duck_envelope([seg], 1.0, 0.2, 0.12, 0.3, bridge=1.5)
+    # Narration ended at 27.5, but source remains ducked through the timeline end.
+    assert eval(expr, {"__builtins__": {}}, {
+        "t": 29.0, "min": min, "max": max,
+        "between": lambda value, lo, hi: 1.0 if lo <= value <= hi else 0.0,
+    }) == pytest.approx(0.2)
+
+
+def test_source_handoff_blocks_unsafe_entry_and_missing_anchors_with_speech(tmp_path):
+    (tmp_path / "speech_boundary_anchors.json").write_text(json.dumps({
+        "sentence_anchors": [{"time": 10.0, "confidence": "high"}],
+    }), encoding="utf-8")
+    (tmp_path / "asr_result.json").write_text(json.dumps([
+        {"start": 0, "end": 30, "text": "持续原声。"},
+    ]), encoding="utf-8")
+    unsafe = {"index": 0, "actual_place_start": 7.0, "actual_place_end": 8.0, "overlaps_speech": True}
+    audio_mix._apply_source_sentence_handoffs([unsafe], tmp_path, 30.0)
+    assert unsafe["source_handoff_blocking"] is True
+    assert unsafe["source_entry_status"] == "unsafe_entry"
+
+    (tmp_path / "speech_boundary_anchors.json").unlink()
+    missing = {"index": 1, "actual_place_start": 7.0, "actual_place_end": 8.0, "overlaps_speech": True}
+    audio_mix._apply_source_sentence_handoffs([missing], tmp_path, 30.0)
+    assert missing["source_handoff_blocking"] is True
+    assert missing["source_entry_status"] == "anchors_unavailable"
+
+
+def test_source_handoff_blocks_entry_after_anchor_pause_has_ended(tmp_path):
+    (tmp_path / "speech_boundary_anchors.json").write_text(json.dumps({
+        "sentence_anchors": [
+            {"time": 10.0, "pause_start": 9.7, "confidence": "high"},
+            {"time": 20.0, "pause_start": 19.7, "confidence": "high"},
+        ],
+    }), encoding="utf-8")
+    (tmp_path / "asr_result.json").write_text(json.dumps([
+        {"start": 0, "end": 30, "text": "持续原声。"},
+    ]), encoding="utf-8")
+    seg = {"index": 0, "actual_place_start": 10.3, "actual_place_end": 12.0, "overlaps_speech": True}
+
+    audio_mix._apply_source_sentence_handoffs([seg], tmp_path, 30.0)
+
+    assert seg["source_handoff_blocking"] is True
+    assert seg["source_entry_status"] == "unsafe_entry"
 
 
 def test_p0_subtitles_use_spoken_text_not_authored_narration(tmp_path):
@@ -1526,7 +1802,7 @@ def test_p0_manifest_references_audio_qc_artifact(tmp_path):
 
 
 def test_p0_assembly_qc_blocks_skipped_segments(tmp_path):
-    qc = assemble._build_assembly_qc(
+    qc = assembly_contract._build_assembly_qc(
         [
             {
                 "index": 0,
@@ -1553,7 +1829,7 @@ def test_p0_assembly_qc_blocks_skipped_segments(tmp_path):
 
 
 def test_p0_assembly_qc_blocks_speed_adjust_failed(tmp_path):
-    qc = assemble._build_assembly_qc(
+    qc = assembly_contract._build_assembly_qc(
         [
             {
                 "index": 0,
@@ -1571,6 +1847,42 @@ def test_p0_assembly_qc_blocks_speed_adjust_failed(tmp_path):
     assert qc["verdict"] == "FAIL"
     assert "fit_failed" in qc["blocking_codes"]
     assert qc["summary"]["fit_failed_segments"] == [0]
+
+
+def test_assembly_qc_blocks_any_tail_trim_or_unsafe_source_handoff():
+    qc = assembly_contract._build_assembly_qc([
+        {
+            "index": 0,
+            "fit_status": "tempo_adjusted",
+            "placed_audio_duration": 1.0,
+            "effective_tempo": 1.2,
+            "truncate_reason": "tail_trim_tolerance",
+            "source_handoff_blocking": True,
+        },
+    ], 2.0)
+
+    assert qc["verdict"] == "FAIL"
+    assert "truncated_speech" in qc["blocking_codes"]
+    assert "unsafe_source_handoff" in qc["blocking_codes"]
+    assert qc["release_gate"]["audio_qc"] == "FAIL"
+
+
+def test_assembly_qc_blocks_editable_timeline_audio_mismatch(tmp_path):
+    qc = assembly_contract._build_assembly_qc([
+        {
+            "index": 0,
+            "fit_status": "tempo_adjusted",
+            "placed_audio_duration": 1.0,
+            "actual_place_start": 1.0,
+            "actual_place_end": 2.0,
+            "placed_audio_path": str(tmp_path / "missing.wav"),
+            "effective_tempo": 1.2,
+        },
+    ], 3.0)
+
+    assert qc["verdict"] == "FAIL"
+    assert "timeline_audio_mismatch" in qc["blocking_codes"]
+    assert qc["summary"]["timeline_audio_mismatch_segments"] == [0]
 
 
 # --- Subtitle / visual-presentation special plan contracts -------------------
@@ -1619,8 +1931,8 @@ def test_visual_qc_builder_excludes_delivery_facts_from_visual_layer(monkeypatch
         {"type": "top_title", "text": "第一章", "start": 0.0, "end": 2.0},
     ]}), encoding="utf-8")
 
-    filters, overlay_qc = assemble._visual_overlay_filters(tmp_path, {"width": 1080, "height": 1920}, 5.0)
-    qc = assemble._build_visual_qc(
+    filters, overlay_qc = visual_render._visual_overlay_filters(tmp_path, {"width": 1080, "height": 1920}, 5.0)
+    qc = visual_render._build_visual_qc(
         [{"start": 0.0, "end": 2.0, "actual_place_start": 0.0, "actual_place_end": 2.0, "narration": "多行\n字幕"}],
         tmp_path,
         5.0,
@@ -1651,7 +1963,7 @@ def test_subtitle_layout_qc_records_multiline_safe_area_and_overflow(monkeypatch
         "play_res_y": 360,
         "alignment": 2,
     }
-    qc = assemble._subtitle_layout_qc(
+    qc = visual_render._subtitle_layout_qc(
         [{"start": 0, "end": 2, "text": "第一行\n第二行\n第三行"}],
         {"width": 640, "height": 360},
         style,
@@ -1684,7 +1996,7 @@ def test_assembly_qc_rolls_up_visual_and_delivery_facts_without_polluting_visual
         "final_compat_notes": ["faststart", "yuv420p"],
     }
 
-    qc = assemble._build_assembly_qc(
+    qc = assembly_contract._build_assembly_qc(
         [{"index": 0, "fit_status": "fit", "placed_audio_duration": 1.0, "effective_tempo": 1.0}],
         2.0,
         source_has_audio=True,
@@ -1717,7 +2029,7 @@ def test_mask_policy_must_be_explicit_and_cache_fingerprint_safe(monkeypatch):
     assert forced_fp != safe_fp
 
     monkeypatch.delitem(CONFIG, "source_subtitle_mask_policy", raising=False)
-    qc = assemble._source_subtitle_mask_policy()
+    qc = source_subtitles._source_subtitle_mask_policy()
     assert qc["policy"] == "legacy_implicit"
     assert qc.get("blocking") is True
 
@@ -1731,9 +2043,9 @@ def test_visual_overlay_loader_uses_canonical_artifact_and_rejects_platform_expa
         {"type": "inline_label_or_callout", "text": "关键证据", "start": 1.0, "end": 3.0, "x": 0.2, "y": 0.3},
     ]}), encoding="utf-8")
 
-    overlays = assemble._load_visual_overlays(tmp_path)
+    overlays = visual_render._load_visual_overlays(tmp_path)
     assert [item["type"] for item in overlays] == ["top_title", "inline_label_or_callout"]
-    filters, qc = assemble._visual_overlay_filters(tmp_path, {"width": 1280, "height": 720}, 5.0)
+    filters, qc = visual_render._visual_overlay_filters(tmp_path, {"width": 1280, "height": 720}, 5.0)
     assert len(filters) == 2
     assert qc["rendered"] == 2
     assert qc["unsupported"] == []
@@ -1742,7 +2054,7 @@ def test_visual_overlay_loader_uses_canonical_artifact_and_rejects_platform_expa
         {"type": "top_title", "text": "allowed", "start": 0.0, "end": 1.0},
         {"type": "chapter_card", "text": "not in first release", "start": 1.0, "end": 2.0},
     ]}), encoding="utf-8")
-    filters, qc = assemble._visual_overlay_filters(tmp_path, {"width": 1280, "height": 720}, 5.0)
+    filters, qc = visual_render._visual_overlay_filters(tmp_path, {"width": 1280, "height": 720}, 5.0)
     assert len(filters) == 1
     assert qc["unsupported"] == [{"index": 1, "type": "chapter_card", "reason": "unsupported_overlay_type"}]
 
@@ -1771,15 +2083,15 @@ def test_assemble_video_render_failure_does_not_leave_pass_assembly_qc(monkeypat
     monkeypatch.setitem(CONFIG, "burn_subtitles", False)
     monkeypatch.setitem(CONFIG, "mask_source_subtitles", False)
     monkeypatch.setitem(CONFIG, "source_subtitle_mask_policy", "off")
-    monkeypatch.setattr(assemble, "get_video_duration", lambda path: 2.0)
-    monkeypatch.setattr(assemble, "_probe_canvas", lambda path: {"width": 1280, "height": 720, "fps": 30.0})
-    monkeypatch.setattr(assemble, "_apply_narration_speed", lambda segments, work_dir: None)
-    monkeypatch.setattr(assemble, "_build_timed_narration", lambda segments, wav, duration, work_dir: Path(wav).write_bytes(b"wav"))
-    monkeypatch.setattr(assemble, "_generate_srt", lambda segments, work_dir, duration: Path(work_dir) / "subtitles.srt")
-    monkeypatch.setattr(assemble, "_emit_timeline", lambda *args, **kwargs: None)
-    monkeypatch.setattr(assemble, "_has_audio_stream", lambda path: True)
-    monkeypatch.setattr(assemble, "_run_loudnorm_first_pass", lambda *args, **kwargs: None)
-    monkeypatch.setattr(assemble, "run_cmd", lambda cmd, **kwargs: CompletedProcess(cmd, 1, "", "ffmpeg failed"))
+    monkeypatch.setattr(assemble.lib, "get_video_duration", lambda path: 2.0)
+    monkeypatch.setattr(media, "_probe_canvas", lambda path: {"width": 1280, "height": 720, "fps": 30.0})
+    monkeypatch.setattr(narration_audio, "_apply_narration_speed", lambda segments, work_dir: None)
+    monkeypatch.setattr(narration_audio, "_build_timed_narration", lambda segments, wav, duration, work_dir: Path(wav).write_bytes(b"wav"))
+    monkeypatch.setattr(subtitle_render, "_generate_srt", lambda segments, work_dir, duration: Path(work_dir) / "subtitles.srt")
+    monkeypatch.setattr(timeline_emit, "_emit_timeline", lambda *args, **kwargs: None)
+    monkeypatch.setattr(media, "_has_audio_stream", lambda path: True)
+    monkeypatch.setattr(audio_mix, "_run_loudnorm_first_pass", lambda *args, **kwargs: None)
+    monkeypatch.setattr(assemble.lib, "run_cmd", lambda cmd, **kwargs: CompletedProcess(cmd, 1, "", "ffmpeg failed"))
 
     with pytest.raises(RuntimeError, match="视频组装失败"):
         assemble_video(input_video, segs, tmp_path, output)
@@ -1795,9 +2107,9 @@ def test_malformed_visual_overlays_blocks_visual_qc(tmp_path, monkeypatch):
     monkeypatch.setitem(CONFIG, "source_subtitle_mask_policy", "off")
     (tmp_path / "visual_overlays.json").write_text("{not json", encoding="utf-8")
 
-    overlays, source = assemble._load_visual_overlays(tmp_path, with_source=True)
-    filters, overlay_qc = assemble._visual_overlay_filters(tmp_path, {"width": 1280, "height": 720}, 5.0)
-    qc = assemble._build_visual_qc([], tmp_path, 5.0, {"width": 1280, "height": 720, "fps": 30.0}, overlay_qc=overlay_qc)
+    overlays, source = visual_render._load_visual_overlays(tmp_path, with_source=True)
+    filters, overlay_qc = visual_render._visual_overlay_filters(tmp_path, {"width": 1280, "height": 720}, 5.0)
+    qc = visual_render._build_visual_qc([], tmp_path, 5.0, {"width": 1280, "height": 720, "fps": 30.0}, overlay_qc=overlay_qc)
 
     assert overlays == []
     assert filters == []
@@ -1824,9 +2136,9 @@ def test_invalid_visual_overlays_schema_blocks_visual_qc(tmp_path, monkeypatch, 
     monkeypatch.setitem(CONFIG, "source_subtitle_mask_policy", "off")
     (tmp_path / "visual_overlays.json").write_text(json.dumps(payload), encoding="utf-8")
 
-    overlays, source = assemble._load_visual_overlays(tmp_path, with_source=True)
-    filters, overlay_qc = assemble._visual_overlay_filters(tmp_path, {"width": 1280, "height": 720}, 5.0)
-    qc = assemble._build_visual_qc([], tmp_path, 5.0, {"width": 1280, "height": 720, "fps": 30.0}, overlay_qc=overlay_qc)
+    overlays, source = visual_render._load_visual_overlays(tmp_path, with_source=True)
+    filters, overlay_qc = visual_render._visual_overlay_filters(tmp_path, {"width": 1280, "height": 720}, 5.0)
+    qc = visual_render._build_visual_qc([], tmp_path, 5.0, {"width": 1280, "height": 720, "fps": 30.0}, overlay_qc=overlay_qc)
 
     assert overlays == []
     assert filters == []
@@ -1845,7 +2157,7 @@ def test_measured_subtitle_band_is_the_visual_qc_safe_area(tmp_path, monkeypatch
     monkeypatch.setitem(CONFIG, "subtitle_y_bot", 620)
     monkeypatch.setitem(CONFIG, "subtitle_mask_padding", 0)
 
-    qc = assemble._build_visual_qc(
+    qc = visual_render._build_visual_qc(
         [{"start": 0.0, "end": 1.0, "narration": "窄字幕带"}],
         tmp_path,
         2.0,
@@ -1868,7 +2180,7 @@ def test_measured_subtitle_qc_contains_normal_line_above_anchored_bottom(
     monkeypatch.setitem(CONFIG, "subtitle_y_bot", 650)
     monkeypatch.setitem(CONFIG, "subtitle_mask_padding", 4)
 
-    qc = assemble._build_visual_qc(
+    qc = visual_render._build_visual_qc(
         [{"start": 0.0, "end": 1.0, "narration": "正常字幕带"}],
         tmp_path,
         2.0,
@@ -1892,7 +2204,7 @@ def test_legacy_mask_env_without_explicit_policy_is_blocking(monkeypatch):
         monkeypatch.delenv("SOURCE_SUBTITLE_MASK_POLICY", raising=False)
         importlib.reload(assemble_lib)
 
-        policy = assemble._source_subtitle_mask_policy()
+        policy = source_subtitles._source_subtitle_mask_policy()
 
         assert CONFIG["mask_source_subtitles"] is True
         assert CONFIG["source_subtitle_mask_policy"] == "off"

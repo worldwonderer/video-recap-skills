@@ -1,13 +1,40 @@
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-understanding' / 'scripts'))
+
+sys.path.insert(
+    0,
+    str(
+        Path(__file__).resolve().parents[2]
+        / "skills"
+        / "video-understanding"
+        / "scripts"
+    ),
+)
 import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
 import asr as asr_module
 from detect import _filter_junk_scenes, detect_scenes
 from extract import extract_frames
-from lib import CONFIG, _api_headers, _prepare_api_payload, _retry_after_seconds, default_mimo_api_url, env_bool, env_float, env_int, file_fingerprint, get_video_duration, normalize_api_url, step_cache_key
-from vlm import _mimo_video_chunks, _video_data_url, analyze_scenes, analyze_video_overview
+from lib import (
+    CONFIG,
+    _api_headers,
+    _prepare_api_payload,
+    _retry_after_seconds,
+    default_mimo_api_url,
+    env_bool,
+    env_float,
+    env_int,
+    file_fingerprint,
+    get_video_duration,
+    normalize_api_url,
+    step_cache_key,
+)
+from vlm import (
+    _mimo_video_chunks,
+    _video_data_url,
+    analyze_scenes,
+    analyze_video_overview,
+)
 
 
 def test_get_video_duration_returns_zero_for_unparseable_output(monkeypatch):
@@ -23,15 +50,32 @@ def test_retry_after_seconds_accepts_malformed_header():
 
 
 def test_normalize_api_url_accepts_base_or_full_endpoint():
-    assert normalize_api_url("https://example.com/v1") == "https://example.com/v1/chat/completions"
-    assert normalize_api_url("https://example.com/v1/") == "https://example.com/v1/chat/completions"
-    assert normalize_api_url("https://example.com/v1/chat/completions") == "https://example.com/v1/chat/completions"
+    assert (
+        normalize_api_url("https://example.com/v1")
+        == "https://example.com/v1/chat/completions"
+    )
+    assert (
+        normalize_api_url("https://example.com/v1/")
+        == "https://example.com/v1/chat/completions"
+    )
+    assert (
+        normalize_api_url("https://example.com/v1/chat/completions")
+        == "https://example.com/v1/chat/completions"
+    )
 
 
 def test_mimo_token_plan_key_defaults_to_token_plan_cn_base():
-    assert default_mimo_api_url("tp-example") == "https://token-plan-cn.xiaomimimo.com/v1"
-    assert default_mimo_api_url("tp-example", cluster="sgp") == "https://token-plan-sgp.xiaomimimo.com/v1"
-    assert default_mimo_api_url("tp-example", cluster="unknown") == "https://token-plan-cn.xiaomimimo.com/v1"
+    assert (
+        default_mimo_api_url("tp-example") == "https://token-plan-cn.xiaomimimo.com/v1"
+    )
+    assert (
+        default_mimo_api_url("tp-example", cluster="sgp")
+        == "https://token-plan-sgp.xiaomimimo.com/v1"
+    )
+    assert (
+        default_mimo_api_url("tp-example", cluster="unknown")
+        == "https://token-plan-cn.xiaomimimo.com/v1"
+    )
     assert default_mimo_api_url("sk-example") == "https://api.xiaomimimo.com/v1"
 
 
@@ -106,7 +150,9 @@ def test_mimo_video_overview_uses_scene_chunks(monkeypatch, tmp_path):
         seen_payloads.append(payload)
         return {
             "model": "mimo-v2.5",
-            "choices": [{"message": {"content": "分片概览", "reasoning_content": "推理内容"}}],
+            "choices": [
+                {"message": {"content": "分片概览", "reasoning_content": "推理内容"}}
+            ],
             "usage": {"prompt_tokens_details": {"video_tokens": 12}},
         }
 
@@ -124,7 +170,9 @@ def test_mimo_video_overview_uses_scene_chunks(monkeypatch, tmp_path):
     monkeypatch.setattr("vlm._extract_video_chunk", fake_extract)
     monkeypatch.setattr("vlm.mimo_video_api_call", fake_api_call)
 
-    overview = analyze_video_overview(video, tmp_path, [{"scene_id": 7, "start": 0.0, "end": 5.0}])
+    overview = analyze_video_overview(
+        video, tmp_path, [{"scene_id": 7, "start": 0.0, "end": 5.0}]
+    )
 
     assert overview["input"] == "scene_chunks"
     assert overview["chunk_count"] == 3
@@ -141,7 +189,10 @@ def test_mimo_video_overview_uses_scene_chunks(monkeypatch, tmp_path):
     assert "分片概览" in overview["content"]
     assert overview["settings"]["mimo_video_chunk_max_seconds"] == 2
     assert all(not Path(item["clip_path"]).is_absolute() for item in overview["chunks"])
-    assert all(item["clip_path"].startswith("mimo_video_chunks/") for item in overview["chunks"])
+    assert all(
+        item["clip_path"].startswith("mimo_video_chunks/")
+        for item in overview["chunks"]
+    )
     assert (tmp_path / "mimo_video_overview.json").exists()
 
 
@@ -176,8 +227,12 @@ def test_content_fingerprint_cache_keys_ignore_path_and_mtime(tmp_path):
     second.write_bytes(first.read_bytes())
 
     assert file_fingerprint(first) == file_fingerprint(second)
-    assert step_cache_key(first, "vlm", {"model": "x"}) == step_cache_key(second, "vlm", {"model": "x"})
-    assert step_cache_key(first, "vlm", {"model": "x"}) != step_cache_key(first, "vlm", {"model": "y"})
+    assert step_cache_key(first, "vlm", {"model": "x"}) == step_cache_key(
+        second, "vlm", {"model": "x"}
+    )
+    assert step_cache_key(first, "vlm", {"model": "x"}) != step_cache_key(
+        first, "vlm", {"model": "y"}
+    )
 
 
 def test_content_fingerprint_detects_middle_only_changes(tmp_path):
@@ -192,7 +247,9 @@ def test_content_fingerprint_detects_middle_only_changes(tmp_path):
     assert file_fingerprint(first) != file_fingerprint(second)
 
 
-def test_filter_junk_scenes_removes_black_or_white_transitions_but_keeps_fallback(monkeypatch):
+def test_filter_junk_scenes_removes_black_or_white_transitions_but_keeps_fallback(
+    monkeypatch,
+):
     scenes = [
         {"start": 0.0, "end": 1.0},
         {"start": 1.0, "end": 2.0},
@@ -208,18 +265,38 @@ def test_filter_junk_scenes_removes_black_or_white_transitions_but_keeps_fallbac
 
 def test_research_context_feeds_vlm_from_background_research(tmp_path):
     import json
-    from understand import _research_context
-    (tmp_path / "background_research.json").write_text(json.dumps({
-        "synopsis": "现代灵魂穿越古代的故事。",
-        "episode_context": "第一集，主角范闲登场。",
-        "characters": {"范闲": "核心男主角", "张庆": "年轻黑衣男子，戴眼镜，大学生"},
-        "character_details": {
-            "范闲": {"aliases": ["小范大人"], "role": "主角", "relationships": ["与五竹互相信任"]},
-        },
-        "plot_arcs": [{"name": "身世线", "description": "查清母亲死亡真相", "status": "进行中"}],
-        "cultural_notes": [{"item": "监察院", "explanation": "权力机构"}],
-        "noise": "x" * 5000,
-    }, ensure_ascii=False), encoding="utf-8")
+    from understanding_brief import _research_context
+
+    (tmp_path / "background_research.json").write_text(
+        json.dumps(
+            {
+                "synopsis": "现代灵魂穿越古代的故事。",
+                "episode_context": "第一集，主角范闲登场。",
+                "characters": {
+                    "范闲": "核心男主角",
+                    "张庆": "年轻黑衣男子，戴眼镜，大学生",
+                },
+                "character_details": {
+                    "范闲": {
+                        "aliases": ["小范大人"],
+                        "role": "主角",
+                        "relationships": ["与五竹互相信任"],
+                    },
+                },
+                "plot_arcs": [
+                    {
+                        "name": "身世线",
+                        "description": "查清母亲死亡真相",
+                        "status": "进行中",
+                    }
+                ],
+                "cultural_notes": [{"item": "监察院", "explanation": "权力机构"}],
+                "noise": "x" * 5000,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
 
     ctx = _research_context(tmp_path)
 
@@ -235,14 +312,18 @@ def test_research_context_feeds_vlm_from_background_research(tmp_path):
 
 
 def test_research_context_empty_without_file(tmp_path):
-    from understand import _research_context
+    from understanding_brief import _research_context
+
     assert _research_context(tmp_path) == ""
 
 
 def test_segment_and_transcribe_uses_configured_window(monkeypatch, tmp_path):
     monkeypatch.setitem(CONFIG, "asr_segment_seconds", 30.0)
-    monkeypatch.setattr(asr_module, "run_cmd",
-                        lambda *a, **k: CompletedProcess(a[0] if a else [], 0, "", ""))
+    monkeypatch.setattr(
+        asr_module,
+        "run_cmd",
+        lambda *a, **k: CompletedProcess(a[0] if a else [], 0, "", ""),
+    )
     monkeypatch.setattr(asr_module, "_run_asr", lambda wav: "对白")
     segs = asr_module._segment_and_transcribe(tmp_path / "audio.wav", tmp_path, 100.0)
     assert len(segs) == 4  # 30s windows over 100s: 0-30,30-60,60-90,90-100

@@ -236,7 +236,7 @@ CONFIG = {
     "tts_segment_tempo_max": env_float("TTS_SEGMENT_TEMPO_MAX", 1.20, minimum=1.0),  # 兼容旧段内 atempo 上限；实际会被累计预算收紧
     "mask_source_subtitles": env_bool("MASK_SOURCE_SUBTITLES", True),  # 遮挡原片烧录字幕（默认开；无烧录字幕素材设 false）
     "source_subtitle_mask_ratio": env_float("SOURCE_SUBTITLE_MASK_RATIO", 0.14, minimum=0.0),  # 底部遮挡比例
-    "narration_delay_seconds": 1.5,  # 解说延迟放置秒数，让画面先出现再解说
+    "narration_delay_seconds": env_float("NARRATION_DELAY_SECONDS", 0.0, minimum=0.0),  # 默认严格采用 Agent 写入的 start；旧项目可显式恢复延迟
     "narration_tail_pad_seconds": 0.1,  # 解说尾部最少留白；短 slot 会自动压低 delay 避免截断
     "quiet_overlap_min_ratio": 0.8,  # 解说段至少多少比例落在安静窗口内才标记为非对白重叠
     "visual_beat_max_seconds": 18.0,  # 单段解说超过该时长且跨多个帧锚点时给 lint 提醒
@@ -385,6 +385,20 @@ def _retry_after_seconds(value, fallback):
     except (TypeError, ValueError, IndexError, OverflowError):
         return fallback
 
+
+_ERROR_DATA_URL_RE = re.compile(
+    r"data:(?:audio|video|image)/[^;,\s\"'<>]+;base64,[A-Za-z0-9+/=]+",
+    re.IGNORECASE,
+)
+_ERROR_KEY_RE = re.compile(r"\b(?:tp|sk)-[A-Za-z0-9_-]{8,}\b")
+
+
+def _sanitize_api_error(value, limit=500):
+    """Bound transport diagnostics without echoing request media or credentials."""
+    text = _ERROR_DATA_URL_RE.sub("<redacted-data-url>", str(value or ""))
+    text = _ERROR_KEY_RE.sub("<redacted-key>", text)
+    return text[:limit]
+
 def _api_headers(api_provider=None, api_url=None, api_key=None):
     """Build MiMo auth headers (OpenAI-compatible chat/completions with an api-key header)."""
     del api_provider, api_url  # MiMo is the only provider; signature kept for call sites
@@ -464,7 +478,7 @@ def api_call(payload, max_retries=8, *, api_provider=None, api_url=None, api_key
                 result = json.loads(resp.read().decode("utf-8"))
                 return result
         except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="replace")[:500]
+            body = _sanitize_api_error(e.read().decode("utf-8", errors="replace"))
             wait = min(2 ** attempt, 60)
             if e.code == 429:
                 retry_after = e.headers.get("Retry-After")
@@ -496,12 +510,13 @@ def api_call(payload, max_retries=8, *, api_provider=None, api_url=None, api_key
                 raise RuntimeError(f"API 调用失败 {max_retries} 次: HTTP {e.code} — {body}")
         except (urllib.error.URLError, Exception) as e:
             wait = min(2 ** attempt, 60)
-            log(f"API 调用失败 (尝试 {attempt+1}/{max_retries}): {e}")
+            safe_error = _sanitize_api_error(e)
+            log(f"API 调用失败 (尝试 {attempt+1}/{max_retries}): {safe_error}")
             if attempt < max_retries - 1:
                 log(f"等待 {wait}s 后重试...")
                 time.sleep(wait)
             else:
-                raise RuntimeError(f"API 调用失败 {max_retries} 次: {e}")
+                raise RuntimeError(f"API 调用失败 {max_retries} 次: {safe_error}")
 
 def _text_char_count(text):
     """计算文本的有效字数（去除标点和空白，这些不占 TTS 朗读时间）。"""

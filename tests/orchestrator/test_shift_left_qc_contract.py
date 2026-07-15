@@ -1,3 +1,4 @@
+import argparse
 import json
 import inspect
 import sys
@@ -5,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "skills" / "video-recap" / "scripts"))
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[2] / "skills" / "video-recap" / "scripts")
+)
 
 import qc_contract as qc  # noqa: E402
 
@@ -44,7 +47,9 @@ def test_required_fields_and_value_domains():
         evidence={"note": "model critique"},
     )
     assert set(qc._REQUIRED_FINDING_FIELDS) <= set(finding)
-    report = qc.build_report(artifact="mimo_qc.json", stage="post_tts", findings=[finding])
+    report = qc.build_report(
+        artifact="mimo_qc.json", stage="post_tts", findings=[finding]
+    )
     assert report["schema_version"] == 1
     assert report["artifact"] in qc.ARTIFACTS
     assert qc.validate_report(report) is True
@@ -55,7 +60,9 @@ def test_required_fields_and_value_domains():
 
 def test_deterministic_blocking_passes():
     finding = _deterministic_blocker()
-    report = qc.build_report(artifact="final_qc.json", stage="post_render", findings=[finding])
+    report = qc.build_report(
+        artifact="final_qc.json", stage="post_render", findings=[finding]
+    )
 
     assert report["ok"] is False
     assert report["blocker_count"] == 1
@@ -76,7 +83,9 @@ def test_mimo_semantic_default_advisory_non_blocking():
         source={"artifact": "mimo_qc.json"},
         evidence={"summary": "subjective review"},
     )
-    report = qc.build_report(artifact="mimo_qc.json", stage="post_tts", findings=[finding])
+    report = qc.build_report(
+        artifact="mimo_qc.json", stage="post_tts", findings=[finding]
+    )
 
     assert finding["blocking"] is False
     assert report["ok"] is True
@@ -117,8 +126,12 @@ def test_non_deterministic_blocking_cannot_be_enabled_by_a_rule_table():
             blocking=True,
             source={"artifact": "mimo_qc.json"},
             evidence={"summary": "model found contradiction"},
-            objective_corroboration={"type": "subtitle_span", "evidence": "asr_result[3]"},
+            objective_corroboration={
+                "type": "subtitle_span",
+                "evidence": "asr_result[3]",
+            },
         )
+
 
 def test_qc_contract_redacts_metadata_keys_values_and_urls():
     report = qc.build_report(
@@ -169,7 +182,14 @@ def test_pre_cut_null_timecode_source_span_valid():
     )
 
     assert finding["location"] == {"timecode": None, "source_span": None}
-    assert qc.validate_report(qc.build_report(artifact="golden_eval.json", stage="pre_cut", findings=[finding])) is True
+    assert (
+        qc.validate_report(
+            qc.build_report(
+                artifact="golden_eval.json", stage="pre_cut", findings=[finding]
+            )
+        )
+        is True
+    )
 
 
 def test_unknown_schema_version_and_missing_required_fields_validation_errors():
@@ -186,19 +206,29 @@ def test_unknown_schema_version_and_missing_required_fields_validation_errors():
     bad_finding = _deterministic_blocker()
     bad_finding.pop("location")
     with pytest.raises(qc.QCContractError, match="finding missing required fields"):
-        qc.validate_report({**report, "findings": [bad_finding], "finding_count": 1, "blocker_count": 1, "ok": False})
+        qc.validate_report(
+            {
+                **report,
+                "findings": [bad_finding],
+                "finding_count": 1,
+                "blocker_count": 1,
+                "ok": False,
+            }
+        )
 
 
 def test_stage_names_match_approved_gate_matrix_exactly():
-    assert qc.STAGES == frozenset({
-        "pre_cut",
-        "post_cut",
-        "pre_tts",
-        "post_tts",
-        "pre_assemble",
-        "post_render",
-        "golden",
-    })
+    assert qc.STAGES == frozenset(
+        {
+            "pre_cut",
+            "post_cut",
+            "pre_tts",
+            "post_tts",
+            "pre_assemble",
+            "post_render",
+            "golden",
+        }
+    )
     for old_stage in (
         "pre_voiceover",
         "post_voiceover",
@@ -213,7 +243,9 @@ def test_stage_names_match_approved_gate_matrix_exactly():
 
 
 def test_sample_policy_is_object_with_valid_type():
-    finding = _deterministic_blocker(sample_policy={"type": "deterministic", "basis": "full_scan"})
+    finding = _deterministic_blocker(
+        sample_policy={"type": "deterministic", "basis": "full_scan"}
+    )
     assert finding["sample_policy"]["type"] == "deterministic"
 
     with pytest.raises(qc.QCContractError, match="unsupported sample_policy.type"):
@@ -222,8 +254,10 @@ def test_sample_policy_is_object_with_valid_type():
     bad = _deterministic_blocker()
     bad["sample_policy"] = "deterministic"
     with pytest.raises(qc.QCContractError, match="sample_policy must be an object"):
-        qc.validate_report(qc.build_report(artifact="final_qc.json", stage="post_render", findings=[])
-                           | {"findings": [bad], "finding_count": 1, "blocker_count": 1, "ok": False})
+        qc.validate_report(
+            qc.build_report(artifact="final_qc.json", stage="post_render", findings=[])
+            | {"findings": [bad], "finding_count": 1, "blocker_count": 1, "ok": False}
+        )
 
 
 def test_canonical_required_fields_include_runtime_decision_fields():
@@ -245,8 +279,17 @@ def test_canonical_required_fields_include_runtime_decision_fields():
         bad = dict(finding)
         bad.pop(required)
         with pytest.raises(qc.QCContractError, match="finding missing required fields"):
-            qc.validate_report(qc.build_report(artifact="final_qc.json", stage="post_render", findings=[])
-                               | {"findings": [bad], "finding_count": 1, "blocker_count": 1, "ok": False})
+            qc.validate_report(
+                qc.build_report(
+                    artifact="final_qc.json", stage="post_render", findings=[]
+                )
+                | {
+                    "findings": [bad],
+                    "finding_count": 1,
+                    "blocker_count": 1,
+                    "ok": False,
+                }
+            )
 
 
 def test_mimo_qc_artifact_attaches_to_actual_stage_not_stage_value():
@@ -267,11 +310,20 @@ def test_mimo_qc_artifact_attaches_to_actual_stage_not_stage_value():
         next_action="human_review",
     )
 
-    assert qc.validate_report(qc.build_report(artifact="mimo_qc.json", stage="pre_assemble", findings=[finding])) is True
+    assert (
+        qc.validate_report(
+            qc.build_report(
+                artifact="mimo_qc.json", stage="pre_assemble", findings=[finding]
+            )
+        )
+        is True
+    )
     with pytest.raises(qc.QCContractError, match="unsupported stage"):
         qc.build_report(artifact="mimo_qc.json", stage="mimo_qc", findings=[finding])
 
-import recap  # noqa: E402
+
+import recap_runner as recap  # noqa: E402
+import recap_stage_qc
 
 
 def test_preflight_qc_artifact_supported_without_changing_existing_artifacts():
@@ -285,16 +337,22 @@ def test_preflight_qc_artifact_supported_without_changing_existing_artifacts():
 def test_shift_left_helper_rolls_up_latest_report_per_stage(tmp_path):
     finding = _deterministic_blocker(finding_id="post-render-blocker")
 
-    recap._write_shift_left_stage_qc(tmp_path, "pre_tts", metadata={"review_ran": True}, findings=[])
-    recap._write_shift_left_stage_qc(tmp_path, "post_tts", metadata={"tts_meta": {"segments": []}}, findings=[])
-    report = recap._write_shift_left_stage_qc(
+    recap_stage_qc._write_shift_left_stage_qc(
+        tmp_path, "pre_tts", metadata={"review_ran": True}, findings=[]
+    )
+    recap_stage_qc._write_shift_left_stage_qc(
+        tmp_path, "post_tts", metadata={"tts_meta": {"segments": []}}, findings=[]
+    )
+    report = recap_stage_qc._write_shift_left_stage_qc(
         tmp_path,
         "post_render",
         metadata={"final_output": tmp_path / "recap.mp4"},
         findings=[finding],
     )
 
-    path_report = json.loads((tmp_path / "preflight_qc.json").read_text(encoding="utf-8"))
+    path_report = json.loads(
+        (tmp_path / "preflight_qc.json").read_text(encoding="utf-8")
+    )
     assert path_report == report
     assert qc.validate_report(path_report) is True
     assert path_report["artifact"] == "preflight_qc.json"
@@ -306,7 +364,9 @@ def test_shift_left_helper_rolls_up_latest_report_per_stage(tmp_path):
     assert set(stages) == {"pre_tts", "post_tts", "post_render"}
     assert stages["pre_tts"]["metadata"] == {"review_ran": True}
     assert stages["post_tts"]["metadata"] == {"tts_meta": {"segments": []}}
-    assert stages["post_render"]["metadata"] == {"final_output": str(tmp_path / "recap.mp4")}
+    assert stages["post_render"]["metadata"] == {
+        "final_output": str(tmp_path / "recap.mp4")
+    }
     for stage_report in stages.values():
         assert qc.validate_report(stage_report) is True
 
@@ -320,21 +380,25 @@ def test_recap_full_mode_writes_shift_left_preflight_stages(monkeypatch, tmp_pat
         json.dumps([{"start": 0, "end": 1, "narration": "full。"}]),
         encoding="utf-8",
     )
-    recap._write_run_manifest(work, video.resolve(), recap.argparse.Namespace(
-        context="",
-        scene_threshold=None,
-        style="纪录片",
-        edit_mode="full",
-        target_duration=None,
-        skip_asr=False,
-        mimo_video_overview=False,
-        consolidate=True,
-        consolidate_asr=False,
-        review_narration=None,
-        require_narration_review=False,
-        allow_duration_drift=False,
-        allow_sparse_cut=False,
-    ))
+    recap._write_run_manifest(
+        work,
+        video.resolve(),
+        argparse.Namespace(
+            context="",
+            scene_threshold=None,
+            style="纪录片",
+            edit_mode="full",
+            target_duration=None,
+            skip_asr=False,
+            mimo_video_overview=False,
+            consolidate=True,
+            consolidate_asr=False,
+            review_narration=None,
+            require_narration_review=False,
+            allow_duration_drift=False,
+            allow_sparse_cut=False,
+        ),
+    )
 
     calls = []
 
@@ -344,7 +408,13 @@ def test_recap_full_mode_writes_shift_left_preflight_stages(monkeypatch, tmp_pat
             (work / "tts_segments").mkdir(exist_ok=True)
             (work / "tts_segments" / "narr_000.wav").write_bytes(b"wav")
             (work / "tts_meta.json").write_text(
-                json.dumps({"segments": [{"index": 0, "audio_path": "tts_segments/narr_000.wav"}]}),
+                json.dumps(
+                    {
+                        "segments": [
+                            {"index": 0, "audio_path": "tts_segments/narr_000.wav"}
+                        ]
+                    }
+                ),
                 encoding="utf-8",
             )
         if script == "assemble.py":
@@ -354,8 +424,8 @@ def test_recap_full_mode_writes_shift_left_preflight_stages(monkeypatch, tmp_pat
                 encoding="utf-8",
             )
 
-    monkeypatch.setattr("recap._run", fake_run)
-    monkeypatch.setattr("recap._preflight_burn_subtitles", lambda args: None)
+    monkeypatch.setattr("recap_runner._run", fake_run)
+    monkeypatch.setattr("recap_runner._preflight_burn_subtitles", lambda args: None)
     monkeypatch.setattr(sys, "argv", ["recap.py", str(video), "--work-dir", str(work)])
 
     recap.main()
@@ -366,6 +436,10 @@ def test_recap_full_mode_writes_shift_left_preflight_stages(monkeypatch, tmp_pat
     stages = report["metadata"]["stages"]
     assert list(stages) == ["pre_tts", "post_tts", "pre_assemble", "post_render"]
     assert stages["post_tts"]["metadata"]["tts_meta"]["segments"][0]["index"] == 0
-    assert stages["post_tts"]["metadata"]["tts_segments"] == ["tts_segments/narr_000.wav"]
-    assert stages["post_render"]["metadata"]["final_output"] == str(tmp_path / "recap_video.mp4")
+    assert stages["post_tts"]["metadata"]["tts_segments"] == [
+        "tts_segments/narr_000.wav"
+    ]
+    assert stages["post_render"]["metadata"]["final_output"] == str(
+        tmp_path / "recap_video.mp4"
+    )
     assert calls[0][:2] == ("video-script", "validate.py")

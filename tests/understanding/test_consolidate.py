@@ -30,6 +30,36 @@ def test_parse_clean_rejects_count_mismatch_and_garbage():
     assert consolidate.parse_clean_response('{"segments":[{"i":0,"text":"x"}]}', asr) == asr
 
 
+def test_repair_clean_boundaries_removes_raw_proven_window_overlap():
+    raw = [
+        {"start": 0, "end": 15, "text": "虽然生涯前"},
+        {"start": 15, "end": 30, "text": "前两年没进季后赛"},
+    ]
+    cleaned = [dict(raw[0]), dict(raw[1])]
+
+    out = consolidate.repair_clean_boundaries(cleaned, raw)
+
+    assert out[0]["text"] + out[1]["text"] == "虽然生涯前两年没进季后赛"
+    assert [(item["start"], item["end"]) for item in out] == [(0, 15), (15, 30)]
+
+
+def test_repair_clean_boundaries_repairs_interrupted_phrase_punctuation_but_not_new_overlap():
+    raw = [
+        {"start": 0, "end": 15, "text": "这只是传奇。"},
+        {"start": 15, "end": 16, "text": "奇的开始。"},
+    ]
+    cleaned = [dict(raw[0]), dict(raw[1])]
+    out = consolidate.repair_clean_boundaries(cleaned, raw)
+    assert out[0]["text"] + out[1]["text"] == "这只是传奇的开始。"
+
+    no_raw_overlap = [
+        {"start": 0, "end": 1, "text": "第一句。"},
+        {"start": 1, "end": 2, "text": "第二句。"},
+    ]
+    model_created = [dict(no_raw_overlap[0]), {**no_raw_overlap[1], "text": "句第二句。"}]
+    assert consolidate.repair_clean_boundaries(model_created, no_raw_overlap) == model_created
+
+
 # ── Pass B: index ─────────────────────────────────────────────────────────────
 
 def test_parse_index_normalizes_to_four_list_keys():
@@ -51,7 +81,11 @@ def test_build_index_messages_reads_dict_frame_facts():
 
 def test_build_clean_messages_includes_transcript():
     asr = [{"start": 0, "end": 5, "text": "第一句对白"}]
-    assert "第一句对白" in consolidate.build_clean_messages(asr)[0]["content"]
+    content = consolidate.build_clean_messages(asr)[0]["content"]
+    assert "第一句对白" in content
+    assert "相邻段边界" in content
+    assert "生涯前" in content and "前两年" in content
+    assert "只是传奇。" in content and "奇的开始" in content
 
 
 # ── drivers (mocked api) ──────────────────────────────────────────────────────
@@ -82,6 +116,7 @@ def test_consolidate_transcript_writes_provenance_and_preserves_spans(monkeypatc
     assert out["source_md5"] == hashlib.md5((tmp_path / "asr_result.json").read_bytes()).hexdigest()
     assert out["model"] == consolidate.CONFIG.get("vlm_model", "")
     assert out["prompt_md5"] == consolidate._prompt_fingerprint(consolidate.CLEAN_PROMPT)
+    assert out["postprocess_version"] == consolidate.ASR_CLEAN_POSTPROCESS_VERSION
     assert out["segments"][0]["start"] == 0.0 and out["segments"][0]["end"] == 5.0
     assert out["segments"][0]["text"] == "你给我站住！"
 
@@ -136,6 +171,29 @@ def test_consolidate_graceful_when_inputs_absent(tmp_path):
     # no vlm_analysis.json / asr_result.json -> no crash, returns empty-ish
     res = consolidate.consolidate(tmp_path, do_asr=True, do_index=True)
     assert res.get("index") is None and res.get("asr_clean") is None
+
+
+def test_consolidate_runs_asr_cleanup_before_index_when_both_requested(monkeypatch, tmp_path):
+    order = []
+
+    def clean(_work_dir):
+        order.append("asr")
+        return {"segments": [{"text": "clean"}]}
+
+    def index(_work_dir):
+        order.append("index")
+        return {"characters": []}
+
+    monkeypatch.setattr(consolidate, "consolidate_transcript", clean)
+    monkeypatch.setattr(consolidate, "consolidate_index", index)
+
+    result = consolidate.consolidate(tmp_path, do_asr=True, do_index=True)
+
+    assert order == ["asr", "index"]
+    assert result == {
+        "asr_clean": {"segments": [{"text": "clean"}]},
+        "index": {"characters": []},
+    }
 
 
 

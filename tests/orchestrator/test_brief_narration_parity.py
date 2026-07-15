@@ -8,15 +8,41 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 BRIEF = ROOT / "skills" / "video-understanding" / "scripts" / "brief.py"
 NARRATION = ROOT / "skills" / "video-script" / "scripts" / "narration.py"
-UNDERSTANDING_DESLOP = ROOT / "skills" / "video-understanding" / "scripts" / "deslop_qc.py"
+UNDERSTANDING_SCRIPTS = BRIEF.parent
+SCRIPT_SCRIPTS = NARRATION.parent
+UNDERSTANDING_DESLOP = (
+    ROOT / "skills" / "video-understanding" / "scripts" / "deslop_qc.py"
+)
 SCRIPT_DESLOP = ROOT / "skills" / "video-script" / "scripts" / "deslop_qc.py"
-RECAP_CREATIVE_PLAYBOOK = ROOT / "skills" / "video-recap" / "references" / "creative-editing-playbook.md"
-SCRIPT_CREATIVE_PLAYBOOK = ROOT / "skills" / "video-script" / "references" / "creative-editing-playbook.md"
+RECAP_CREATIVE_PLAYBOOK = (
+    ROOT / "skills" / "video-recap" / "references" / "creative-editing-playbook.md"
+)
+SCRIPT_CREATIVE_PLAYBOOK = (
+    ROOT / "skills" / "video-script" / "references" / "creative-editing-playbook.md"
+)
 
 SYNC_PAIRS = (
-    pytest.param(BRIEF, NARRATION, id="agent-brief-runtime"),
+    pytest.param(BRIEF, NARRATION, id="agent-brief-entry"),
+    *[
+        pytest.param(
+            UNDERSTANDING_SCRIPTS / name,
+            SCRIPT_SCRIPTS / name,
+            id=f"agent-brief-{Path(name).stem}",
+        )
+        for name in (
+            "agent_brief.py",
+            "agent_text.py",
+            "brief_context.py",
+            "brief_inputs.py",
+            "brief_timeline.py",
+            "narration_lint.py",
+            "timeline_fusion.py",
+        )
+    ],
     pytest.param(UNDERSTANDING_DESLOP, SCRIPT_DESLOP, id="deslop-qc"),
-    pytest.param(RECAP_CREATIVE_PLAYBOOK, SCRIPT_CREATIVE_PLAYBOOK, id="creative-playbook"),
+    pytest.param(
+        RECAP_CREATIVE_PLAYBOOK, SCRIPT_CREATIVE_PLAYBOOK, id="creative-playbook"
+    ),
 )
 
 
@@ -32,7 +58,10 @@ def test_intentional_local_copies_stay_byte_identical(first, second):
 def _top_level_literal(path, name):
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in tree.body:
-        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        ):
             return ast.literal_eval(node.value)
     raise AssertionError(f"{path}: missing top-level constant {name}")
 
@@ -40,9 +69,14 @@ def _top_level_literal(path, name):
 def test_asr_span_tol_matches_across_files():
     paths = {
         ROOT / "skills/video-understanding/scripts/consolidate.py",
-        BRIEF,
-        NARRATION,
+        UNDERSTANDING_SCRIPTS / "brief_inputs.py",
+        SCRIPT_SCRIPTS / "brief_inputs.py",
     }
-    values = {str(path.relative_to(ROOT)): _top_level_literal(path, "_ASR_SPAN_TOL") for path in paths}
+    values = {
+        str(path.relative_to(ROOT)): _top_level_literal(path, "_ASR_SPAN_TOL")
+        for path in paths
+    }
 
-    assert set(values.values()) == {0.05}, f"_ASR_SPAN_TOL drifted across files: {values}"
+    assert set(values.values()) == {0.05}, (
+        f"_ASR_SPAN_TOL drifted across files: {values}"
+    )

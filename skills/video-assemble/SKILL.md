@@ -52,12 +52,18 @@ python3 scripts/assemble.py <video> --work-dir <work_dir> \
 - `work_dir/output.mp4`：工作目录内成片。
 - `subtitles.srt`：旁白字幕；烧录时另有 `subtitles.ass`。
 - `timeline.json`：后端无关的多轨模型，包含视频、原声、旁白、BGM、字幕和 ducking 自动化。
+- `_placed_*.wav`：实际写入主混音的完整逐段旁白 PCM；时间线与剪映只引用这些文件。
 - `assembly_manifest.json`：输入来源、cut 来源指纹、渲染设置与最终输出路径。
+- `assembly_qc.json`：旁白完整性、原声句末交接、时间线素材时长与交付质量的发布门禁。
 - 剪映草稿目录：仅 `--export-jianying` 时生成，包含 `draft_content.json`、`draft_info.json` 与 `draft_meta_info.json`。
 
 ## 6. 合成规则
 
 - 音频按轨道混合：原声、可选 BGM 与旁白各自独立。
+- 旁白不做任何容差裁尾；温和加速后仍放不下即 `no_safe_fit`。每段 `_placed_*.wav`
+  必须与序列化后的时间线区间等长或更短，否则 `timeline_audio_mismatch` 阻断。
+- 原声在旁白结束后保持压低到下一可靠句末的 `pause_start`，只在实测停顿内渐强，
+  于 `source_restore_at` 回满；无后续锚点时保持压低到时间线末端，而不是放出半句。
 - `--export-jianying` / `EXPORT_JIANYING=1` 可把 `timeline.json` 导出为可编辑草稿。cut 模式应传 `--source-video <orig>`，让草稿引用真实原片区间。
 - 剪映导出默认把视频、音频与图片复制到 `Resources/local/{video,audio,image}`，保持草稿可搬迁；`--jianying-no-bundle-media` 只适合原路径始终可访问的情况。
 - 重叠覆盖物会拆到编号轨道；非空目标目录不会覆盖，而会创建编号兄弟目录。

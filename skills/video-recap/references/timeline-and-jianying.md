@@ -22,9 +22,11 @@ times are seconds and volumes are gains, so this file has no 剪映-only units.
                                        {"t": 2.19, "gain": 0.2}]}}
     ]},
     {"kind": "audio", "name": "narration", "role": "narration", "segments": [
-      {"source_path": "/_spd_0.wav", "timeline_start": 2.19,
+      {"source_path": "/_placed_0000.wav", "timeline_start": 2.19,
        "timeline_end": 5.9, "gain": 1.0, "text": "…",
-       "overlaps_speech": true}
+       "overlaps_speech": true,
+       "source_duck_end": 6.1, "source_restore_at": 6.35,
+       "source_handoff_status": "sentence_boundary"}
     ]},
     {"kind": "audio", "name": "bgm", "role": "bgm", "loop": true,
      "segments": [{"source_path": "/bgm.mp3", "timeline_start": 0.0,
@@ -46,7 +48,9 @@ times are seconds and volumes are gains, so this file has no 剪映-only units.
 
 - **video** — source clips plus editable original-audio volume automation. In
   cut mode, explicit `--source-video` keeps references on the real source ranges.
-- **narration** — placed TTS segments.
+- **narration** — placed TTS segments. `source_path` points to the exact complete
+  per-segment PCM used by the canonical mix (`_placed_*.wav`), never a longer
+  pre-fit file that an editor would trim at `timeline_end`.
 - **bgm** — optional looped music with its own volume automation.
 - **subtitle** — display-ready narration subtitles.
 - **image** — optional local photo overlays. Transforms use normalized
@@ -54,6 +58,9 @@ times are seconds and volumes are gains, so this file has no 剪映-only units.
   image_segments=[...])` is currently the programmatic entrypoint; recap does
   not invent image overlays automatically.
 - `volume_keyframes` are timeline-absolute `{t, gain}` points with linear ramps.
+  Original-audio handoff keyframes stay low through the final source phoneme
+  (`source_duck_end`) and release only inside the measured sentence pause, reaching
+  idle at `source_restore_at`; ffmpeg and the editable timeline share this shape.
 
 Schema v2 also has additive JianYing authoring fields. Existing v1 timelines
 are copied and migrated to v2 at the exporter boundary; an unknown future
@@ -89,6 +96,9 @@ adapter aligns its local-draft contract with
 - root schema profile `version: 360000`, `new_version: 111.0.0`, and template
   `app_version: 5.9.5-beta1`, including `common_mask` in the material skeleton;
 - all segment times converted to integer microseconds at one boundary;
+- narration interval ends are rounded outward before that conversion, and export
+  probes bundled PCM duration; this prevents timestamp rounding from shaving even
+  a few samples from the final word;
 - narration and BGM as audio tracks, video/photo as video tracks, subtitles as
   text tracks; regular segments use the schema `render_index` /
   `track_render_index` value `2`;

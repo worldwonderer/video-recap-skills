@@ -8,11 +8,18 @@ from pathlib import Path
 from subprocess import CompletedProcess
 
 
-from assemble import (  # noqa: E402
-    _build_timed_narration,
-    _seg_place_window,
-    _subtitle_entries,
-)
+import narration_audio  # noqa: E402
+from audio_mix import _seg_place_window  # noqa: E402
+from subtitle_core import _subtitle_entries  # noqa: E402
+
+
+def _build_timed_narration(*args, **kwargs):
+    return narration_audio._build_timed_narration(
+        *args,
+        command_runner=narration_audio.run_cmd,
+        logger=narration_audio.log,
+        **kwargs,
+    )
 
 
 def _write_wav(path, sample_rate=44100, duration=0.8, channels=1, sampwidth=2):
@@ -34,7 +41,7 @@ def test_resample_failure_degrades_instead_of_raising(monkeypatch, tmp_path):
         # Simulate ffmpeg resample failure: non-zero rc and no output file written.
         return CompletedProcess(cmd, 1, stdout="", stderr="resample boom")
 
-    monkeypatch.setattr("assemble.run_cmd", fake_run_cmd)
+    monkeypatch.setattr(narration_audio, "run_cmd", fake_run_cmd)
 
     segment = {
         "index": 0,
@@ -114,7 +121,7 @@ def test_bad_wav_format_skip_sets_zero_width_window(monkeypatch, tmp_path):
 def test_all_skipped_logs_loud_warning(monkeypatch, tmp_path):
     """Bug 7: when every segment is skipped, a loud warning is logged."""
     logs = []
-    monkeypatch.setattr("assemble.log", lambda msg: logs.append(msg))
+    monkeypatch.setattr(narration_audio, "log", lambda msg: logs.append(msg))
 
     segments = [
         {
@@ -146,7 +153,7 @@ def test_all_skipped_logs_loud_warning(monkeypatch, tmp_path):
 def test_partial_skip_does_not_log_all_skipped_warning(monkeypatch, tmp_path):
     """Bug 7: a placed segment alongside a skipped one must NOT trigger the warning."""
     logs = []
-    monkeypatch.setattr("assemble.log", lambda msg: logs.append(msg))
+    monkeypatch.setattr(narration_audio, "log", lambda msg: logs.append(msg))
 
     good = _write_wav(tmp_path / "good.wav", sample_rate=44100, duration=0.8)
     segments = [

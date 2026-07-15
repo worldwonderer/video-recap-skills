@@ -8,7 +8,12 @@ from subprocess import CompletedProcess
 
 
 import detect
-from detect import _filter_junk_scenes, detect_scenes, detect_silence_periods
+from detect import (
+    _filter_junk_scenes,
+    detect_scenes,
+    detect_silence_periods,
+    detect_speech_boundary_anchors,
+)
 
 
 def _ok(stdout="", stderr=""):
@@ -108,6 +113,19 @@ def test_detect_silence_returns_empty_and_logs_on_extraction_failure(monkeypatch
     assert any("提取失败" in m for m in logs)
 
 
+def test_detect_silence_compacts_verbose_ffmpeg_failure(monkeypatch, tmp_path):
+    logs = []
+    verbose = "ffmpeg build configuration " + ("x" * 2000) + " Output file does not contain any stream"
+    monkeypatch.setattr("detect.log", lambda msg: logs.append(msg))
+    monkeypatch.setattr("detect.run_cmd", lambda cmd, **kw: _fail(verbose))
+
+    assert detect_silence_periods(tmp_path / "silent.mp4", tmp_path) == []
+
+    message = next(msg for msg in logs if "提取失败" in msg)
+    assert len(message) < 500
+    assert "Output file does not contain any stream" in message
+
+
 def test_detect_silence_does_not_leave_partial_audio_on_failure(monkeypatch, tmp_path):
     monkeypatch.setattr("detect.log", lambda msg: None)
 
@@ -168,6 +186,29 @@ def test_detect_silence_extracts_to_temp_then_atomic_moves(monkeypatch, tmp_path
     assert not (tmp_path / "audio.wav.tmp").exists()
     # a cache file was written for the (successful) empty result
     assert (tmp_path / "silence_periods.json").exists()
+
+
+def test_detect_speech_boundary_anchors_aligns_sentence_punctuation_to_short_pauses(monkeypatch, tmp_path):
+    (tmp_path / "audio.wav").write_bytes(b"RIFF")
+    stderr = "\n".join([
+        "silence_start: 2.68", "silence_end: 3.19",
+        "silence_start: 5.22", "silence_end: 5.81",
+        "silence_start: 10.42", "silence_end: 11.02",
+        "silence_start: 13.74", "silence_end: 14.34",
+    ])
+    monkeypatch.setattr("detect.run_cmd", lambda cmd, **kw: _ok(stderr=stderr))
+    asr = [{
+        "start": 0,
+        "end": 15,
+        "text": "在那漫长而伟大的旅途走到终点之前，带你重走詹姆斯的二十一年。二零零三年选秀人才辈出，他作为高中生状元进入联盟，二十加五加五，把自己的名字写进历史。虽然生涯前",
+    }]
+
+    report = detect_speech_boundary_anchors(tmp_path, asr)
+
+    assert [round(item["time"], 2) for item in report["sentence_anchors"]] == [5.81, 14.34]
+    assert all(item["punctuation"] == "。" for item in report["sentence_anchors"])
+    assert all(item["confidence"] in {"high", "medium"} for item in report["sentence_anchors"])
+    assert (tmp_path / "speech_boundary_anchors.json").exists()
 
 
 def test_silence_audio_extract_states_wav_format(monkeypatch, tmp_path):

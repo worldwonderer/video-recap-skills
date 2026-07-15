@@ -20,6 +20,43 @@ def test_strip_reasoning_residue_removes_think_leakage():
     assert s("正常一句，没有思考标签。") == "正常一句，没有思考标签。"      # clean text untouched
 
 
+def test_dub_asr_skips_zero_sample_wav_before_api_call(monkeypatch, tmp_path):
+    empty = tmp_path / "empty.wav"
+    with wave.open(str(empty), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(16000)
+        out.writeframes(b"")
+
+    monkeypatch.setattr(
+        dub,
+        "mimo_asr_api_call",
+        lambda _payload: pytest.fail("zero-sample WAV must not reach MiMo ASR"),
+    )
+
+    assert dub._run_asr(empty) == ""
+
+
+def test_dub_asr_windows_ignore_subsecond_container_tail(monkeypatch, tmp_path):
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"source")
+    cuts = []
+    calls = []
+
+    def cut(_source, output, start, duration):
+        cuts.append((start, duration))
+        Path(output).write_bytes(b"wav")
+
+    monkeypatch.setattr(dub, "_cut_wav", cut)
+    monkeypatch.setattr(dub, "_run_asr", lambda path, lang="en": calls.append(Path(path).name) or "speech")
+
+    windows = dub._asr_windows(source, tmp_path, duration=16.118, window=8.0)
+
+    assert [item["start"] for item in windows] == [0.0, 8.0]
+    assert calls == ["asr_000.wav", "asr_001.wav"]
+    assert len(cuts) == 2
+
+
 def test_atempo_chain():
     assert dub._atempo_chain(1.3) == "atempo=1.3000"
     assert dub._atempo_chain(3.0).startswith("atempo=2.0,atempo=")  # >2x is chained
@@ -193,6 +230,81 @@ def test_dub_render_stops_before_tts_when_lint_blocks(monkeypatch, tmp_path):
 
     with pytest.raises(SystemExit, match="dub_lint.json"):
         dub.stage_render(tmp_path / "video.mp4", tmp_path, ref_start=0.0, ref_dur=2.0)
+
+
+def _write_test_wav(path, *, seconds=0.1):
+    with wave.open(str(path), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(dub.CLONE_SR)
+        out.writeframes(b"\x10\x10" * max(1, int(seconds * dub.CLONE_SR)))
+
+
+def _prepare_render_cache_fixture(tmp_path, text="你好"):
+    (tmp_path / "dub_transcript.json").write_text(
+        json.dumps({"duration": 2.0, "windows": [{"start": 0, "end": 2, "text": "hello"}]}),
+        encoding="utf-8",
+    )
+    (tmp_path / "dub_script.json").write_text(
+        json.dumps([{"start": 0.0, "end": 1.0, "zh": text}]),
+        encoding="utf-8",
+    )
+    ref = tmp_path / "dub_reference.wav"
+    _write_test_wav(ref)
+    tts_dir = tmp_path / "dub_tts"
+    tts_dir.mkdir()
+    raw = tts_dir / "line_000_raw.wav"
+    _write_test_wav(raw)
+    return ref, raw
+
+
+def test_dub_render_reuses_matching_voiceclone_cache(monkeypatch, tmp_path):
+    ref, raw = _prepare_render_cache_fixture(tmp_path)
+    dub._write_clone_cache_meta(raw, "你好", ref.read_bytes())
+
+    monkeypatch.setattr(
+        dub,
+        "_clone_tts",
+        lambda *_args, **_kwargs: pytest.fail("matching voiceclone cache must skip the API"),
+    )
+    monkeypatch.setattr(dub, "_build_dub_track", lambda _lines, _duration, out: _write_test_wav(out))
+    monkeypatch.setattr(dub, "_mux", lambda _video, _wav, out: Path(out).write_bytes(b"mp4"))
+
+    dub.stage_render(tmp_path / "video.mp4", tmp_path, ref_start=0.0, ref_dur=2.0)
+
+    manifest = json.loads((tmp_path / "dub_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["lines"][0]["tts_cache"] == "hit"
+
+
+def test_dub_render_invalidates_voiceclone_cache_when_text_changes(monkeypatch, tmp_path):
+    ref, raw = _prepare_render_cache_fixture(tmp_path, text="新台词")
+    dub._write_clone_cache_meta(raw, "旧台词", ref.read_bytes())
+    calls = []
+
+    def clone(text, _ref_b64, out):
+        calls.append(text)
+        _write_test_wav(out)
+
+    monkeypatch.setattr(dub, "_clone_tts", clone)
+    monkeypatch.setattr(dub, "_build_dub_track", lambda _lines, _duration, out: _write_test_wav(out))
+    monkeypatch.setattr(dub, "_mux", lambda _video, _wav, out: Path(out).write_bytes(b"mp4"))
+
+    dub.stage_render(tmp_path / "video.mp4", tmp_path, ref_start=0.0, ref_dur=2.0)
+
+    assert calls == ["新台词"]
+    manifest = json.loads((tmp_path / "dub_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["lines"][0]["tts_cache"] == "miss"
+
+
+def test_dub_mux_pins_delivery_sample_rate_after_loudnorm(monkeypatch, tmp_path):
+    commands = []
+    monkeypatch.setattr(dub, "run_cmd", lambda cmd, **kwargs: commands.append(cmd))
+
+    dub._mux(tmp_path / "source.mp4", tmp_path / "dub.wav", tmp_path / "dubbed.mp4")
+
+    command = commands[0]
+    assert command[command.index("-ar") + 1] == "48000"
+    assert command.index("-ar") > command.index("-af")
 
 
 def test_dub_print_schema_includes_new_artifacts(capsys):

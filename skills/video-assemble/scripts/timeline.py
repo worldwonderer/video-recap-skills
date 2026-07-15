@@ -21,12 +21,19 @@ times are plain seconds and volumes are plain gains, so any backend can read it.
 """
 
 import json
+import math
 from copy import deepcopy
 
 from audio_automation import fixed_ducking_keyframes as ducking_keyframes
-from audio_automation import variable_ducking_keyframes
+from audio_automation import release_ducking_keyframes
 
 SCHEMA_VERSION = 2
+
+
+def _ceil_time(value, digits=4):
+    """Round an interval end outward so serialization can never shorten media."""
+    scale = 10 ** digits
+    return math.ceil((float(value) * scale) - 1e-9) / scale
 
 
 def build_timeline(canvas, duration_s, video_clips, narration_segments,
@@ -56,8 +63,17 @@ def build_timeline(canvas, duration_s, video_clips, narration_segments,
     duck_windows = [
         (
             float(s["timeline_start"]),
-            float(s["timeline_end"]),
+            max(float(s["timeline_end"]), float(s.get("source_duck_end", s["timeline_end"]))),
             float((ducking or {}).get("speech" if s.get("overlaps_speech", True) else "quiet", 1.0)),
+            max(
+                float(s["timeline_end"]),
+                float(s.get("source_duck_end", s["timeline_end"])),
+                float(s.get(
+                    "source_restore_at",
+                    max(float(s["timeline_end"]), float(s.get("source_duck_end", s["timeline_end"])))
+                    + float((ducking or {}).get("fade", 0.0)),
+                )),
+            ),
         )
         for s in narration_segments
         if s.get("timeline_end", 0) > s.get("timeline_start", 0)
@@ -69,7 +85,7 @@ def build_timeline(canvas, duration_s, video_clips, narration_segments,
         ts, te = float(c["timeline_start"]), float(c["timeline_end"])
         audio = {"role": "original", "volume_keyframes": []}
         if ducking is not None:
-            audio["volume_keyframes"] = variable_ducking_keyframes(
+            audio["volume_keyframes"] = release_ducking_keyframes(
                 duck_windows, ducking["idle"], ducking["fade"], ts, te,
                 bridge=ducking.get("bridge"))
             audio["base_gain"] = round(float(ducking["idle"]), 4)
@@ -103,11 +119,14 @@ def build_timeline(canvas, duration_s, video_clips, narration_segments,
         narration = {
             "source_path": s["source_path"],
             "timeline_start": round(ts, 4),
-            "timeline_end": round(te, 4),
+            "timeline_end": _ceil_time(te, 4),
             "gain": round(float(s.get("gain", 1.0)), 4),
             "text": s.get("text", ""),
             "overlaps_speech": bool(s.get("overlaps_speech", True)),
         }
+        for key in ("source_duck_end", "source_restore_at", "source_handoff_status", "source_entry_status"):
+            if key in s:
+                narration[key] = deepcopy(s[key])
         if "speed" in s:
             narration["speed"] = float(s["speed"])
         narr_segs.append(narration)

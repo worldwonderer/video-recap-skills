@@ -1,12 +1,16 @@
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-script' / 'scripts'))
+
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[2] / "skills" / "video-script" / "scripts")
+)
 """Regression tests for narration.py punctuation + sentence-truncation fixes."""
 import sys
 from pathlib import Path
 
 
-from narration import _truncate_at_sentence, _validate_narration_budget, _text_char_count
+from agent_text import _text_char_count, _truncate_at_sentence
+from narration_lint import _validate_narration_budget
 
 
 # ── BUG 9: trailing pause punctuation must be replaced, not appended ──
@@ -100,13 +104,13 @@ def test_multi_sentence_block_spanning_scene_cut_keeps_full_text():
     assert out[0]["end"] == 18.0
 
 
-def test_single_sentence_beat_still_clamped_to_midpoint_scene():
-    # A short single-sentence beat whose midpoint (6.0) is in scene 0 but nominal end (12)
-    # spills into scene 1. The clamped window (2-10) still fits the tiny text, so the clamp
-    # still applies — single-sentence quiet-window alignment is unchanged by the fix.
+def test_single_sentence_beat_preserves_agent_authored_timing_across_scene():
+    # Scene detection is approximate and must not silently move audio-safe timing.
+    # The lint reports the crossing; the validator preserves the Agent's exact window.
     out = _validate_narration_budget(
         [{"start": 2.0, "end": 12.0, "narration": "他点了点头。"}], _TWO_SCENES
     )
     assert len(out) == 1
-    assert out[0]["end"] == 10.0  # tightened to the scene boundary
+    assert out[0]["start"] == 2.0
+    assert out[0]["end"] == 12.0
     assert out[0]["narration"].startswith("他点了点头")

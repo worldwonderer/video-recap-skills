@@ -73,6 +73,35 @@
 
 `has_speech` 标记该窗口是否与检测到的 ASR 语音重叠；下游（pipeline / narration）只把 `has_speech=false` 的窗口当作可放解说的安静窗口。
 
+## speech_boundary_anchors.json
+
+原声句末安全切入点。脚本把 ASR 终止标点的估算时间吸附到短声学停顿；它与
+`silence_periods.json` 分开，因为约 0.1–0.5 秒的停顿适合作为旁白入口，却不足以容纳整段旁白。
+
+```json
+{
+  "schema_version": 1,
+  "sentence_anchors": [
+    {
+      "time": 5.809,
+      "confidence": "high",
+      "text_tail": "带你重走詹姆斯的二十一年。",
+      "pause_start": 5.222,
+      "pause_end": 5.809
+    }
+  ]
+}
+```
+
+当 `overlaps_speech=true` 且旁白不是从 0 秒冷开场时，`narration` lint 要求 `start`
+贴近 `high`/`medium` 锚点。否则在 TTS 前用 `interrupts_source_sentence` 阻断，并返回
+`suggested_start` 与 `source_text_tail` 给 Agent 调整。常规块使用
+`source_entry_policy: "sentence_boundary"`；原声语句完整性没有抢断 override。最后一个可靠
+锚点之后又进入已声明的原声讲话区时，`suggested_start` 可为 `null`，Agent 必须移动、缩短或删除该旁白块。
+
+剪辑模式第二阶段会另外生成 `speech_boundary_anchors_output.json`，把锚点映射到剪后
+OUTPUT 时间轴，避免拿原片时间检查剪后旁白。
+
 ## timeline_fusion.json
 
 由 CLI 在生成 brief 时自动写出。它把 VLM 场景、ASR 对白和静音窗口按时间轴 overlap 合并，减少写稿时手工推断“这一幕有没有对白/能不能插解说”的成本。
@@ -291,6 +320,11 @@ CLI 校验 `clip_plan.json` 后写出，额外包含输出时间轴：
 }
 ```
 
+`qc.boundary_status.sentence_checks` 逐项记录每个片段 start/end 是 `safe`、`unchecked`
+还是 `blocking`。理解阶段已有 ASR 讲话时间时，任何未落到源头/源尾、可靠句末/静音窗，且
+不是同源无损连续连接的边界都会写入 `qc.blocking[].code=unsafe_clip_sentence_boundary`。
+切镜吸附先执行，句末吸附最后执行，保证视觉边界不会覆盖声音安全边界。
+
 多视频 validated clip 会额外保留来源字段，供 pass2 brief、timeline 和剪映导出追溯原素材：
 
 ```json
@@ -323,6 +357,7 @@ CLI 校验 `clip_plan.json` 后写出，额外包含输出时间轴：
     material.md                  # grep 友好摘要
     artifacts/scenes.json
     artifacts/asr_result.json
+    artifacts/asr_clean.json       # 启用 --consolidate-asr 时保留，恢复后 brief/review 优先使用
     artifacts/vlm_analysis.json
     artifacts/understanding_index.json
 ```
@@ -434,9 +469,19 @@ CLI 校验 `clip_plan.json` 后写出，额外包含输出时间轴：
 
 > 正常（无失败）运行也会带 `"partial": false, "failures": []`。partial 成片只适合预览，不建议直接发布。
 
+组装后，`assembly_manifest.json.audio_segments[]` 另外记录 `fit_status`、`truncated`、
+`truncate_reason`、`placed_audio_duration`、`placed_audio_path`、`source_duck_end`、
+`source_restore_at` 与 `source_handoff_status`。组装阶段从不按时间裁旁白尾音：放不下时用
+`no_safe_fit` 阻断。`placed_audio_path` 是实际写入 canonical `narration.wav` 的完整逐段 PCM；
+`timeline.json`/剪映必须引用它而不是更长的加速前文件。素材时长与序列化后的时间线段长不一致时，
+`assembly_qc.json` 用 `timeline_audio_mismatch` 阻断。原声恢复在 `pause_start` 前保持压低，
+只在实测停顿内渐强，并于 `source_restore_at` 完成，避免渐强提前泄露上一句尾音。
+
 ## dub_lint.json / dub_review.json
 
 Dub 模式下，`dub_script.json` 在 voiceclone **之前**先经过 deterministic lint，把明显不可发布的脚本挡在昂贵的克隆 TTS 之前。空译文、相邻行重叠、时间越界、`room < 0.4s` 等 **error** 会 `verdict=FAIL` 并阻断 render；`fast_speech`、`trim_risk` 等是 warning，不阻断。
+
+每行 voiceclone 原始 WAV 会按模型、合成提示、中文台词和参考音频 SHA-256 写入相邻的 `*.wav.meta.json`。指纹完全匹配且 WAV 可读取时，dub render 直接复用并在 `dub_manifest.json.lines[].tts_cache` 记录 `hit`；台词、参考音频、模型或提示变化都会自动失效并重新合成。
 
 ```json
 {
@@ -462,10 +507,13 @@ Dub 模式下，`dub_script.json` 在 voiceclone **之前**先经过 determinist
 ```
 
 > CLI：`dub.py --stage lint|review`（无需 video）、`dub.py --print-schema` 打印以上全部 dub artifact 契约；`--stage render` 会在克隆前自动写 `dub_lint.json` / `dub_review.json`，lint 非 PASS 即中止。
+> 最终 `dub_<name>.mp4` 显式输出 48 kHz AAC；不能沿用 `loudnorm` 内部的 96 kHz 分析采样率。
 ## shift-left QC artifacts
 
 `preflight_qc.json`、`final_qc.json`、`golden_eval.json`、`mimo_qc.json` 共用最小 QC 契约；stage 仅允许 `pre_cut` / `post_cut` / `pre_tts` / `post_tts` / `pre_assemble` / `post_render` / `golden`，其中 `mimo_qc.json` 是 artifact 而不是 stage。详见 `shift-left-qc-schema.md`。
 
 `recap.py` 可通过 `--mimo-qc pre-assemble|post-render|both`（默认 `off`）在组装前和/或成片后写 `mimo_qc.json`。每个 stage 最多一次 live request；相同素材/模型命中内容缓存，`--mimo-qc-refresh` 可刷新。`post_render` 最多临时抽取 6 张、最长边 768px 的 JPEG；base64 只进入请求，不写进 artifact。多 stage 报告聚合在 `metadata.stages`，状态为 `completed` / `cached` / `unavailable` / `failed`，任何状态都不阻断、也不自动修复。关闭功能会清理旧 `mimo_qc.json`，避免陈旧建议被误认为本轮结果。
+
+QC 证据把 `source_asr` 与 `generated_subtitles` 分开：前者只用于源事实/原声时序，后者是本轮旁白派生字幕，不能反过来充当事实证据。多视频项目从 `multi_source_manifest.json` 指向的逐源 work dir 汇集 ASR；`cut_output` 解说评审同样按 `source_id` 映射逐源 VLM/ASR，避免项目根目录没有单一 ASR 文件时产生空证据。
 
 渲染后，`recap.py` 先更新 `preflight_qc.json` 的 `post_render` stage，再运行可选 MiMo 提示，最后写 `final_qc.json` 和 `golden_eval.json`。`final_qc.json` 汇总最终 mp4、`assembly_manifest.json`、`assembly_qc.json`、`visual_qc.json`、`preflight_qc.json`、`mimo_qc.json` 的本地元数据；缺失/空成片、ffprobe 不可用或失败、以及 assembly/visual QC 的客观 blocker 会进入 deterministic blockers。MiMo 和其他 non-deterministic finding 永远不能成为 blocker；客观佐证必须由 deterministic producer 另发 finding。`golden_eval.json` 默认要求 `final_qc.json.ok=true`，也可用 golden fixture 做简单的时长、codec 和必需 artifact 断言。所有 QC metadata/evidence 写入前都经过 `qc_contract.redact_secrets`：secret-looking key/value 会被替换，URL userinfo/query/fragment 会被移除，仅保留必要 host/path 诊断信息。

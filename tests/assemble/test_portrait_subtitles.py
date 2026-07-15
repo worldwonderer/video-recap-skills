@@ -9,8 +9,14 @@ glyphs horizontally and mis-sized the source-subtitle mask band. Landscape outpu
 stay byte-identical; portrait must use a frame-matching PlayRes that fits the width.
 """
 from subprocess import CompletedProcess
-from assemble import _subtitle_style_config, _generate_ass, _probe_canvas  # noqa: E402
-import assemble  # noqa: E402
+import media  # noqa: E402
+from subtitle_core import _subtitle_style_config  # noqa: E402
+from subtitle_render import _generate_ass  # noqa: E402
+from visual_render import _subtitle_layout_qc  # noqa: E402
+
+
+def _probe_canvas(video_path):
+    return media._probe_canvas(video_path, command_runner=media.run_cmd)
 
 
 def test_canvas_none_is_legacy_default():
@@ -82,7 +88,7 @@ def test_probe_canvas_preserves_legacy_landscape(monkeypatch, tmp_path):
             }]
         }), "")
 
-    monkeypatch.setattr(assemble, "run_cmd", fake_run_cmd)
+    monkeypatch.setattr(media, "run_cmd", fake_run_cmd)
     canvas = _probe_canvas(tmp_path / "landscape.mp4")
     assert canvas["width"] == 1280
     assert canvas["height"] == 720
@@ -103,7 +109,7 @@ def test_probe_canvas_applies_rotation_and_sar(monkeypatch, tmp_path):
             }]
         }), "")
 
-    monkeypatch.setattr(assemble, "run_cmd", fake_run_cmd)
+    monkeypatch.setattr(media, "run_cmd", fake_run_cmd)
     canvas = _probe_canvas(tmp_path / "rotated.mp4")
     assert canvas["storage_width"] == 1920
     assert canvas["storage_height"] == 1080
@@ -121,7 +127,6 @@ def json_text(value):
 
 def test_probe_canvas_applies_rotation_metadata_and_preserves_landscape(monkeypatch):
     """Rotation metadata changes display canvas; unrotated landscape remains legacy width x height."""
-    import assemble
     from subprocess import CompletedProcess
 
     outputs = iter([
@@ -132,16 +137,16 @@ def test_probe_canvas_applies_rotation_metadata_and_preserves_landscape(monkeypa
     def fake_run_cmd(cmd):
         return CompletedProcess(cmd, 0, stdout=next(outputs), stderr="")
 
-    monkeypatch.setattr(assemble, "run_cmd", fake_run_cmd)
+    monkeypatch.setattr(media, "run_cmd", fake_run_cmd)
 
-    rotated = assemble._probe_canvas("rotated_portrait.mp4")
+    rotated = _probe_canvas("rotated_portrait.mp4")
     assert rotated["width"] == 1080
     assert rotated["height"] == 1920
     assert rotated["rotation"] == 90
     assert rotated["sar"] == "1:1"
     assert rotated["dar"] == "9:16"
 
-    landscape = assemble._probe_canvas("landscape.mp4")
+    landscape = _probe_canvas("landscape.mp4")
     assert landscape["width"] == 1280
     assert landscape["height"] == 720
     assert landscape["rotation"] == 0
@@ -149,12 +154,7 @@ def test_probe_canvas_applies_rotation_metadata_and_preserves_landscape(monkeypa
 
 def test_subtitle_layout_qc_flags_multiline_safe_area_overflow():
     """Subtitle layout QC must be multi-line aware and fail/warn when text exceeds safe area."""
-    import assemble
-
-    layout_qc = getattr(assemble, "_subtitle_layout_qc", None)
-    assert callable(layout_qc), "assemble must expose subtitle layout QC for overflow checks"
-
-    ok = layout_qc(
+    ok = _subtitle_layout_qc(
         [{"start": 0.0, "end": 2.0, "text": "第一行\n第二行"}],
         canvas={"width": 1080, "height": 1920},
         safe_area={"x": 54, "y": 96, "w": 972, "h": 1728},
@@ -162,7 +162,7 @@ def test_subtitle_layout_qc_flags_multiline_safe_area_overflow():
     assert ok["max_lines"] == 2
     assert ok["overflow"] is False
 
-    overflow = layout_qc(
+    overflow = _subtitle_layout_qc(
         [{"start": 0.0, "end": 2.0, "text": "超长字幕" * 120}],
         canvas={"width": 360, "height": 640},
         safe_area={"x": 36, "y": 64, "w": 288, "h": 120},

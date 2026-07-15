@@ -20,6 +20,7 @@ brittle and case-by-case. Two stages around an agent-authored pause:
 """
 import argparse
 import base64
+import hashlib
 import json
 import re
 import unicodedata
@@ -37,10 +38,14 @@ from lib import (
 
 CLONE_MODEL = "mimo-v2.5-tts-voiceclone"
 CLONE_SR = 24000  # mimo voiceclone returns 24kHz mono PCM16 wav
+DUB_DELIVERY_SR = 48000  # explicit delivery rate; loudnorm otherwise exposes its 96kHz internal rate
 ASR_MIME = "audio/wav"
 ATEMPO_CAP = 2.0  # max compression before we trim instead (atempo>2 also sounds rushed)
 DUB_FAST_SPEECH_CPS = 7.0
 DUB_TRIM_RISK_CPS = 7.0
+DUB_MIN_ASR_WINDOW_SECONDS = 0.5
+DUB_TTS_CACHE_VERSION = 1
+DUB_TTS_STYLE_PROMPT = "自然、清晰，保持原说话人的音色与节奏，语气平稳。"
 
 DUB_SCHEMA_VERSION = 1
 # Tolerate ~1-frame rounding in agent-estimated timings so the gate blocks only GENUINE
@@ -76,7 +81,7 @@ DUB_ARTIFACT_SCHEMAS = {
     },
     "dub_manifest.json": {
         "schema_version": DUB_SCHEMA_VERSION,
-        "shape": {"video": "path", "duration": "seconds", "lines": [{"start": 0.0, "end": 2.4, "zh": "中文台词", "fitted_wav": "path", "fitted_dur": 1.8, "room": 2.4}]},
+        "shape": {"video": "path", "duration": "seconds", "lines": [{"start": 0.0, "end": 2.4, "zh": "中文台词", "tts_cache": "hit|miss", "fitted_wav": "path", "fitted_dur": 1.8, "room": 2.4}]},
     },
     "dub_lint.json": DUB_LINT_SCHEMA,
     "dub_review.json": DUB_REVIEW_SCHEMA,
@@ -286,6 +291,12 @@ def _strip_reasoning_residue(text):
 
 
 def _run_asr(wav_path, lang="en"):
+    try:
+        with wave.open(str(wav_path), "rb") as source:
+            if source.getnframes() <= 0:
+                return ""
+    except (OSError, EOFError, wave.Error):
+        return ""
     raw = Path(wav_path).read_bytes()
     if not raw:
         return ""
@@ -312,6 +323,9 @@ def _asr_windows(audio_wav, segs_dir, duration, window):
     start, idx = 0.0, 0
     while start < duration:
         end = min(start + window, duration)
+        if end - start < DUB_MIN_ASR_WINDOW_SECONDS:
+            log(f"  ASR {start:.0f}-{end:.0f}s: 跳过不足 {DUB_MIN_ASR_WINDOW_SECONDS:.1f}s 的编码尾巴")
+            break
         seg_wav = segs_dir / f"asr_{idx:03d}.wav"
         _cut_wav(audio_wav, seg_wav, start, end - start)
         text = _run_asr(seg_wav)
@@ -328,7 +342,7 @@ def _clone_tts(text, ref_b64, out_wav):
     payload = {
         "model": CLONE_MODEL,
         "messages": [
-            {"role": "user", "content": "自然、清晰，保持原说话人的音色与节奏，语气平稳。"},
+            {"role": "user", "content": DUB_TTS_STYLE_PROMPT},
             {"role": "assistant", "content": text},
         ],
         "audio": {"format": "wav", "voice": f"data:audio/wav;base64,{ref_b64}"},
@@ -336,6 +350,58 @@ def _clone_tts(text, ref_b64, out_wav):
     resp = mimo_tts_api_call(payload)
     data = resp["choices"][0]["message"]["audio"]["data"]
     Path(out_wav).write_bytes(base64.b64decode(data))
+
+
+def _clone_cache_fingerprint(text, ref_bytes):
+    payload = {
+        "cache_version": DUB_TTS_CACHE_VERSION,
+        "model": CLONE_MODEL,
+        "style_prompt": DUB_TTS_STYLE_PROMPT,
+        "text": str(text),
+        "reference_sha256": hashlib.sha256(ref_bytes).hexdigest(),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _clone_cache_meta_path(raw_wav):
+    raw_wav = Path(raw_wav)
+    return raw_wav.with_name(f"{raw_wav.name}.meta.json")
+
+
+def _usable_clone_wav(path):
+    try:
+        sample_rate, channels, frames = _wav_frames(path)
+    except (FileNotFoundError, OSError, EOFError, wave.Error):
+        return False
+    return sample_rate > 0 and channels > 0 and bool(frames)
+
+
+def _write_clone_cache_meta(raw_wav, text, ref_bytes):
+    meta = {
+        "schema_version": DUB_TTS_CACHE_VERSION,
+        "fingerprint": _clone_cache_fingerprint(text, ref_bytes),
+        "model": CLONE_MODEL,
+    }
+    return _write_json(_clone_cache_meta_path(raw_wav), meta)
+
+
+def _ensure_clone_tts(text, ref_b64, ref_bytes, raw_wav):
+    raw_wav = Path(raw_wav)
+    expected = _clone_cache_fingerprint(text, ref_bytes)
+    meta_path = _clone_cache_meta_path(raw_wav)
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        meta = {}
+    if meta.get("fingerprint") == expected and _usable_clone_wav(raw_wav):
+        return True
+
+    _clone_tts(text, ref_b64, raw_wav)
+    if not _usable_clone_wav(raw_wav):
+        raise RuntimeError(f"MiMo voiceclone returned an invalid WAV: {raw_wav}")
+    _write_clone_cache_meta(raw_wav, text, ref_bytes)
+    return False
 
 
 def _time_fit(raw_wav, fitted_wav, room_seconds):
@@ -383,6 +449,7 @@ def _mux(video, dub_wav, out_video):
     run_cmd(["ffmpeg", "-y", "-i", str(video), "-i", str(dub_wav),
              "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
              "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", "192k",
+             "-ar", str(DUB_DELIVERY_SR),
              "-shortest", str(out_video)])
 
 
@@ -468,7 +535,8 @@ def stage_render(video, work, ref_start, ref_dur):
     if not ref_wav.exists():
         rs, rd = _ref_window(duration, ref_start, ref_dur)
         _cut_wav(work / "dub_source.wav", ref_wav, rs, rd)
-    ref_b64 = base64.b64encode(ref_wav.read_bytes()).decode("ascii")
+    ref_bytes = ref_wav.read_bytes()
+    ref_b64 = base64.b64encode(ref_bytes).decode("ascii")
 
     tts_dir = work / "dub_tts"
     tts_dir.mkdir(exist_ok=True)
@@ -480,11 +548,15 @@ def stage_render(video, work, ref_start, ref_dur):
         room = max(0.4, min(slot_end, nxt) - ln["start"])
         raw = tts_dir / f"line_{i:03d}_raw.wav"
         fitted = tts_dir / f"line_{i:03d}.wav"
-        _clone_tts(ln["zh"], ref_b64, raw)
+        cache_hit = _ensure_clone_tts(ln["zh"], ref_b64, ref_bytes, raw)
+        ln["tts_cache"] = "hit" if cache_hit else "miss"
         ln["fitted_wav"] = str(fitted)
         ln["fitted_dur"] = round(_time_fit(raw, fitted, room), 2)
         ln["room"] = round(room, 2)
-        log(f"  line {i}: {ln['start']:.1f}s fit={ln['fitted_dur']}s/room {ln['room']}s «{ln['zh'][:18]}»")
+        log(
+            f"  line {i}: {ln['start']:.1f}s fit={ln['fitted_dur']}s/room {ln['room']}s "
+            f"cache={ln['tts_cache']} «{ln['zh'][:18]}»"
+        )
 
     dub_wav = work / "dub_track.wav"
     _build_dub_track(lines, duration, dub_wav)
