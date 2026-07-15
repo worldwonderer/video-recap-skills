@@ -255,8 +255,8 @@ def test_mimo_qc_loads_its_own_client_after_another_skill_lib(tmp_path):
     code = (
         "import sys; "
         f"sys.path.insert(0, {str(script_lib)!r}); import lib; "
-        f"sys.path.insert(0, {str(recap_lib)!r}); import mimo_qc_report; "
-        "assert callable(mimo_qc_report.mimo_qc_api_call)"
+        f"sys.path.insert(0, {str(recap_lib)!r}); import mimo_qc; "
+        "assert callable(mimo_qc.mimo_qc_api_call)"
     )
 
     result = subprocess.run(

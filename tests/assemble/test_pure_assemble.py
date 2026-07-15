@@ -2242,6 +2242,238 @@ def test_source_handoff_blocks_unsafe_entry_and_missing_anchors_with_speech(tmp_
     assert missing["source_entry_status"] == "anchors_unavailable"
 
 
+def test_source_handoff_uses_output_speech_evidence_over_authored_flag(tmp_path):
+    plan = {}
+    (tmp_path / "clip_plan_validated.json").write_text(
+        json.dumps(plan), encoding="utf-8"
+    )
+    (tmp_path / "speech_boundary_anchors_output.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "timeline": "cut_output",
+                "clip_plan_fingerprint": _value_fingerprint(plan),
+                "sentence_anchors": [
+                    {"time": 4.0, "pause_start": 3.8, "confidence": "high"}
+                ],
+                "speech_spans": [{"start": 0.0, "end": 10.0}],
+                "quiet_windows": [{"start": 3.8, "end": 4.1}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    segment = {
+        "start": 2.0,
+        "end": 3.0,
+        "actual_place_start": 2.0,
+        "actual_place_end": 3.0,
+        "overlaps_speech": False,
+    }
+
+    report = audio_mix._apply_source_sentence_handoffs([segment], tmp_path, 10.0)
+
+    assert segment["source_handoff_blocking"] is True
+    assert segment["source_entry_status"] == "unsafe_entry"
+    assert report[0]["status"] == "sentence_boundary"
+
+
+def test_source_handoff_checks_entry_before_later_quiet(tmp_path):
+    plan = {}
+    (tmp_path / "clip_plan_validated.json").write_text(
+        json.dumps(plan), encoding="utf-8"
+    )
+    (tmp_path / "speech_boundary_anchors_output.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "timeline": "cut_output",
+                "clip_plan_fingerprint": _value_fingerprint(plan),
+                "sentence_anchors": [
+                    {"time": 1.0, "pause_start": 0.95, "confidence": "high"}
+                ],
+                "speech_spans": [{"start": 0.0, "end": 1.0}],
+                "quiet_windows": [{"start": 1.0, "end": 10.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    segment = {
+        "actual_place_start": 0.8,
+        "actual_place_end": 10.0,
+        "overlaps_speech": False,
+    }
+
+    audio_mix._apply_source_sentence_handoffs([segment], tmp_path, 10.0)
+
+    assert segment["source_handoff_blocking"] is True
+    assert segment["source_entry_status"] == "unsafe_entry"
+
+
+def test_source_handoff_rejects_stale_cut_output_evidence(tmp_path):
+    (tmp_path / "clip_plan_validated.json").write_text(
+        json.dumps({"clips": [{"source_start": 0, "source_end": 10}]}),
+        encoding="utf-8",
+    )
+    (tmp_path / "speech_boundary_anchors_output.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "timeline": "cut_output",
+                "clip_plan_fingerprint": "stale",
+                "sentence_anchors": [
+                    {"time": 4.0, "pause_start": 3.8, "confidence": "high"}
+                ],
+                "speech_spans": [{"start": 0.0, "end": 10.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    segment = {
+        "actual_place_start": 4.0,
+        "actual_place_end": 5.0,
+        "overlaps_speech": False,
+    }
+
+    report = audio_mix._apply_source_sentence_handoffs([segment], tmp_path, 10.0)
+
+    assert segment["source_handoff_blocking"] is True
+    assert segment["source_entry_status"] == "anchors_unavailable"
+    assert report[0]["anchor_artifact"] is None
+
+
+def test_source_handoff_keeps_quiet_entry_safe_when_later_audio_is_speech(tmp_path):
+    plan = {}
+    (tmp_path / "clip_plan_validated.json").write_text(
+        json.dumps(plan), encoding="utf-8"
+    )
+    (tmp_path / "speech_boundary_anchors_output.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "timeline": "cut_output",
+                "clip_plan_fingerprint": _value_fingerprint(plan),
+                "sentence_anchors": [
+                    {"time": 6.0, "pause_start": 5.8, "confidence": "high"}
+                ],
+                "speech_spans": [{"start": 3.0, "end": 10.0}],
+                "quiet_windows": [{"start": 0.0, "end": 3.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    segment = {
+        "actual_place_start": 1.0,
+        "actual_place_end": 5.0,
+        "overlaps_speech": True,
+    }
+
+    report = audio_mix._apply_source_sentence_handoffs([segment], tmp_path, 10.0)
+
+    assert segment.get("source_handoff_blocking") is not True
+    assert segment["source_entry_status"] == "quiet_source"
+    assert report[0]["status"] == "sentence_boundary"
+
+
+def test_source_handoff_ducks_later_speech_after_mostly_quiet_entry(tmp_path):
+    plan = {}
+    (tmp_path / "clip_plan_validated.json").write_text(
+        json.dumps(plan), encoding="utf-8"
+    )
+    (tmp_path / "speech_boundary_anchors_output.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "timeline": "cut_output",
+                "clip_plan_fingerprint": _value_fingerprint(plan),
+                "sentence_anchors": [
+                    {"time": 10.0, "pause_start": 9.8, "confidence": "high"}
+                ],
+                "speech_spans": [{"start": 8.5, "end": 10.0}],
+                "quiet_windows": [{"start": 0.0, "end": 8.5}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    segment = {
+        "actual_place_start": 1.0,
+        "actual_place_end": 10.0,
+        "overlaps_speech": False,
+    }
+
+    report = audio_mix._apply_source_sentence_handoffs([segment], tmp_path, 10.0)
+
+    assert segment["overlaps_speech"] is True
+    assert segment["source_entry_status"] == "quiet_source"
+    assert report[0]["status"] == "sentence_boundary"
+
+
+def test_source_handoff_fails_closed_for_current_but_empty_cut_evidence(tmp_path):
+    plan = {}
+    (tmp_path / "clip_plan_validated.json").write_text(
+        json.dumps(plan), encoding="utf-8"
+    )
+    (tmp_path / "speech_boundary_anchors_output.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "timeline": "cut_output",
+                "clip_plan_fingerprint": _value_fingerprint(plan),
+                "sentence_anchors": [],
+                "speech_spans": [],
+                "quiet_windows": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    segment = {
+        "actual_place_start": 1.0,
+        "actual_place_end": 2.0,
+        "overlaps_speech": False,
+    }
+
+    report = audio_mix._apply_source_sentence_handoffs([segment], tmp_path, 10.0)
+
+    assert segment["overlaps_speech"] is True
+    assert segment["source_handoff_blocking"] is True
+    assert segment["source_entry_status"] == "anchors_unavailable"
+    assert report[0]["status"] == "anchors_unavailable"
+
+
+def test_source_handoff_does_not_double_count_overlapping_quiet_evidence(tmp_path):
+    plan = {}
+    (tmp_path / "clip_plan_validated.json").write_text(
+        json.dumps(plan), encoding="utf-8"
+    )
+    (tmp_path / "speech_boundary_anchors_output.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "timeline": "cut_output",
+                "clip_plan_fingerprint": _value_fingerprint(plan),
+                "sentence_anchors": [
+                    {"time": 10.0, "pause_start": 9.8, "confidence": "high"}
+                ],
+                "speech_spans": [],
+                "quiet_windows": [
+                    {"start": 0.0, "end": 4.0},
+                    {"start": 0.0, "end": 4.0},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    segment = {
+        "actual_place_start": 0.0,
+        "actual_place_end": 10.0,
+        "overlaps_speech": False,
+    }
+
+    report = audio_mix._apply_source_sentence_handoffs([segment], tmp_path, 10.0)
+
+    assert segment["overlaps_speech"] is True
+    assert report[0]["status"] == "sentence_boundary"
+
+
 def test_source_handoff_blocks_entry_after_anchor_pause_has_ended(tmp_path):
     (tmp_path / "speech_boundary_anchors.json").write_text(
         json.dumps(

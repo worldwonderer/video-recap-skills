@@ -153,25 +153,26 @@ def main():
             threshold=CONFIG.get("scene_cut_detect_threshold", 0.4),
         )
 
-    if sources_manifest is None and CONFIG.get("snap_clip_line_end", True):
+    if sources_manifest is None:
         silence_periods = _load_silence_for_source(work_dir, None)
         sentence_boundaries = _load_sentence_boundary_windows(work_dir)
         safe_boundaries = _combine_boundary_windows(
             silence_periods, sentence_boundaries
         )
-        validated_plan = snap_clip_starts_to_lines(
-            validated_plan,
-            safe_boundaries,
-            video_duration,
-            CONFIG.get("clip_start_snap_max_prepend", 1.8),
-            max_trim=CONFIG.get("clip_start_snap_max_trim", 0.35),
-        )
-        validated_plan = snap_clip_ends_to_lines(
-            validated_plan,
-            safe_boundaries,
-            video_duration,
-            CONFIG.get("clip_snap_max_extend", 2.0),
-        )
+        if CONFIG.get("snap_clip_line_end", True):
+            validated_plan = snap_clip_starts_to_lines(
+                validated_plan,
+                safe_boundaries,
+                video_duration,
+                CONFIG.get("clip_start_snap_max_prepend", 1.8),
+                max_trim=CONFIG.get("clip_start_snap_max_trim", 0.35),
+            )
+            validated_plan = snap_clip_ends_to_lines(
+                validated_plan,
+                safe_boundaries,
+                video_duration,
+                CONFIG.get("clip_snap_max_extend", 2.0),
+            )
         validated_plan = enforce_clip_sentence_boundaries(
             validated_plan,
             safe_boundaries,
@@ -181,9 +182,7 @@ def main():
 
     # Multi-source: snap each clip against ITS OWN source's pauses/shot-changes (single-source
     # snaps above can't, since silence_periods.json and args.video are per-project, not per-source).
-    if sources_manifest is not None and (
-        CONFIG.get("snap_clip_line_end", True) or CONFIG.get("scene_cut_snap", True)
-    ):
+    if sources_manifest is not None:
         validated_plan = snap_multi_source_clips(
             validated_plan,
             validated_plan.get("sources", {}),

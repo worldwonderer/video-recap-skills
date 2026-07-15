@@ -8,6 +8,8 @@ import json
 import re
 import brief_context
 import brief_inputs
+import brief_timeline
+import validate as narration_validate
 import pytest  # noqa: F401
 from subprocess import CompletedProcess  # noqa: F401
 from lib import CONFIG, stable_hash
@@ -141,6 +143,260 @@ def test_lint_never_allows_intentional_source_interrupt_override(tmp_path):
     assert any(
         item["code"] == "interrupts_source_sentence" for item in report["errors"]
     )
+
+
+def _write_cut_output_speech_evidence(work_dir):
+    plan = {
+        "clips": [
+            {
+                "source_start": 100.0,
+                "source_end": 110.0,
+                "output_start": 0.0,
+                "output_end": 10.0,
+            }
+        ]
+    }
+    (work_dir / "clip_plan_validated.json").write_text(
+        json.dumps(plan), encoding="utf-8"
+    )
+    (work_dir / "speech_boundary_anchors.json").write_text(
+        json.dumps(
+            {
+                "sentence_anchors": [
+                    {"time": 104.0, "pause_start": 103.8, "confidence": "high"}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (work_dir / "speech_boundary_anchors_output.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "timeline": "cut_output",
+                "clip_plan_fingerprint": stable_hash(plan),
+                "sentence_anchors": [
+                    {"time": 4.0, "pause_start": 3.8, "confidence": "high"}
+                ],
+                "speech_spans": [{"start": 0.0, "end": 10.0}],
+                "quiet_windows": [{"start": 3.8, "end": 4.1}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_validate_cut_output_uses_output_clock_sentence_anchors(
+    monkeypatch, tmp_path
+):
+    _write_cut_output_speech_evidence(tmp_path)
+    (tmp_path / "narration.json").write_text(
+        json.dumps(
+            [
+                {
+                    "start": 4.0,
+                    "end": 6.0,
+                    "narration": "从剪后句末安全进入。",
+                    "overlaps_speech": True,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate.py",
+            "--work-dir",
+            str(tmp_path),
+            "--mode",
+            "cut_output",
+            "--output-duration",
+            "10",
+        ],
+    )
+
+    narration_validate.main()
+
+    report = json.loads((tmp_path / "narration_lint.json").read_text(encoding="utf-8"))
+    assert not any(
+        item["code"] == "interrupts_source_sentence" for item in report["errors"]
+    )
+
+
+def test_validate_cut_output_rejects_false_speech_override(monkeypatch, tmp_path):
+    _write_cut_output_speech_evidence(tmp_path)
+    (tmp_path / "narration.json").write_text(
+        json.dumps(
+            [
+                {
+                    "start": 2.0,
+                    "end": 3.0,
+                    "narration": "伪造静音标记不能绕过门禁。",
+                    "overlaps_speech": False,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate.py",
+            "--work-dir",
+            str(tmp_path),
+            "--mode",
+            "cut_output",
+            "--output-duration",
+            "10",
+        ],
+    )
+
+    with pytest.raises(ValueError, match="interrupts_source_sentence"):
+        narration_validate.main()
+
+
+def test_validate_cut_output_fails_closed_without_mapped_speech_evidence(
+    monkeypatch, tmp_path
+):
+    (tmp_path / "narration.json").write_text(
+        json.dumps(
+            [
+                {
+                    "start": 2.0,
+                    "end": 3.0,
+                    "narration": "缺少输出证据时不能信任静音标记。",
+                    "overlaps_speech": False,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate.py",
+            "--work-dir",
+            str(tmp_path),
+            "--mode",
+            "cut_output",
+            "--output-duration",
+            "10",
+        ],
+    )
+
+    with pytest.raises(ValueError, match="source_sentence_anchors_unavailable"):
+        narration_validate.main()
+
+
+def test_validate_cut_output_checks_entry_before_later_quiet(monkeypatch, tmp_path):
+    plan = {"clips": []}
+    (tmp_path / "clip_plan_validated.json").write_text(
+        json.dumps(plan), encoding="utf-8"
+    )
+    (tmp_path / "speech_boundary_anchors_output.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "timeline": "cut_output",
+                "clip_plan_fingerprint": stable_hash(plan),
+                "sentence_anchors": [
+                    {"time": 1.0, "pause_start": 0.95, "confidence": "high"}
+                ],
+                "speech_spans": [{"start": 0.0, "end": 1.0}],
+                "quiet_windows": [{"start": 1.0, "end": 10.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "narration.json").write_text(
+        json.dumps(
+            [
+                {
+                    "start": 0.8,
+                    "end": 10.0,
+                    "narration": "后面大段静音不能掩盖入口仍在原声句内。",
+                    "overlaps_speech": False,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate.py",
+            "--work-dir",
+            str(tmp_path),
+            "--mode",
+            "cut_output",
+            "--output-duration",
+            "10",
+        ],
+    )
+
+    with pytest.raises(ValueError, match="interrupts_source_sentence"):
+        narration_validate.main()
+
+
+def test_validate_cut_output_marks_later_speech_after_mostly_quiet_entry(
+    monkeypatch, tmp_path
+):
+    plan = {"clips": []}
+    (tmp_path / "clip_plan_validated.json").write_text(
+        json.dumps(plan), encoding="utf-8"
+    )
+    (tmp_path / "speech_boundary_anchors_output.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "timeline": "cut_output",
+                "clip_plan_fingerprint": stable_hash(plan),
+                "sentence_anchors": [
+                    {"time": 10.0, "pause_start": 9.8, "confidence": "high"}
+                ],
+                "speech_spans": [{"start": 8.5, "end": 10.0}],
+                "quiet_windows": [{"start": 0.0, "end": 8.5}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    narration_path = tmp_path / "narration.json"
+    narration_path.write_text(
+        json.dumps(
+            [
+                {
+                    "start": 1.0,
+                    "end": 10.0,
+                    "narration": "入口安静，但后段原声仍需混音避让。",
+                    "overlaps_speech": False,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate.py",
+            "--work-dir",
+            str(tmp_path),
+            "--mode",
+            "cut_output",
+            "--output-duration",
+            "10",
+        ],
+    )
+
+    narration_validate.main()
+
+    persisted = json.loads(narration_path.read_text(encoding="utf-8"))
+    assert persisted[0]["overlaps_speech"] is True
 
 
 def test_lint_blocks_entry_shortly_after_pause_has_ended(tmp_path):
@@ -1425,6 +1681,43 @@ def test_cut_pass2_agent_brief_writes_output_time_evidence(monkeypatch, tmp_path
         item for item in lint["errors"] if item["code"] == "interrupts_source_sentence"
     )
     assert issue["suggested_start"] == 4.0
+
+
+def test_cut_output_anchors_map_to_every_repeated_source_range(tmp_path):
+    plan = {
+        "clips": [
+            {
+                "source_start": 0.0,
+                "source_end": 10.0,
+                "output_start": 0.0,
+                "output_end": 10.0,
+            },
+            {
+                "source_start": 0.0,
+                "source_end": 10.0,
+                "output_start": 10.0,
+                "output_end": 20.0,
+            },
+        ]
+    }
+    (tmp_path / "clip_plan_validated.json").write_text(
+        json.dumps(plan), encoding="utf-8"
+    )
+    (tmp_path / "edited_source.mp4").write_bytes(b"edited")
+    (tmp_path / "speech_boundary_anchors.json").write_text(
+        json.dumps(
+            {
+                "sentence_anchors": [
+                    {"time": 4.0, "pause_start": 3.8, "confidence": "high"}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    anchors = brief_timeline._sentence_entry_anchors_for_brief(tmp_path, "cut")
+
+    assert [row["time"] for row in anchors] == [4.0, 14.0]
 
 
 def test_cut_pass2_agent_brief_requires_fresh_output_spans(monkeypatch, tmp_path):

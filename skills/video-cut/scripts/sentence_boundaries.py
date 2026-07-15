@@ -651,7 +651,7 @@ def snap_multi_source_clips(
     boundary unchanged. Mirrors the single-source snap_clip_ends_to_lines + snap_clips_off_shot_changes.
     """
     clips = plan.get("clips") or []
-    if not clips or not (do_line_snap or do_scene_snap):
+    if not clips:
         return plan
     allow_overlap = bool(plan.get("allow_overlap", False))
     groups = {}
@@ -680,11 +680,11 @@ def snap_multi_source_clips(
                 margin=scene_margin,
                 threshold=scene_threshold,
             )
+        source_work_dir = source.get("source_work_dir")
+        silence = _load_silence_for_source(work_dir, sid, source_work_dir)
+        anchors = _load_sentence_boundary_windows(work_dir, sid, source_work_dir)
+        boundaries = _combine_boundary_windows(silence, anchors)
         if do_line_snap:
-            source_work_dir = source.get("source_work_dir")
-            silence = _load_silence_for_source(work_dir, sid, source_work_dir)
-            anchors = _load_sentence_boundary_windows(work_dir, sid, source_work_dir)
-            boundaries = _combine_boundary_windows(silence, anchors)
             if start_max_prepend is not None:
                 mini = snap_clip_starts_to_lines(
                     mini,
@@ -694,12 +694,12 @@ def snap_multi_source_clips(
                     max_trim=start_max_trim if start_max_trim is not None else 0.35,
                 )
             mini = snap_clip_ends_to_lines(mini, boundaries, duration, line_max_extend)
-            mini = enforce_clip_sentence_boundaries(
-                mini,
-                boundaries,
-                _load_source_speech_spans(work_dir, sid, source_work_dir),
-                duration,
-            )
+        mini = enforce_clip_sentence_boundaries(
+            mini,
+            boundaries,
+            _load_source_speech_spans(work_dir, sid, source_work_dir),
+            duration,
+        )
         mini_boundary = (mini.get("qc") or {}).get("boundary_status") or {}
         for key in boundary_accum:
             boundary_accum[key].extend(

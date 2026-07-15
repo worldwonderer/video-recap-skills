@@ -1849,6 +1849,35 @@ def test_multi_source_briefs_include_clip_and_narration_craft(tmp_path):
     (src / "agent_narration_brief.md").write_text(
         "# per-source context\n", encoding="utf-8"
     )
+    (src / "speech_boundary_anchors.json").write_text(
+        json.dumps(
+            {
+                "sentence_anchors": [
+                    {
+                        "time": 2.0,
+                        "pause_start": 1.8,
+                        "text_tail": "来源句子。",
+                        "confidence": "high",
+                    },
+                    {
+                        "time": 2.5,
+                        "pause_start": "invalid",
+                        "text_tail": "畸形停顿时间。",
+                        "confidence": "medium",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (src / "asr_result.json").write_text(
+        json.dumps([{"start": 0.0, "end": 4.0, "text": "来源完整讲话。"}]),
+        encoding="utf-8",
+    )
+    (src / "silence_periods.json").write_text(
+        json.dumps([{"start": 1.8, "end": 2.2, "has_speech": False}]),
+        encoding="utf-8",
+    )
     records = [
         {
             "source_id": "src_a",
@@ -1935,6 +1964,18 @@ def test_multi_source_briefs_include_clip_and_narration_craft(tmp_path):
     assert "audio_owner" in out_text and "narration_job" in out_text
     assert "7:3" in out_text and "不是配额" in out_text
     assert "OUTPUT 时间线" in out_text
+    output_evidence = json.loads(
+        (work / "speech_boundary_anchors_output.json").read_text(encoding="utf-8")
+    )
+    assert output_evidence["timeline"] == "cut_output"
+    assert output_evidence["sentence_anchors"][0]["time"] == 1.0
+    assert output_evidence["sentence_anchors"][0]["pause_start"] == 0.8
+    assert output_evidence["sentence_anchors"][1]["time"] == 1.5
+    assert output_evidence["sentence_anchors"][1]["pause_start"] == 1.5
+    assert output_evidence["speech_spans"][0]["start"] == 0.0
+    assert output_evidence["speech_spans"][0]["end"] == 2.0
+    assert output_evidence["quiet_windows"][0]["start"] == 0.8
+    assert output_evidence["quiet_windows"][0]["end"] == 1.2
 
 
 def test_multi_source_excerpt_preserves_source_evidence_from_a_long_brief(tmp_path):

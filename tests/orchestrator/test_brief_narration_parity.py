@@ -36,6 +36,7 @@ SYNC_PAIRS = (
             "brief_inputs.py",
             "brief_timeline.py",
             "narration_lint.py",
+            "speech_ownership.py",
             "timeline_fusion.py",
         )
     ],

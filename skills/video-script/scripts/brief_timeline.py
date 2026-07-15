@@ -280,7 +280,7 @@ def _sentence_entry_anchors_for_brief(work_dir, edit_mode):
     try:
         payload = json.loads(source_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
+        payload = {}
     anchors = payload.get("sentence_anchors", []) if isinstance(payload, dict) else []
     anchors = [dict(item) for item in anchors if isinstance(item, dict)]
     if edit_mode != "cut" or not (work_dir / "edited_source.mp4").exists():
@@ -316,13 +316,46 @@ def _sentence_entry_anchors_for_brief(work_dir, edit_mode):
                     span["output_start"] + source_pause_start - span["source_start"], 3
                 )
                 remapped.append(item)
+
+    speech_rows = []
+    for name in ("asr_result.json", "asr_clean.json"):
+        try:
+            raw = json.loads((work_dir / name).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(raw, dict):
+            raw = raw.get("segments", [])
+        if isinstance(raw, list):
+            candidate = [
+                item
+                for item in raw
+                if isinstance(item, dict) and str(item.get("text") or "").strip()
+            ]
+            if candidate:
+                speech_rows = candidate
                 break
+    try:
+        raw_quiet = json.loads(
+            (work_dir / "silence_periods.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        raw_quiet = []
+    quiet_rows = [
+        item
+        for item in raw_quiet
+        if isinstance(item, dict) and not bool(item.get("has_speech", False))
+    ] if isinstance(raw_quiet, list) else []
     out_payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "artifact": "speech_boundary_anchors_output.json",
         "timeline": "cut_output",
         "source_artifact": "speech_boundary_anchors.json",
+        "clip_plan_fingerprint": stable_hash(
+            json.loads((work_dir / "clip_plan_validated.json").read_text(encoding="utf-8"))
+        ),
         "sentence_anchors": sorted(remapped, key=lambda item: float(item["time"])),
+        "speech_spans": _remap_segments_to_output_for_brief(speech_rows, spans),
+        "quiet_windows": _remap_segments_to_output_for_brief(quiet_rows, spans),
     }
     (work_dir / "speech_boundary_anchors_output.json").write_text(
         json.dumps(out_payload, ensure_ascii=False, indent=2), encoding="utf-8"

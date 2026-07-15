@@ -364,7 +364,7 @@ def test_live_call_is_one_request_per_stage_and_uses_cache_unless_refreshed(
         calls.append(payload)
         return _api_response([{"code": "pace", "message": "Pacing may feel rushed."}])
 
-    monkeypatch.setattr(mimo_qc_report, "mimo_qc_api_call", api_call)
+    monkeypatch.setattr(mimo_qc, "mimo_qc_api_call", api_call)
     config = {"mimo_video_api_key": "sk-test-secret", "mimo_qc_model": "mimo-qc-test"}
 
     first = mimo_qc.run(work, live=True, config=config)
@@ -390,7 +390,7 @@ def test_live_missing_key_is_unavailable_and_replaces_stale_report(
     work.mkdir()
     (work / "mimo_qc.json").write_text('{"stale": true}', encoding="utf-8")
     monkeypatch.setattr(
-        mimo_qc_report,
+        mimo_qc,
         "mimo_qc_api_call",
         lambda *args, **kwargs: pytest.fail("missing-key mode must not call the API"),
     )
@@ -419,7 +419,7 @@ def test_live_transport_failures_are_fail_open_reports(monkeypatch, tmp_path, fa
     def fail(*_args, **_kwargs):
         raise RuntimeError(failure)
 
-    monkeypatch.setattr(mimo_qc_report, "mimo_qc_api_call", fail)
+    monkeypatch.setattr(mimo_qc, "mimo_qc_api_call", fail)
     result = mimo_qc.run(
         work, live=True, config={"mimo_video_api_key": "sk-test-secret"}
     )
@@ -436,7 +436,7 @@ def test_malformed_live_response_is_failed_not_a_subjective_finding(
     work = tmp_path / "work"
     work.mkdir()
     monkeypatch.setattr(
-        mimo_qc_report, "mimo_qc_api_call", lambda *_a, **_k: {"choices": []}
+        mimo_qc, "mimo_qc_api_call", lambda *_a, **_k: {"choices": []}
     )
 
     result = mimo_qc.run(
@@ -472,7 +472,7 @@ def test_post_render_sends_bounded_frames_but_never_persists_base64(
         captured.update(payload)
         return _api_response([])
 
-    monkeypatch.setattr(mimo_qc_report, "mimo_qc_api_call", api_call)
+    monkeypatch.setattr(mimo_qc, "mimo_qc_api_call", api_call)
     result = mimo_qc.run(
         work,
         stage="post_render",
@@ -541,7 +541,7 @@ def test_pre_and_post_reports_are_aggregated_without_overwriting_each_other(
         )
         return _api_response([{"code": stage, "message": stage}])
 
-    monkeypatch.setattr(mimo_qc_report, "mimo_qc_api_call", api_call)
+    monkeypatch.setattr(mimo_qc, "mimo_qc_api_call", api_call)
     config = {"mimo_video_api_key": "sk-test-secret"}
     mimo_qc.run(work, stage="pre_assemble", live=True, config=config)
     mimo_qc.run(

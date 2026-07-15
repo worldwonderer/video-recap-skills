@@ -5,7 +5,7 @@ import math
 import re
 from pathlib import Path
 
-from artifacts import _load_work_json
+from artifacts import _load_work_json, _value_fingerprint
 from audio_automation import (
     coalesce_duck_windows,
     default_bridge,
@@ -123,10 +123,17 @@ def _seg_place_window(seg):
 def _load_sentence_handoff_anchors(work_dir):
     """Load high/medium sentence anchors and their measured pause windows."""
     work_dir = Path(work_dir)
-    candidates = []
-    if (work_dir / "edited_source.mp4").exists() or (work_dir / "clip_plan_validated.json").exists():
-        candidates.append(work_dir / "speech_boundary_anchors_output.json")
-    candidates.append(work_dir / "speech_boundary_anchors.json")
+    cut_mode = (work_dir / "edited_source.mp4").exists() or (
+        work_dir / "clip_plan_validated.json"
+    ).exists()
+    candidates = [
+        work_dir
+        / (
+            "speech_boundary_anchors_output.json"
+            if cut_mode
+            else "speech_boundary_anchors.json"
+        )
+    ]
     for path in candidates:
         if not path.exists():
             continue
@@ -134,6 +141,17 @@ def _load_sentence_handoff_anchors(work_dir):
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        if cut_mode:
+            plan = _load_work_json(work_dir, "clip_plan_validated.json")
+            if not (
+                isinstance(payload, dict)
+                and payload.get("schema_version") == 2
+                and payload.get("timeline") == "cut_output"
+                and isinstance(plan, dict)
+                and payload.get("clip_plan_fingerprint") == _value_fingerprint(plan)
+            ):
+                return [], None, {"require_measured": True}
+            payload = {**payload, "require_measured": True}
         raw = payload.get("sentence_anchors", []) if isinstance(payload, dict) else []
         anchors = []
         for item in raw:
@@ -153,11 +171,114 @@ def _load_sentence_handoff_anchors(work_dir):
                     "pause_start": round(max(0.0, min(pause_start, when)), 4),
                 })
         unique = {(row["time"], row["pause_start"]): row for row in anchors}
-        return sorted(unique.values(), key=lambda row: row["time"]), path.name
-    return [], None
+        return sorted(unique.values(), key=lambda row: row["time"]), path.name, payload
+    return [], None, {"require_measured": cut_mode}
 
 
-def _work_has_source_speech(work_dir):
+def _handoff_timed_rows(payload, key):
+    rows = payload.get(key, []) if isinstance(payload, dict) else []
+    out = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            start, end = float(row.get("start")), float(row.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(start) and math.isfinite(end) and end > start:
+            out.append({"start": start, "end": end})
+    return out
+
+
+def _handoff_speech_evidence(work_dir, artifact, payload):
+    speech = _handoff_timed_rows(payload, "speech_spans")
+    quiet = _handoff_timed_rows(payload, "quiet_windows")
+    if payload.get("require_measured"):
+        return speech, quiet
+    if artifact == "speech_boundary_anchors_output.json":
+        return speech, quiet
+    if not speech:
+        for name in ("asr_clean.json", "asr_result.json"):
+            raw = _load_work_json(work_dir, name)
+            if isinstance(raw, list):
+                raw = {"speech_spans": raw}
+            elif isinstance(raw, dict):
+                raw = {"speech_spans": raw.get("segments", [])}
+            speech = _handoff_timed_rows(raw, "speech_spans")
+            if speech:
+                break
+    if not quiet:
+        raw = _load_work_json(work_dir, "silence_periods.json")
+        raw = {"quiet_windows": [
+            row for row in raw
+            if isinstance(row, dict) and not bool(row.get("has_speech", False))
+        ]} if isinstance(raw, list) else {}
+        quiet = _handoff_timed_rows(raw, "quiet_windows")
+    return speech, quiet
+
+
+def _merged_handoff_intervals(start, end, rows):
+    intervals = sorted(
+        (max(start, row["start"]), min(end, row["end"]))
+        for row in rows
+        if row["end"] > start and row["start"] < end
+    )
+    merged = []
+    for left, right in intervals:
+        if right <= left:
+            continue
+        if merged and left <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], right))
+        else:
+            merged.append((left, right))
+    return merged
+
+
+def _speech_overlap_excluding_quiet(start, end, speech, quiet):
+    speech_intervals = _merged_handoff_intervals(start, end, speech)
+    quiet_intervals = _merged_handoff_intervals(start, end, quiet)
+    overlap = sum(right - left for left, right in speech_intervals)
+    for speech_left, speech_right in speech_intervals:
+        overlap -= sum(
+            max(0.0, min(speech_right, quiet_right) - max(speech_left, quiet_left))
+            for quiet_left, quiet_right in quiet_intervals
+        )
+    return max(0.0, overlap)
+
+
+def _measured_speech_owned(
+    start, end, speech, quiet, anchors, authored, require_measured=False
+):
+    duration = max(0.0, end - start)
+    quiet_min = max(
+        0.3,
+        duration * float(CONFIG.get("quiet_overlap_min_ratio", 0.8) or 0.8),
+    )
+    if speech:
+        return _speech_overlap_excluding_quiet(start, end, speech, quiet) > 0.05
+    quiet_overlap = sum(
+        right - left for left, right in _merged_handoff_intervals(start, end, quiet)
+    )
+    if quiet and quiet_overlap >= quiet_min:
+        return False
+    return True if anchors or require_measured else bool(authored)
+
+
+def _entry_speech_owned(
+    start, speech, quiet, anchors, authored, require_measured=False, tolerance=0.05
+):
+    if any(row["start"] - tolerance <= start <= row["end"] + tolerance for row in quiet):
+        return False
+    if any(row["start"] - tolerance <= start < row["end"] - tolerance for row in speech):
+        return True
+    if speech:
+        return False
+    return True if anchors or require_measured else bool(authored)
+
+
+def _work_has_source_speech(work_dir, speech_spans=None, require_measured=False):
+    if speech_spans or require_measured:
+        return True
     for name in ("asr_clean.json", "asr_result.json"):
         payload = _load_work_json(work_dir, name)
         if isinstance(payload, dict):
@@ -178,7 +299,11 @@ def _apply_source_sentence_handoffs(tts_segments, work_dir, video_duration):
     """
     fade = max(0.0, float(CONFIG.get("duck_fade_seconds", 0.3) or 0.0))
     bridge = max(0.0, float(CONFIG.get("duck_bridge_seconds", 1.5) or 0.0))
-    anchors, artifact = _load_sentence_handoff_anchors(work_dir)
+    anchors, artifact, evidence_payload = _load_sentence_handoff_anchors(work_dir)
+    speech_spans, quiet_windows = _handoff_speech_evidence(
+        work_dir, artifact, evidence_payload
+    )
+    require_measured = bool(evidence_payload.get("require_measured"))
     placed = []
     for seg in tts_segments or []:
         if not isinstance(seg, dict):
@@ -201,22 +326,48 @@ def _apply_source_sentence_handoffs(tts_segments, work_dir, video_duration):
         else:
             runs.append({"start": start, "end": end, "segments": [seg]})
 
-    source_has_speech = _work_has_source_speech(work_dir)
+    source_has_speech = _work_has_source_speech(
+        work_dir, speech_spans, require_measured=require_measured
+    )
     report = []
     for run in runs:
-        speech_owned = any(bool(seg.get("overlaps_speech", True)) for seg in run["segments"])
+        ownership = []
+        for seg in run["segments"]:
+            start, end = map(float, _seg_place_window(seg))
+            measured = _measured_speech_owned(
+                start,
+                end,
+                speech_spans,
+                quiet_windows,
+                anchors,
+                seg.get("overlaps_speech", True),
+                require_measured=require_measured,
+            )
+            seg["overlaps_speech"] = measured
+            ownership.append(measured)
+        first = run["segments"][0]
+        entry_owned = _entry_speech_owned(
+            run["start"],
+            speech_spans,
+            quiet_windows,
+            anchors,
+            first.get("overlaps_speech", True),
+            require_measured=require_measured,
+        )
+        speech_owned = entry_owned or any(ownership)
         if not speech_owned:
             report.append({"start": run["start"], "end": run["end"], "status": "quiet_source"})
             continue
-        first = run["segments"][0]
         last = run["segments"][-1]
         start_safe = run["start"] <= 0.25 or any(
             anchor["pause_start"] - 0.05 <= run["start"] <= anchor["time"] + 0.08
             for anchor in anchors
         )
-        if anchors and not start_safe:
+        if entry_owned and anchors and not start_safe:
             first["source_handoff_blocking"] = True
             first["source_entry_status"] = "unsafe_entry"
+        elif not entry_owned:
+            first["source_entry_status"] = "quiet_source"
         else:
             first["source_entry_status"] = "sentence_boundary" if anchors else "unverified"
 

@@ -18,6 +18,21 @@ PUBLIC_ENTRYPOINTS = (
     "skills/video-understanding/scripts/understand.py",
 )
 
+REQUIRED_PUBLIC_EXPORTS = {
+    "skills/video-assemble/scripts/assemble.py": {
+        "assemble_video",
+        "assembly_settings_fingerprint",
+        "final_loudnorm_filter",
+        "main",
+    },
+    "skills/video-recap/scripts/mimo_qc.py": {
+        "build_report",
+        "mimo_qc_api_call",
+        "sample_video_frames",
+        "write_report",
+    },
+}
+
 
 def _test_functions(path: Path):
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -214,5 +229,13 @@ def test_public_entrypoints_have_no_private_compatibility_surface():
             violations.append(
                 f"{relative} exports private compatibility symbols: {declared_exports}"
             )
+        else:
+            missing = REQUIRED_PUBLIC_EXPORTS.get(relative, set()) - set(
+                declared_exports
+            )
+            if missing:
+                violations.append(
+                    f"{relative} dropped established public exports: {sorted(missing)}"
+                )
 
     assert not violations, f"Entrypoints must expose public APIs only: {violations}"

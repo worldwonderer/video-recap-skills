@@ -1,19 +1,11 @@
 """Enforce narration timing, evidence, budget, and sentence-integrity rules."""
 
 import importlib.util
-
-
 import json
-
-import math
-
-
 from pathlib import Path
 
 from lib import CONFIG
-
 from lib import log
-
 from agent_text import (
     _clean_narration_punctuation,
     _find_scene_for_midpoint,
@@ -23,6 +15,10 @@ from agent_text import (
     _scene_available_seconds,
     _text_char_count,
     _truncate_at_sentence,
+)
+from speech_ownership import (
+    entry_overlaps_source_speech,
+    load_source_sentence_evidence,
 )
 
 try:
@@ -109,60 +105,28 @@ def _clip_matches_for_segment(seg, clip_plan):
     ]
 
 
-def _load_source_sentence_entry_anchors(work_dir, mode="full"):
-    """Load trustworthy sentence-end anchors for the narration timeline.
-
-    Full mode uses source timestamps directly. Cut pass 2 writes a separately
-    remapped OUTPUT-time artifact while building the brief; never compare output
-    narration timestamps against the original source clock.
-    """
-    if work_dir is None:
-        return []
-    work_dir = Path(work_dir)
-    if mode == "cut":
-        path = work_dir / "speech_boundary_anchors_output.json"
-        if not path.exists():
-            return []
-    else:
-        path = work_dir / "speech_boundary_anchors.json"
-    if not path.exists():
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    anchors = payload.get("sentence_anchors", []) if isinstance(payload, dict) else []
-    out = []
-    for anchor in anchors:
-        if not isinstance(anchor, dict) or anchor.get("confidence") not in {
-            "high",
-            "medium",
-        }:
-            continue
-        try:
-            when = float(anchor.get("time"))
-        except (TypeError, ValueError):
-            continue
-        if not math.isfinite(when) or when < 0:
-            continue
-        item = dict(anchor)
-        item["time"] = round(when, 3)
-        out.append(item)
-    return sorted(out, key=lambda item: item["time"])
-
-
-def _source_sentence_entry_issue(index, seg, start, anchors):
+def _source_sentence_entry_issue(index, start, anchors, speech_owned):
     """Return a blocking issue when narration enters midway through source speech.
 
     The validator reports a correction instead of silently moving audio. Source
     sentence integrity is invariant; an editorial policy string cannot bypass it.
     """
-    if not anchors or not bool(seg.get("overlaps_speech", True)):
+    if not speech_owned:
         return None
     # A cold-open at the first frame is not an interruption: the source sentence
     # has not been allowed to start. All later entries must use a measured anchor.
     if start <= 0.25:
         return None
+    if not anchors:
+        return _lint_issue(
+            "error",
+            index,
+            "source_sentence_anchors_unavailable",
+            "Source speech owns this entry but no verified sentence-end anchor is available. "
+            "Move/remove the narration or regenerate output speech evidence before TTS.",
+            entry_time=round(start, 3),
+            suggested_start=None,
+        )
     # Only the measured acoustic pause owns a safe entry. A tiny 80ms post-anchor
     # tolerance covers timestamp/sample rounding; the old +450ms allowance could
     # already be several Chinese syllables into the next sentence.
@@ -200,7 +164,8 @@ def lint_narration(
     errors = []
     warnings = []
     normalized = []
-    source_sentence_anchors = _load_source_sentence_entry_anchors(work_dir, mode=mode)
+    source_evidence = load_source_sentence_evidence(work_dir, mode=mode)
+    source_sentence_anchors = source_evidence["anchors"]
     if not isinstance(narration, list):
         errors.append(
             _lint_issue(
@@ -347,7 +312,10 @@ def lint_narration(
                     break
             if not connected_predecessor:
                 entry_issue = _source_sentence_entry_issue(
-                    idx, seg, start, source_sentence_anchors
+                    idx,
+                    start,
+                    source_sentence_anchors,
+                    entry_overlaps_source_speech(seg, source_evidence),
                 )
                 if entry_issue:
                     errors.append(entry_issue)

@@ -156,6 +156,70 @@ def test_cut_main_normalize_only_writes_validated_plan_without_render(
     assert not (tmp_path / "visual_qc.json").exists()
 
 
+@pytest.mark.parametrize("multi_source", [False, True], ids=["single", "multi"])
+def test_cut_main_keeps_sentence_gate_when_line_snapping_is_disabled(
+    monkeypatch, tmp_path, multi_source
+):
+    import cut_cli
+
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"v")
+    clip = {"start": 3.0, "end": 7.0}
+    argv = ["cut.py", str(video), "--work-dir", str(tmp_path), "--normalize-only"]
+
+    if multi_source:
+        clip["source_id"] = "a"
+        source_work = tmp_path / "sources" / "a"
+        source_work.mkdir(parents=True)
+        (source_work / "asr_clean.json").write_text(
+            json.dumps({"segments": [{"start": 0.0, "end": 10.0, "text": "完整原声句子。"}]}),
+            encoding="utf-8",
+        )
+        manifest = tmp_path / "sources.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "sources": [
+                        {
+                            "source_id": "a",
+                            "source_path": str(video),
+                            "source_work_dir": "sources/a",
+                            "duration": 10.0,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        argv.extend(["--sources-manifest", str(manifest)])
+    else:
+        (tmp_path / "asr_clean.json").write_text(
+            json.dumps({"segments": [{"start": 0.0, "end": 10.0, "text": "完整原声句子。"}]}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(cut_cli, "get_video_duration", lambda _path: 10.0)
+
+    (tmp_path / "clip_plan.json").write_text(
+        json.dumps({"clips": [clip]}), encoding="utf-8"
+    )
+    monkeypatch.setitem(cut_cli.CONFIG, "snap_clip_line_end", False)
+    monkeypatch.setitem(cut_cli.CONFIG, "scene_cut_snap", False)
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit, match="clip_plan QC blocking"):
+        cut.main()
+
+    validated = json.loads(
+        (tmp_path / "clip_plan_validated.json").read_text(encoding="utf-8")
+    )
+    blockers = validated["qc"]["blocking"]
+    assert {
+        row["edge"]
+        for row in blockers
+        if row.get("code") == "unsafe_clip_sentence_boundary"
+    } == {"start", "end"}
+
+
 def test_cut_main_blocks_on_heavy_drop_unless_allow_sparse(monkeypatch, tmp_path):
     """Step 4: a cut whose narration mostly falls outside the kept clips FAILS the preflight
     (before TTS), unless --allow-sparse-cut is given."""

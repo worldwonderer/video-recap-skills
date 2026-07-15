@@ -510,10 +510,124 @@ def _write_multi_source_clip_brief(work_dir, source_records, args):
     )
 
 
+def _write_multi_source_output_speech_evidence(work_dir, source_records, plan):
+    """Map each source's speech and quiet evidence onto the combined output clock."""
+    clips = plan.get("clips", []) if isinstance(plan, dict) else []
+    source_by_id = {str(row["source_id"]): row for row in source_records}
+    cache = {}
+
+    def load_source(source_id):
+        if source_id in cache:
+            return cache[source_id]
+        record = source_by_id.get(source_id)
+        source_dir = _source_work_dir(work_dir, record) if record else None
+        anchors = _load_json(source_dir / "speech_boundary_anchors.json") if source_dir else None
+        speech = None
+        for name in ("asr_result.json", "asr_clean.json"):
+            speech = _load_json(source_dir / name) if source_dir else None
+            rows = speech.get("segments", []) if isinstance(speech, dict) else speech
+            if isinstance(rows, list) and any(
+                isinstance(row, dict) and str(row.get("text") or "").strip()
+                for row in rows
+            ):
+                break
+        if isinstance(speech, dict):
+            speech = speech.get("segments", [])
+        quiet = _load_json(source_dir / "silence_periods.json") if source_dir else None
+        cache[source_id] = (
+            anchors.get("sentence_anchors", []) if isinstance(anchors, dict) else [],
+            speech if isinstance(speech, list) else [],
+            quiet if isinstance(quiet, list) else [],
+        )
+        return cache[source_id]
+
+    mapped_anchors, mapped_speech, mapped_quiet = [], [], []
+    for clip in clips:
+        source_id = str(clip.get("source_id") or "")
+        try:
+            source_start = float(clip["source_start"])
+            source_end = float(clip["source_end"])
+            output_start = float(clip["output_start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        anchors, speech_rows, quiet_rows = load_source(source_id)
+        for anchor in anchors:
+            try:
+                when = float(anchor.get("time"))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if source_start - 0.05 <= when <= source_end + 0.05:
+                item = dict(anchor)
+                try:
+                    pause = float(item.get("pause_start", when))
+                except (TypeError, ValueError):
+                    pause = when
+                if not math.isfinite(pause):
+                    pause = when
+                pause = max(source_start, min(pause, when))
+                item.update(
+                    source_id=source_id,
+                    source_time=round(when, 3),
+                    time=round(output_start + when - source_start, 3),
+                    source_pause_start=round(pause, 3),
+                    pause_start=round(output_start + pause - source_start, 3),
+                )
+                mapped_anchors.append(item)
+        for rows, destination, require_text in (
+            (speech_rows, mapped_speech, True),
+            (quiet_rows, mapped_quiet, False),
+        ):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                if require_text and not str(row.get("text") or "").strip():
+                    continue
+                if not require_text and bool(row.get("has_speech", False)):
+                    continue
+                try:
+                    start = max(source_start, float(row["start"]))
+                    end = min(source_end, float(row["end"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if end <= start:
+                    continue
+                item = dict(row)
+                item.update(
+                    source_id=source_id,
+                    source_start=round(start, 3),
+                    source_end=round(end, 3),
+                    start=round(output_start + start - source_start, 3),
+                    end=round(output_start + end - source_start, 3),
+                )
+                destination.append(item)
+
+    payload = {
+        "schema_version": 2,
+        "artifact": "speech_boundary_anchors_output.json",
+        "timeline": "cut_output",
+        "source_artifact": "multi_source_manifest.json",
+        "clip_plan_fingerprint": hashlib.md5(
+            json.dumps(
+                plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+            ).encode("utf-8")
+        ).hexdigest(),
+        "sentence_anchors": sorted(mapped_anchors, key=lambda row: float(row["time"])),
+        "speech_spans": sorted(mapped_speech, key=lambda row: (row["start"], row["end"])),
+        "quiet_windows": sorted(mapped_quiet, key=lambda row: (row["start"], row["end"])),
+    }
+    Path(work_dir, "speech_boundary_anchors_output.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return payload
+
+
 def _write_multi_source_output_brief(work_dir, source_records, validated_plan_path):
     plan = _load_json(validated_plan_path)
     clips = plan.get("clips", []) if isinstance(plan, dict) else []
     source_by_id = {s["source_id"]: s for s in source_records}
+    speech_evidence = _write_multi_source_output_speech_evidence(
+        work_dir, source_records, plan
+    )
     lines = [
         "# Multi-source Output Narration Brief",
         "",
@@ -547,6 +661,14 @@ def _write_multi_source_output_brief(work_dir, source_records, validated_plan_pa
             f"{sid} `{src.get('source_path', c.get('source_path', ''))}` "
             f"source {_fmt_range(c.get('source_start'), c.get('source_end'))} "
             f"{('— ' + str(c.get('reason'))) if c.get('reason') else ''}"
+        )
+    anchors = speech_evidence["sentence_anchors"]
+    if anchors:
+        lines += ["", "## 原声句末安全切入点"]
+        lines.extend(
+            f"- {float(row['time']):.3f}s ({row.get('source_id')})"
+            for row in anchors
+            if row.get("confidence") in {"high", "medium"}
         )
     lines += ["", "## Source work dirs"]
     for s in source_records:

@@ -16,8 +16,15 @@ import subtitle_render
 import timeline_emit
 import visual_render
 import lib
+from assembly_settings import assembly_settings_fingerprint
+from audio_mix import final_loudnorm_filter
 
-__all__ = ["assemble_video", "main"]
+__all__ = [
+    "assemble_video",
+    "assembly_settings_fingerprint",
+    "final_loudnorm_filter",
+    "main",
+]
 
 
 def assemble_video(input_video, tts_segments, work_dir, output_path):

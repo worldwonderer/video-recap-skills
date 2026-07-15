@@ -99,8 +99,23 @@
 `source_entry_policy: "sentence_boundary"`；原声语句完整性没有抢断 override。最后一个可靠
 锚点之后又进入已声明的原声讲话区时，`suggested_start` 可为 `null`，Agent 必须移动、缩短或删除该旁白块。
 
-剪辑模式第二阶段会另外生成 `speech_boundary_anchors_output.json`，把锚点映射到剪后
-OUTPUT 时间轴，避免拿原片时间检查剪后旁白。
+剪辑模式第二阶段会另外生成 `speech_boundary_anchors_output.json`，把锚点、ASR 语音区间和
+安静窗口映射到剪后 OUTPUT 时间轴，避免拿原片时间检查剪后旁白：
+
+```json
+{
+  "schema_version": 2,
+  "timeline": "cut_output",
+  "clip_plan_fingerprint": "md5-of-canonical-clip-plan",
+  "sentence_anchors": [{"time": 4.0, "pause_start": 3.8, "confidence": "high"}],
+  "speech_spans": [{"start": 0.0, "end": 3.8}],
+  "quiet_windows": [{"start": 3.8, "end": 4.1}]
+}
+```
+
+`clip_plan_fingerprint` 必须与当前 `clip_plan_validated.json` 一致。缺失、过期或畸形的
+output 证据一律 fail closed，不能回退到原片时钟或信任 Agent 写入的
+`overlaps_speech=false`。多来源剪辑的每条映射记录还保留 `source_id` 和原片起止时间。
 
 ## timeline_fusion.json
 

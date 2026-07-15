@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 
-import importlib.util
-
 import json
 
 
 import re
 
-
-from pathlib import Path
 
 from typing import Any, Mapping
 
@@ -19,29 +15,12 @@ import qc_contract
 
 from mimo_qc_evidence import _fingerprint_value, _redact, _summarize, safe_mimo_config
 from mimo_qc_payload import _strip_json_fence
-
-_LOCAL_LIB_PATH = Path(__file__).with_name("lib.py")
-
-_LOCAL_LIB_SPEC = importlib.util.spec_from_file_location(
-    "video_recap_mimo_qc_lib", _LOCAL_LIB_PATH
+from mimo_qc_contract import (
+    ARTIFACT_NAME,
+    DEFAULT_STAGE,
+    MAX_MESSAGE_CHARS,
+    MAX_OBSERVATIONS,
 )
-
-if (
-    _LOCAL_LIB_SPEC is None or _LOCAL_LIB_SPEC.loader is None
-):  # pragma: no cover - import invariant
-    raise ImportError(f"cannot load local MiMo QC client: {_LOCAL_LIB_PATH}")
-
-_LOCAL_LIB = importlib.util.module_from_spec(_LOCAL_LIB_SPEC)
-
-_LOCAL_LIB_SPEC.loader.exec_module(_LOCAL_LIB)
-
-ARTIFACT_NAME = "mimo_qc.json"
-
-DEFAULT_STAGE = "pre_assemble"
-
-MAX_OBSERVATIONS = 12
-
-MAX_MESSAGE_CHARS = 800
 
 
 def _extract_observations(model_output: Any) -> list[Mapping[str, Any]]:

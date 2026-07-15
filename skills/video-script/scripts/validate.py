@@ -12,7 +12,11 @@ import math
 from pathlib import Path
 
 from lib import CONFIG, log, stable_hash
-from narration_lint import validate_narration_or_raise, _validate_narration_budget
+from narration_lint import (
+    _validate_narration_budget,
+    validate_narration_or_raise,
+)
+from speech_ownership import measure_narration_speech_ownership
 from timeline_fusion import _align_narration_to_quiet
 
 
@@ -114,14 +118,20 @@ def main():
     silence_periods = _load(work_dir / "silence_periods.json") or []
     if args.mode == "cut_output":
         # Two-pass cut: narration is authored in OUTPUT time against edited_source.mp4 — there is
-        # no clip_plan to fall into and no source-time scene/quiet data to align to. Lint timing /
-        # budget / overlap / density on the output timeline only; never realign or rewrite it.
+        # no source-time clip membership check. Derive speech ownership from the mapped output
+        # evidence, then persist that measured flag for voiceover/assemble instead of trusting JSON.
+        narration = measure_narration_speech_ownership(
+            narration, work_dir, mode="cut_output"
+        )
         validate_narration_or_raise(
-            narration, None, clip_plan=None, mode="full", work_dir=work_dir
+            narration, None, clip_plan=None, mode="cut_output", work_dir=work_dir
         )
         if args.output_duration is None:
             raise SystemExit("--output-duration is required when --mode cut_output")
         _validate_output_timeline_bounds(narration, args.output_duration)
+        narration_path.write_text(
+            json.dumps(narration, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     elif args.mode == "cut":
         clip_plan = _load_cut_clip_plan(work_dir)
         validate_narration_or_raise(

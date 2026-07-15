@@ -27,19 +27,15 @@ from understanding_cache import _fresh
 # literal (it cannot import this module without breaking the brief/narration byte-parity).
 # Keep both in sync. Consolidate preserves spans exactly, so this only guards hand-edited files.
 _ASR_SPAN_TOL = 0.05
-ASR_CLEAN_POSTPROCESS_VERSION = 1
-_BOUNDARY_PUNCTUATION = "，。！？；：、,.!?;:…"
-_BOUNDARY_CONTINUATION = set("的地得了着过而并但就还又与及或则才将把被向从在为对到")
+ASR_CLEAN_POSTPROCESS_VERSION = 2
 
 CLEAN_PROMPT = """你在清洗中文视频的 ASR 逐段转写。对【每一段】做：补标点、修明显同音/错别字、（能判断时）在句首轻标说话人，让长段连读文本变成清晰可读的句子。
 铁律：
 - 不要合并或拆分段落，输出段数必须与输入完全一致，顺序一致。
 - 不要改时间，不要输出 start/end（时间由程序保留）。
 - 只清洗 text，不要增删事实、不要脑补画面。
-- 必须把相邻两段的尾部/开头连起来检查相邻段边界的切窗重复和误断句；切窗处不是自然句尾时，不要凭单段补句号。
-- 若上一段结尾和下一段开头因切窗重复，删除一次重复但仍保留两段，并让两段 text 直接拼接后语义、标点连续。
-  例 1：上一段以“虽然生涯前”结尾、下一段以“前两年没进季后赛”开头，应让拼接结果成为“虽然生涯前两年没进季后赛”。
-  例 2：上一段误成“只是传奇。”、下一段以“奇的开始”开头，应去掉切窗造成的重复“奇”和错误句号，让拼接结果成为“只是传奇的开始。”。
+- 必须把相邻两段连起来检查标点是否连续；切窗处不是自然句尾时，不要凭单段补句号。
+- 分段音频窗口互不重叠。相邻段首尾字面相同可能是合法复沓（例如“真的很难。难得让人想放弃”），不能仅凭文字相同删除任何一边的词；没有音频重叠证据时保留各段词汇内容。
 只返回 JSON：{"segments":[{"i":0,"text":"清洗后的文本","speaker":"可选说话人"}, ...]}，i 为输入段的下标。"""
 
 INDEX_SCHEMA_VERSION = 2
@@ -97,58 +93,6 @@ def parse_clean_response(text, asr_result):
         if speaker:
             merged["speaker"] = speaker
         out.append(merged)
-    return out
-
-
-def repair_clean_boundaries(segments, raw_segments):
-    """Remove ASR window-edge repetition only when the raw boundary proves it existed.
-
-    The cleanup model is asked to handle these edges, but real MiMo runs are stochastic and
-    sometimes preserve ``生涯前`` + ``前两年``.  This pass is deliberately narrow: it only
-    edits a cleaned boundary when the same suffix/prefix overlap is present in the raw ASR,
-    never changes spans/count, and avoids punctuation joins unless the next text is clearly a
-    continuation of the interrupted phrase.
-    """
-    out = [dict(seg) for seg in (segments or [])]
-    raw = [seg for seg in (raw_segments or []) if isinstance(seg, dict)]
-    for index in range(1, min(len(out), len(raw))):
-        raw_prev = str(raw[index - 1].get("text", "")).rstrip()
-        raw_next = str(raw[index].get("text", "")).lstrip()
-        raw_core = raw_prev.rstrip(_BOUNDARY_PUNCTUATION)
-        max_len = min(12, len(raw_core), len(raw_next))
-        overlap = next(
-            (
-                size
-                for size in range(max_len, 0, -1)
-                if raw_core[-size:] == raw_next[:size]
-            ),
-            0,
-        )
-        if not overlap:
-            continue
-
-        prev = str(out[index - 1].get("text", "")).rstrip()
-        nxt = str(out[index].get("text", "")).lstrip()
-        prev_core = prev.rstrip(_BOUNDARY_PUNCTUATION)
-        max_clean = min(12, len(prev_core), len(nxt))
-        clean_overlap = next(
-            (
-                size
-                for size in range(max_clean, 0, -1)
-                if prev_core[-size:] == nxt[:size]
-            ),
-            0,
-        )
-        if not clean_overlap or not nxt[clean_overlap:]:
-            continue
-
-        punctuation = prev[len(prev_core) :]
-        remainder = nxt[clean_overlap:]
-        if punctuation:
-            if len(prev_core) < 4 or remainder[0] not in _BOUNDARY_CONTINUATION:
-                continue
-            out[index - 1]["text"] = prev_core
-        out[index]["text"] = remainder
     return out
 
 
@@ -591,9 +535,7 @@ def consolidate_transcript(work_dir):
         }
     )
     content = _response_text(resp)
-    segments = repair_clean_boundaries(
-        parse_clean_response(content, asr_result), asr_result
-    )
+    segments = parse_clean_response(content, asr_result)
     payload = {
         "source_md5": _asr_source_md5(work_dir),
         "model": CONFIG.get("vlm_model", ""),

@@ -30,36 +30,6 @@ def test_parse_clean_rejects_count_mismatch_and_garbage():
     assert consolidate.parse_clean_response('{"segments":[{"i":0,"text":"x"}]}', asr) == asr
 
 
-def test_repair_clean_boundaries_removes_raw_proven_window_overlap():
-    raw = [
-        {"start": 0, "end": 15, "text": "虽然生涯前"},
-        {"start": 15, "end": 30, "text": "前两年没进季后赛"},
-    ]
-    cleaned = [dict(raw[0]), dict(raw[1])]
-
-    out = consolidate.repair_clean_boundaries(cleaned, raw)
-
-    assert out[0]["text"] + out[1]["text"] == "虽然生涯前两年没进季后赛"
-    assert [(item["start"], item["end"]) for item in out] == [(0, 15), (15, 30)]
-
-
-def test_repair_clean_boundaries_repairs_interrupted_phrase_punctuation_but_not_new_overlap():
-    raw = [
-        {"start": 0, "end": 15, "text": "这只是传奇。"},
-        {"start": 15, "end": 16, "text": "奇的开始。"},
-    ]
-    cleaned = [dict(raw[0]), dict(raw[1])]
-    out = consolidate.repair_clean_boundaries(cleaned, raw)
-    assert out[0]["text"] + out[1]["text"] == "这只是传奇的开始。"
-
-    no_raw_overlap = [
-        {"start": 0, "end": 1, "text": "第一句。"},
-        {"start": 1, "end": 2, "text": "第二句。"},
-    ]
-    model_created = [dict(no_raw_overlap[0]), {**no_raw_overlap[1], "text": "句第二句。"}]
-    assert consolidate.repair_clean_boundaries(model_created, no_raw_overlap) == model_created
-
-
 # ── Pass B: index ─────────────────────────────────────────────────────────────
 
 def test_parse_index_normalizes_to_four_list_keys():
@@ -83,9 +53,9 @@ def test_build_clean_messages_includes_transcript():
     asr = [{"start": 0, "end": 5, "text": "第一句对白"}]
     content = consolidate.build_clean_messages(asr)[0]["content"]
     assert "第一句对白" in content
-    assert "相邻段边界" in content
-    assert "生涯前" in content and "前两年" in content
-    assert "只是传奇。" in content and "奇的开始" in content
+    assert "相邻两段" in content
+    assert "分段音频窗口互不重叠" in content
+    assert "真的很难。难得让人想放弃" in content
 
 
 # ── drivers (mocked api) ──────────────────────────────────────────────────────
@@ -119,6 +89,34 @@ def test_consolidate_transcript_writes_provenance_and_preserves_spans(monkeypatc
     assert out["postprocess_version"] == consolidate.ASR_CLEAN_POSTPROCESS_VERSION
     assert out["segments"][0]["start"] == 0.0 and out["segments"][0]["end"] == 5.0
     assert out["segments"][0]["text"] == "你给我站住！"
+
+
+def test_consolidate_transcript_preserves_legitimate_boundary_repetition(
+    monkeypatch, tmp_path
+):
+    asr = [
+        {"start": 0.0, "end": 15.0, "text": "这件事真的很难。"},
+        {"start": 15.0, "end": 30.0, "text": "难得让人想放弃。"},
+    ]
+    (tmp_path / "asr_result.json").write_text(
+        json.dumps(asr), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        "consolidate.api_call",
+        lambda _payload: _fake(
+            '{"segments":['
+            '{"i":0,"text":"这件事真的很难。"},'
+            '{"i":1,"text":"难得让人想放弃。"}'
+            "]}"
+        ),
+    )
+
+    out = consolidate.consolidate_transcript(tmp_path)
+
+    assert [row["text"] for row in out["segments"]] == [
+        "这件事真的很难。",
+        "难得让人想放弃。",
+    ]
 
 
 

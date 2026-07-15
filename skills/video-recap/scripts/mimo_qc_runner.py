@@ -5,8 +5,6 @@ from __future__ import annotations
 import argparse
 
 
-import importlib.util
-
 import json
 
 
@@ -17,25 +15,7 @@ from typing import Any, Callable, Mapping, Sequence
 import qc_contract
 
 from mimo_qc_report import _stage_reports, build_report, write_report
-
-_LOCAL_LIB_PATH = Path(__file__).with_name("lib.py")
-
-_LOCAL_LIB_SPEC = importlib.util.spec_from_file_location(
-    "video_recap_mimo_qc_lib", _LOCAL_LIB_PATH
-)
-
-if (
-    _LOCAL_LIB_SPEC is None or _LOCAL_LIB_SPEC.loader is None
-):  # pragma: no cover - import invariant
-    raise ImportError(f"cannot load local MiMo QC client: {_LOCAL_LIB_PATH}")
-
-_LOCAL_LIB = importlib.util.module_from_spec(_LOCAL_LIB_SPEC)
-
-_LOCAL_LIB_SPEC.loader.exec_module(_LOCAL_LIB)
-
-ARTIFACT_NAME = "mimo_qc.json"
-
-DEFAULT_STAGE = "pre_assemble"
+from mimo_qc_contract import ARTIFACT_NAME, DEFAULT_STAGE
 
 JudgeCallable = Callable[
     [Mapping[str, Any]], Mapping[str, Any] | Sequence[Mapping[str, Any]]
@@ -57,6 +37,7 @@ def run(
     live: bool = False,
     refresh: bool = False,
     frame_sampler: FrameSampler | None = None,
+    api_call: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     path = Path(output) if output else Path(work_dir) / ARTIFACT_NAME
     existing = _stage_reports(path).get(stage)
@@ -72,6 +53,7 @@ def run(
         refresh=refresh,
         frame_sampler=frame_sampler,
         existing=existing,
+        api_call=api_call,
     )
     written_path, aggregate = write_report(work_dir, report, output=output)
     return {"path": str(written_path), "report": aggregate}
@@ -93,7 +75,11 @@ def _load_fixture(path: str | Path | None) -> Any | None:
         return json.load(handle)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    run_callable: Callable[..., dict[str, Any]] | None = None,
+) -> int:
     parser = argparse.ArgumentParser(
         description="Write advisory MiMo QC from local recap evidence."
     )
@@ -119,7 +105,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     fixture = _load_fixture(args.fixture)
     config = {"mimo_qc_model": args.model} if args.model else None
-    result = run(
+    result = (run_callable or run)(
         args.work_dir,
         stage=args.stage,
         fixture=fixture,

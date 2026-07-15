@@ -3,12 +3,7 @@
 from __future__ import annotations
 
 
-import importlib.util
-
 import json
-
-
-from pathlib import Path
 
 from typing import Any, Mapping, Sequence
 
@@ -19,27 +14,7 @@ from mimo_qc_evidence import (
     _redact,
     safe_mimo_config,
 )
-
-_LOCAL_LIB_PATH = Path(__file__).with_name("lib.py")
-
-_LOCAL_LIB_SPEC = importlib.util.spec_from_file_location(
-    "video_recap_mimo_qc_lib", _LOCAL_LIB_PATH
-)
-
-if (
-    _LOCAL_LIB_SPEC is None or _LOCAL_LIB_SPEC.loader is None
-):  # pragma: no cover - import invariant
-    raise ImportError(f"cannot load local MiMo QC client: {_LOCAL_LIB_PATH}")
-
-_LOCAL_LIB = importlib.util.module_from_spec(_LOCAL_LIB_SPEC)
-
-_LOCAL_LIB_SPEC.loader.exec_module(_LOCAL_LIB)
-
-ARTIFACT_NAME = "mimo_qc.json"
-
-DEFAULT_STAGE = "pre_assemble"
-
-MAX_FRAMES = 6
+from mimo_qc_contract import ARTIFACT_NAME, DEFAULT_STAGE, MAX_FRAMES
 
 
 def _semantic_evidence(evidence: Mapping[str, Any], *, stage: str) -> dict[str, Any]:

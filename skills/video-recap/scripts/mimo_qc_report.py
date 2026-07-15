@@ -7,8 +7,6 @@ import base64
 
 import hashlib
 
-import importlib.util
-
 import json
 
 import math
@@ -37,33 +35,14 @@ from mimo_qc_evidence import (
 )
 from mimo_qc_observations import normalize_observations
 from mimo_qc_payload import _request_payload, _validated_live_output, build_payload
-
-_LOCAL_LIB_PATH = Path(__file__).with_name("lib.py")
-
-_LOCAL_LIB_SPEC = importlib.util.spec_from_file_location(
-    "video_recap_mimo_qc_lib", _LOCAL_LIB_PATH
+from mimo_qc_client import mimo_qc_api_call
+from mimo_qc_contract import (
+    ARTIFACT_NAME,
+    DEFAULT_STAGE,
+    FRAME_SAMPLER_VERSION,
+    MAX_FRAME_DIMENSION,
+    MAX_FRAMES,
 )
-
-if (
-    _LOCAL_LIB_SPEC is None or _LOCAL_LIB_SPEC.loader is None
-):  # pragma: no cover - import invariant
-    raise ImportError(f"cannot load local MiMo QC client: {_LOCAL_LIB_PATH}")
-
-_LOCAL_LIB = importlib.util.module_from_spec(_LOCAL_LIB_SPEC)
-
-_LOCAL_LIB_SPEC.loader.exec_module(_LOCAL_LIB)
-
-mimo_qc_api_call = _LOCAL_LIB.mimo_qc_api_call
-
-ARTIFACT_NAME = "mimo_qc.json"
-
-DEFAULT_STAGE = "pre_assemble"
-
-MAX_FRAMES = 6
-
-MAX_FRAME_DIMENSION = 768
-
-FRAME_SAMPLER_VERSION = 2
 
 JudgeCallable = Callable[
     [Mapping[str, Any]], Mapping[str, Any] | Sequence[Mapping[str, Any]]
@@ -233,6 +212,7 @@ def build_report(
     refresh: bool = False,
     frame_sampler: FrameSampler | None = None,
     existing: Mapping[str, Any] | None = None,
+    api_call: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Build one validated stage report; all live failures remain successful QC."""
     root = Path(work_dir)
@@ -287,7 +267,7 @@ def build_report(
             status, error = "unavailable", "missing_key"
         else:
             try:
-                response = mimo_qc_api_call(
+                response = (api_call or mimo_qc_api_call)(
                     _request_payload(payload, samples),
                     config=_effective_config(config),
                     timeout=60,
