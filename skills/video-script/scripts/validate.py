@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """video-script validation entrypoint.
 
-Validate (and, in full mode, time-align) an agent-written narration.json against the
-local understanding index. Writes narration_lint.json and,
-in full mode, rewrites narration.json with quiet-window alignment applied.
+Validate an agent-written narration.json against the local understanding index.
+Writes narration_lint.json and, in full mode, rewrites only normalized fields plus
+the measured overlaps_speech flag; authored start/end timing is preserved exactly.
 """
+
 import argparse
 import json
 import math
 from pathlib import Path
 
 from lib import CONFIG, log, stable_hash
-from narration import (
-    validate_narration_or_raise,
+from narration_lint import (
     _validate_narration_budget,
-    _align_narration_to_quiet,
+    validate_narration_or_raise,
 )
+from speech_ownership import measure_narration_speech_ownership
+from timeline_fusion import _align_narration_to_quiet
 
 
 def _load(path):
@@ -33,17 +35,14 @@ def _load_cut_clip_plan(work_dir):
 
     raw = _load(raw_plan)
     validated = _load(validated_plan)
-    if (
-        isinstance(validated, dict)
-        and validated.get("raw_plan_fingerprint") == stable_hash(raw)
-    ):
+    if isinstance(validated, dict) and validated.get(
+        "raw_plan_fingerprint"
+    ) == stable_hash(raw):
         return validated
     # Validation may run before the cut stage refreshes clip_plan_validated.json.
     # Without a matching raw-plan provenance fingerprint, lint against the current
     # raw plan even when mtimes are equal or misleading.
     return raw
-
-
 
 
 def _validate_output_timeline_bounds(narration, output_duration, tolerance=0.05):
@@ -57,7 +56,9 @@ def _validate_output_timeline_bounds(narration, output_duration, tolerance=0.05)
     except (TypeError, ValueError):
         raise SystemExit(f"output_duration must be numeric, got {output_duration!r}")
     if not math.isfinite(duration) or duration <= 0:
-        raise SystemExit(f"output_duration must be finite and positive, got output_duration={duration:.3f}")
+        raise SystemExit(
+            f"output_duration must be finite and positive, got output_duration={duration:.3f}"
+        )
     if not isinstance(narration, list):
         return
 
@@ -87,14 +88,24 @@ def _validate_output_timeline_bounds(narration, output_duration, tolerance=0.05)
                 f"segment {idx} end={end:.3f} exceeds output_duration={duration:.3f}"
             )
     if problems:
-        raise SystemExit("cut_output narration exceeds rendered output timeline: " + "; ".join(problems))
+        raise SystemExit(
+            "cut_output narration exceeds rendered output timeline: "
+            + "; ".join(problems)
+        )
+
 
 def main():
-    ap = argparse.ArgumentParser(description="Validate + align agent-written narration.json.")
+    ap = argparse.ArgumentParser(
+        description="Validate + align agent-written narration.json."
+    )
     ap.add_argument("--work-dir", required=True)
     ap.add_argument("--mode", default="full", choices=["full", "cut", "cut_output"])
-    ap.add_argument("--output-duration", type=float, default=None,
-                    help="cut_output: rendered edited_source.mp4 duration in seconds")
+    ap.add_argument(
+        "--output-duration",
+        type=float,
+        default=None,
+        help="cut_output: rendered edited_source.mp4 duration in seconds",
+    )
     args = ap.parse_args()
 
     work_dir = Path(args.work_dir)
@@ -107,24 +118,46 @@ def main():
     silence_periods = _load(work_dir / "silence_periods.json") or []
     if args.mode == "cut_output":
         # Two-pass cut: narration is authored in OUTPUT time against edited_source.mp4 — there is
-        # no clip_plan to fall into and no source-time scene/quiet data to align to. Lint timing /
-        # budget / overlap / density on the output timeline only; never realign or rewrite it.
-        validate_narration_or_raise(narration, None, clip_plan=None, mode="full", work_dir=work_dir)
+        # no source-time clip membership check. Derive speech ownership from the mapped output
+        # evidence, then persist that measured flag for voiceover/assemble instead of trusting JSON.
+        narration = measure_narration_speech_ownership(
+            narration, work_dir, mode="cut_output"
+        )
+        validate_narration_or_raise(
+            narration, None, clip_plan=None, mode="cut_output", work_dir=work_dir
+        )
         if args.output_duration is None:
             raise SystemExit("--output-duration is required when --mode cut_output")
         _validate_output_timeline_bounds(narration, args.output_duration)
+        narration_path.write_text(
+            json.dumps(narration, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     elif args.mode == "cut":
         clip_plan = _load_cut_clip_plan(work_dir)
-        validate_narration_or_raise(narration, vlm_analysis, clip_plan=clip_plan, mode="cut", work_dir=work_dir)
+        validate_narration_or_raise(
+            narration, vlm_analysis, clip_plan=clip_plan, mode="cut", work_dir=work_dir
+        )
         narration = _validate_narration_budget(narration, vlm_analysis)
     else:
-        validate_narration_or_raise(narration, vlm_analysis, clip_plan=None, mode="full", work_dir=work_dir)
+        validate_narration_or_raise(
+            narration, vlm_analysis, clip_plan=None, mode="full", work_dir=work_dir
+        )
         narration = _align_narration_to_quiet(narration, vlm_analysis, silence_periods)
-        narration_path.write_text(json.dumps(narration, ensure_ascii=False, indent=2), encoding="utf-8")
+        narration_path.write_text(
+            json.dumps(narration, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     log(f"解说词验证完成: {len(narration)} 段")
-    print(json.dumps({"status": "validated", "segments": len(narration),
-                      "lint": str(work_dir / "narration_lint.json")}, ensure_ascii=False))
+    print(
+        json.dumps(
+            {
+                "status": "validated",
+                "segments": len(narration),
+                "lint": str(work_dir / "narration_lint.json"),
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 if __name__ == "__main__":

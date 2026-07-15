@@ -2,6 +2,7 @@
 frames-manifest, NO real video. Pins advisory behaviour (Principle 1): a sheet is still
 produced when no font is available, and any failure degrades to None without blocking.
 """
+
 import json
 import shutil
 import sys
@@ -10,10 +11,18 @@ from subprocess import CompletedProcess
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "skills" / "video-understanding" / "scripts"))
+sys.path.insert(
+    0,
+    str(
+        Path(__file__).resolve().parents[2]
+        / "skills"
+        / "video-understanding"
+        / "scripts"
+    ),
+)
 
 import storyboard  # noqa: E402
-import understand  # noqa: E402
+import understanding_runner as understand  # noqa: E402
 from lib import CONFIG  # noqa: E402
 
 
@@ -33,7 +42,8 @@ def _stage_frames(work_dir, numbers, fps=2.0):
         "frames": [p.name for p in frames],
     }
     (frames_dir / "frames_manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return frames
 
 
@@ -85,7 +95,9 @@ def test_scene_anchors_midpoint_and_long_scene_thirds(monkeypatch):
 
 def test_tile_selection_respects_cap(monkeypatch):
     monkeypatch.setitem(CONFIG, "storyboard_long_scene_seconds", 6.0)
-    scenes = [{"start": float(i) * 10, "end": float(i) * 10 + 9} for i in range(20)]  # 20 long scenes → 60 anchors
+    scenes = [
+        {"start": float(i) * 10, "end": float(i) * 10 + 9} for i in range(20)
+    ]  # 20 long scenes → 60 anchors
     anchors = storyboard._scene_anchor_timestamps(scenes, max_tiles=30)
     assert len(anchors) == 30
 
@@ -98,13 +110,25 @@ def test_nearest_existing_frame_and_clamp(tmp_path):
     paths, numbers = storyboard._frame_index(tmp_path)
     assert numbers == [0, 2, 4, 10]
     # t=1.0 @ fps2 → target 2 → exact frame_00002
-    assert storyboard._nearest_existing_frame(1.0, 2.0, paths, numbers).name == "frame_00002.jpg"
+    assert (
+        storyboard._nearest_existing_frame(1.0, 2.0, paths, numbers).name
+        == "frame_00002.jpg"
+    )
     # t=3.0 → target 6 → gap between 4 and 10; nearest is 4
-    assert storyboard._nearest_existing_frame(3.0, 2.0, paths, numbers).name == "frame_00004.jpg"
+    assert (
+        storyboard._nearest_existing_frame(3.0, 2.0, paths, numbers).name
+        == "frame_00004.jpg"
+    )
     # t below range clamps to first
-    assert storyboard._nearest_existing_frame(-5.0, 2.0, paths, numbers).name == "frame_00000.jpg"
+    assert (
+        storyboard._nearest_existing_frame(-5.0, 2.0, paths, numbers).name
+        == "frame_00000.jpg"
+    )
     # t above range clamps to LAST extracted frame (last-frame gap)
-    assert storyboard._nearest_existing_frame(999.0, 2.0, paths, numbers).name == "frame_00010.jpg"
+    assert (
+        storyboard._nearest_existing_frame(999.0, 2.0, paths, numbers).name
+        == "frame_00010.jpg"
+    )
 
 
 # ── source storyboard end-to-end (mocked ffmpeg) ─────────────────────────────
@@ -121,7 +145,9 @@ def test_build_source_storyboard_writes_json_and_tiles(monkeypatch, tmp_path):
     assert result["labels_burned"] is True
     assert result["tiles"], "expected tiles"
     # JSON sidecar lists ALL page paths
-    sb_json = json.loads((tmp_path / "storyboard" / "source_storyboard.json").read_text())
+    sb_json = json.loads(
+        (tmp_path / "storyboard" / "source_storyboard.json").read_text()
+    )
     assert sb_json["page_images"]
     assert all(Path(p).exists() for p in sb_json["page_images"])
     # tile command shape: a tile=<cols>x<rows> filter must appear
@@ -133,7 +159,9 @@ def test_build_source_storyboard_writes_json_and_tiles(monkeypatch, tmp_path):
 def test_source_storyboard_pages_when_over_one_page(monkeypatch, tmp_path):
     _stage_frames(tmp_path, list(range(0, 80, 2)), fps=2.0)
     monkeypatch.setitem(CONFIG, "storyboard_columns", 3)
-    monkeypatch.setitem(CONFIG, "storyboard_rows_per_page", 2)  # 6 tiles/page → force paging
+    monkeypatch.setitem(
+        CONFIG, "storyboard_rows_per_page", 2
+    )  # 6 tiles/page → force paging
     monkeypatch.setitem(CONFIG, "storyboard_long_scene_seconds", 6.0)
     _mock_run_cmd_makes_output(monkeypatch)
     _no_font(monkeypatch)
@@ -154,10 +182,22 @@ def _validated_plan():
     # forward map: output = output_start + (src - source_start)
     return {
         "clips": [
-            {"clip_id": 0, "source_start": 10.0, "source_end": 14.0,
-             "output_start": 0.0, "output_end": 4.0, "duration": 4.0},
-            {"clip_id": 1, "source_start": 30.0, "source_end": 30.6,
-             "output_start": 4.0, "output_end": 4.6, "duration": 0.6},
+            {
+                "clip_id": 0,
+                "source_start": 10.0,
+                "source_end": 14.0,
+                "output_start": 0.0,
+                "output_end": 4.0,
+                "duration": 4.0,
+            },
+            {
+                "clip_id": 1,
+                "source_start": 30.0,
+                "source_end": 30.6,
+                "output_start": 4.0,
+                "output_end": 4.6,
+                "duration": 0.6,
+            },
         ],
         "total_duration": 4.6,
     }
@@ -178,7 +218,9 @@ def test_edited_tiles_carry_output_and_source_time(monkeypatch, tmp_path):
     expected_out = 0.0 + (start_tile["source_timestamp"] - 10.0)
     assert start_tile["output_timestamp"] == pytest.approx(expected_out, abs=0.01)
     # every tile has both labels
-    assert all("output_timestamp" in t and "source_timestamp" in t for t in result["tiles"])
+    assert all(
+        "output_timestamp" in t and "source_timestamp" in t for t in result["tiles"]
+    )
     assert all("out " in t["label"] and "src " in t["label"] for t in result["tiles"])
 
 
@@ -224,7 +266,9 @@ def test_cache_reuse_then_rebuild_on_fps_change(monkeypatch, tmp_path):
     scenes_json = tmp_path / "scenes.json"
     scenes_json.write_text(json.dumps(scenes), encoding="utf-8")
     video = tmp_path / "video.mp4"
-    video.write_bytes(b"fake-video-bytes")  # real file so the cache meta can fingerprint it
+    video.write_bytes(
+        b"fake-video-bytes"
+    )  # real file so the cache meta can fingerprint it
 
     builds = {"n": 0}
     real_build = storyboard.build_source_storyboard
@@ -233,7 +277,9 @@ def test_cache_reuse_then_rebuild_on_fps_change(monkeypatch, tmp_path):
         builds["n"] += 1
         return real_build(*a, **k)
 
-    monkeypatch.setattr("understand.build_source_storyboard", counting_build)
+    monkeypatch.setattr(
+        "understanding_storyboard.build_source_storyboard", counting_build
+    )
 
     # first run builds
     understand._generate_source_storyboard(tmp_path, video, scenes, scenes_json)
@@ -266,15 +312,21 @@ def test_fps_only_change_invalidates_cache(monkeypatch, tmp_path):
 
     builds = {"n": 0}
     real_build = storyboard.build_source_storyboard
-    monkeypatch.setattr("understand.build_source_storyboard",
-                        lambda *a, **k: (builds.__setitem__("n", builds["n"] + 1), real_build(*a, **k))[1])
+    monkeypatch.setattr(
+        "understanding_storyboard.build_source_storyboard",
+        lambda *a, **k: (builds.__setitem__("n", builds["n"] + 1), real_build(*a, **k))[
+            1
+        ],
+    )
 
     understand._generate_source_storyboard(tmp_path, video, scenes, scenes_json)
     assert builds["n"] == 1
     # flip ONLY CONFIG fps; DO NOT re-stage frames (manifest fingerprint held constant)
     monkeypatch.setitem(CONFIG, "fps", 3.0)
     understand._generate_source_storyboard(tmp_path, video, scenes, scenes_json)
-    assert builds["n"] == 2, "fps in the cache key must invalidate even when frames are unchanged"
+    assert builds["n"] == 2, (
+        "fps in the cache key must invalidate even when frames are unchanged"
+    )
 
 
 def test_cache_hit_corrupt_sidecar_rebuilds_without_traceback(monkeypatch, tmp_path):
@@ -297,7 +349,9 @@ def test_cache_hit_corrupt_sidecar_rebuilds_without_traceback(monkeypatch, tmp_p
     # cache META stays valid; corrupt ONLY the artifact bytes so the cache-hit read hits bad JSON
     json_path.write_text("{ this is not valid json ", encoding="utf-8")
 
-    rebuilt = understand._generate_source_storyboard(tmp_path, video, scenes, scenes_json)
+    rebuilt = understand._generate_source_storyboard(
+        tmp_path, video, scenes, scenes_json
+    )
     assert rebuilt is not None  # no traceback; rebuilt
     assert json.loads(json_path.read_text(encoding="utf-8"))["timeline"] == "source"
 
@@ -307,7 +361,12 @@ def test_cache_hit_corrupt_sidecar_rebuilds_without_traceback(monkeypatch, tmp_p
 
 def test_source_storyboard_none_without_frames(tmp_path):
     # no frames staged
-    assert storyboard.build_source_storyboard(tmp_path, "video.mp4", [{"start": 0, "end": 2}], fps=2.0) is None
+    assert (
+        storyboard.build_source_storyboard(
+            tmp_path, "video.mp4", [{"start": 0, "end": 2}], fps=2.0
+        )
+        is None
+    )
 
 
 def test_source_storyboard_none_on_run_cmd_failure(monkeypatch, tmp_path):
@@ -319,7 +378,9 @@ def test_source_storyboard_none_on_run_cmd_failure(monkeypatch, tmp_path):
         return CompletedProcess(cmd, 1, stdout="", stderr="ffmpeg boom")
 
     monkeypatch.setattr("storyboard.run_cmd", failing_run_cmd)
-    result = storyboard.build_source_storyboard(tmp_path, "video.mp4", [{"start": 0, "end": 2}], fps=2.0)
+    result = storyboard.build_source_storyboard(
+        tmp_path, "video.mp4", [{"start": 0, "end": 2}], fps=2.0
+    )
     assert result is None
 
 
@@ -346,7 +407,9 @@ def test_font_absent_sheet_still_produced_unlabelled(monkeypatch, tmp_path):
     assert not any("drawtext=" in str(t) for c in calls for t in c)
     # JSON sidecar STILL carries the timestamps
     assert all("timestamp" in t and "label" in t for t in result["tiles"])
-    sb_json = json.loads((tmp_path / "storyboard" / "source_storyboard.json").read_text())
+    sb_json = json.loads(
+        (tmp_path / "storyboard" / "source_storyboard.json").read_text()
+    )
     assert sb_json["labels_burned"] is False
     assert sb_json["tiles"][0]["timestamp"] is not None
 
@@ -361,7 +424,9 @@ def test_font_probe_raising_does_not_abort_sheet(monkeypatch, tmp_path):
     # _probe_font itself swallows exceptions; simulate a deeper raise by patching it to raise,
     # then confirm build_source_storyboard's own guard still yields a sheet (advisory invariant).
     monkeypatch.setattr("storyboard._probe_font", boom)
-    result = storyboard.build_source_storyboard(tmp_path, "video.mp4", [{"start": 0, "end": 2}], fps=2.0)
+    result = storyboard.build_source_storyboard(
+        tmp_path, "video.mp4", [{"start": 0, "end": 2}], fps=2.0
+    )
     # A probe that RAISES must not abort: build catches it → None (degraded), never a traceback.
     assert result is None
 
@@ -378,7 +443,10 @@ def test_edited_storyboard_skipped_without_validated_plan(tmp_path):
 def test_brief_header_branches_on_labels_burned(tmp_path):
     brief = tmp_path / "agent_narration_brief.md"
     brief.write_text("# body\n", encoding="utf-8")
-    source = {"page_images": ["storyboard/source_storyboard.jpg"], "labels_burned": False}
+    source = {
+        "page_images": ["storyboard/source_storyboard.jpg"],
+        "labels_burned": False,
+    }
     understand._prepend_storyboard_brief_header(brief, source, None, cut_mode=False)
     text = brief.read_text(encoding="utf-8")
     assert "Storyboard" in text
@@ -390,8 +458,14 @@ def test_brief_header_branches_on_labels_burned(tmp_path):
 def test_brief_header_cut_mode_lists_both_timelines(tmp_path):
     brief = tmp_path / "agent_narration_brief.md"
     brief.write_text("# body\n", encoding="utf-8")
-    source = {"page_images": ["storyboard/source_storyboard.jpg"], "labels_burned": True}
-    edited = {"page_images": ["storyboard/edited_storyboard.jpg"], "labels_burned": True}
+    source = {
+        "page_images": ["storyboard/source_storyboard.jpg"],
+        "labels_burned": True,
+    }
+    edited = {
+        "page_images": ["storyboard/edited_storyboard.jpg"],
+        "labels_burned": True,
+    }
     understand._prepend_storyboard_brief_header(brief, source, edited, cut_mode=True)
     text = brief.read_text(encoding="utf-8")
     assert "源时间线" in text and "output" in text
@@ -410,7 +484,8 @@ def test_real_ffmpeg_tile_smoke(tmp_path):
     for n in nums:
         out = frames_dir / f"frame_{n:05d}.jpg"
         rc = shutil.os.system(
-            f"ffmpeg -y -f lavfi -i color=c=blue:s=64x64:d=1 -frames:v 1 '{out}' >/dev/null 2>&1")
+            f"ffmpeg -y -f lavfi -i color=c=blue:s=64x64:d=1 -frames:v 1 '{out}' >/dev/null 2>&1"
+        )
         if rc != 0 or not out.exists():
             pytest.skip("ffmpeg could not synthesize test frames")
     (frames_dir / "frames_manifest.json").write_text("{}", encoding="utf-8")

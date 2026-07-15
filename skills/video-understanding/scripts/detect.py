@@ -163,6 +163,13 @@ def _filter_junk_scenes(scenes, video_path):
 
 # ── Step 3.5: 静音检测 ─────────────────────────────────────────────
 
+def _compact_ffmpeg_error(stderr, limit=400):
+    """Keep the actionable tail without dumping ffmpeg build/configuration banners."""
+    text = " ".join(str(stderr or "").split())
+    if len(text) <= limit:
+        return text
+    return "…" + text[-limit:]
+
 def annotate_quiet_windows_with_asr(periods, asr_result=None, *, video_duration=None, configured_segment_seconds=None):
     """Pure helper: annotate quiet windows with ASR-overlap confidence and QC.
 
@@ -246,12 +253,20 @@ def detect_silence_periods(video_path, work_dir, asr_result=None):
             "-f", "wav", str(tmp_path)  # .tmp extension hides the format from ffmpeg; state it
         ])
         if extract.returncode != 0 or not tmp_path.exists():
-            log(f"音频提取失败，无法检测静音窗口（视频可能无音轨）: {extract.stderr}")
+            log(
+                "音频提取失败，无法检测静音窗口（视频可能无音轨）: "
+                f"{_compact_ffmpeg_error(extract.stderr)}"
+            )
             if tmp_path.exists():
                 tmp_path.unlink()
             return []
         os.replace(str(tmp_path), str(audio_path))
         _write_audio_meta(work_dir, video_path)
+
+    # Sentence-entry anchors use short acoustic pauses aligned to terminal ASR punctuation.
+    # They are deliberately separate from silence_periods.json: a 200ms sentence pause is a
+    # safe place to ENTER narration, but not a multi-second quiet window that can own a block.
+    detect_speech_boundary_anchors(work_dir, asr_result or [])
 
     noise = CONFIG["silence_noise_threshold"]
     min_dur = CONFIG["silence_min_duration"]
@@ -260,7 +275,7 @@ def detect_silence_periods(video_path, work_dir, asr_result=None):
            "-f", "null", "-"]
     result = run_cmd(cmd, timeout=120)
     if result.returncode != 0:
-        log(f"静音检测失败: {result.stderr}")
+        log(f"静音检测失败: {_compact_ffmpeg_error(result.stderr)}")
         return []
     output = result.stderr
 
@@ -314,6 +329,118 @@ def detect_silence_periods(video_path, work_dir, asr_result=None):
         flag = " [有语音]" if qp["has_speech"] else ""
         log(f"  {qp['start']:.1f}s-{qp['end']:.1f}s ({qp['duration']:.1f}s){flag}")
     return periods
+
+
+def _asr_segments(asr_result):
+    if isinstance(asr_result, dict):
+        asr_result = asr_result.get("segments", [])
+    return [item for item in (asr_result or []) if isinstance(item, dict)]
+
+
+def detect_speech_boundary_anchors(work_dir, asr_result):
+    """Write sentence-end entry anchors by aligning ASR punctuation to short pauses.
+
+    MiMo ASR timestamps are window-level, not word-level. We therefore estimate each terminal
+    punctuation time from its character position inside the ASR window, then snap it to the
+    closest short acoustic pause. The output is guidance + a deterministic pre-TTS gate; it
+    never rewrites narration timing on its own.
+    """
+    work_dir = Path(work_dir)
+    audio_path = work_dir / "audio.wav"
+    out_path = work_dir / "speech_boundary_anchors.json"
+    segments = _asr_segments(asr_result)
+    report = {
+        "schema_version": 1,
+        "artifact": "speech_boundary_anchors.json",
+        "status": "completed",
+        "detector": {
+            "noise_threshold": CONFIG.get("source_boundary_noise_threshold", "-18dB"),
+            "min_pause_seconds": float(CONFIG.get("source_boundary_min_pause", 0.12)),
+            "alignment": "terminal_punctuation_to_nearest_acoustic_pause",
+        },
+        "sentence_anchors": [],
+        "acoustic_pauses": [],
+    }
+    if not audio_path.exists() or not segments:
+        report["status"] = "unavailable"
+        report["reason"] = "missing_audio_or_asr"
+        out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return report
+
+    result = run_cmd([
+        "ffmpeg", "-hide_banner", "-nostats", "-i", str(audio_path),
+        "-af", (
+            "silencedetect="
+            f"noise={CONFIG.get('source_boundary_noise_threshold', '-18dB')}:"
+            f"d={float(CONFIG.get('source_boundary_min_pause', 0.12))}"
+        ),
+        "-f", "null", "-",
+    ], timeout=120)
+    if result.returncode != 0:
+        report["status"] = "failed"
+        report["reason"] = "silencedetect_failed"
+        out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return report
+
+    starts = [float(value) for value in re.findall(r"silence_start:\s*([\d.]+)", result.stderr or "")]
+    ends = [float(value) for value in re.findall(r"silence_end:\s*([\d.]+)", result.stderr or "")]
+    pauses = []
+    for index, (start, end) in enumerate(zip(starts, ends)):
+        if end <= start:
+            continue
+        pauses.append({
+            "index": index,
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "midpoint": round((start + end) / 2.0, 3),
+            "duration": round(end - start, 3),
+        })
+    report["acoustic_pauses"] = pauses
+
+    max_error = float(CONFIG.get("source_boundary_max_alignment_error", 2.1))
+    used = set()
+    anchors = []
+    for asr_index, segment in enumerate(segments):
+        try:
+            seg_start = float(segment.get("start"))
+            seg_end = float(segment.get("end"))
+        except (TypeError, ValueError):
+            continue
+        text = str(segment.get("text") or "").strip()
+        if seg_end <= seg_start or not text:
+            continue
+        last_midpoint = seg_start - 1e-6
+        for match in re.finditer(r"[。！？!?；;]", text):
+            expected = seg_start + (seg_end - seg_start) * (match.end() / max(1, len(text)))
+            candidates = [
+                pause for pause in pauses
+                if pause["index"] not in used
+                and seg_start - 0.3 <= pause["midpoint"] <= seg_end + 0.3
+                and pause["midpoint"] > last_midpoint
+                and abs(pause["midpoint"] - expected) <= max_error
+            ]
+            if not candidates:
+                continue
+            pause = min(candidates, key=lambda item: abs(item["midpoint"] - expected))
+            used.add(pause["index"])
+            last_midpoint = pause["midpoint"]
+            error = abs(pause["midpoint"] - expected)
+            confidence = "high" if error <= 0.6 else ("medium" if error <= 1.2 else "low")
+            anchors.append({
+                "time": pause["end"],
+                "pause_start": pause["start"],
+                "pause_end": pause["end"],
+                "expected_time": round(expected, 3),
+                "alignment_error": round(error, 3),
+                "confidence": confidence,
+                "punctuation": match.group(0),
+                "text_tail": text[max(0, match.end() - 32):match.end()],
+                "asr_segment_index": asr_index,
+            })
+    report["sentence_anchors"] = sorted(anchors, key=lambda item: item["time"])
+    out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    log(f"检测到 {len(anchors)} 个原声句末安全切入点")
+    return report
 
 
 def _audio_meta_path(work_dir):

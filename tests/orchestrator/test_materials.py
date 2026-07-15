@@ -48,6 +48,7 @@ def test_save_material_copies_allowed_files_writes_md_and_append_index(tmp_path)
     work = tmp_path / "work"
     work.mkdir()
     (work / "scenes.json").write_text(json.dumps([{"start": 0, "end": 1}]), encoding="utf-8")
+    (work / "asr_clean.json").write_text(json.dumps({"segments": [{"text": "clean"}]}), encoding="utf-8")
     (work / "understanding_index.json").write_text(json.dumps({"summary": "英雄入场", "tags": ["hero"]}), encoding="utf-8")
     (work / "audio.wav").write_bytes(b"raw audio should not copy")
     (work / "secret.json").write_text("tp-secret", encoding="utf-8")
@@ -58,6 +59,7 @@ def test_save_material_copies_allowed_files_writes_md_and_append_index(tmp_path)
     assert (mdir / "material.json").exists()
     assert (mdir / "material.md").exists()
     assert (mdir / "artifacts" / "scenes.json").exists()
+    assert (mdir / "artifacts" / "asr_clean.json").exists()
     assert not (mdir / "artifacts" / "audio.wav").exists()
     assert not (mdir / "artifacts" / "secret.json").exists()
     lines = (lib / "materials_index.jsonl").read_text(encoding="utf-8").splitlines()
@@ -76,6 +78,7 @@ def test_restore_material_requires_matching_fingerprint_and_settings(tmp_path):
     work = tmp_path / "work"
     work.mkdir()
     (work / "asr_result.json").write_text(json.dumps([{"text": "hello"}]), encoding="utf-8")
+    (work / "asr_clean.json").write_text(json.dumps({"segments": [{"text": "hello。"}]}), encoding="utf-8")
     meta = materials.save_material(lib, work, tmp_path / "ep.mp4", "a" * 64, "s1")
 
     dest = tmp_path / "dest"
@@ -90,6 +93,7 @@ def test_restore_material_requires_matching_fingerprint_and_settings(tmp_path):
     ok = materials.restore_material(lib, dest, source_fingerprint="a" * 64, settings_fp="s1", material_id=meta["material_id"])
     assert ok["restored"] is True
     assert (dest / "asr_result.json").exists()
+    assert (dest / "asr_clean.json").exists()
 
 
 def test_restore_material_prunes_stale_allowed_artifacts_before_copy(tmp_path):

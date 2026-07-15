@@ -248,7 +248,7 @@ CONFIG = {
     "subtitle_mask_padding": env_int("SUBTITLE_MASK_PADDING", 4, minimum=0),
     "subtitle_y_top": env_int("SUBTITLE_Y_TOP", -1, minimum=-1),  # 自动旋转后的显示画布坐标；top/bot 同时有效时贴合原字幕带
     "subtitle_y_bot": env_int("SUBTITLE_Y_BOT", -1, minimum=-1),
-    "narration_delay_seconds": 1.5,  # 解说延迟放置秒数，让画面先出现再解说（仅用于段落起点）
+    "narration_delay_seconds": env_float("NARRATION_DELAY_SECONDS", 0.0, minimum=0.0),  # 默认严格采用 Agent 写入的 start；旧项目可显式恢复延迟
     "narration_tighten": env_bool("NARRATION_TIGHTEN", True),  # 段落内把句子紧贴上一句实际收尾播放，句间间隔稳定≤tight_pause，杜绝"一句解说一段空白"的卡顿
     "narration_run_gap_seconds": env_float("NARRATION_RUN_GAP_SECONDS", 1.6, minimum=0.0),  # 作者留白超过此值=新段落（让精彩原声透出）；小于则视为同一连续段落
     "narration_tight_pause_seconds": env_float("NARRATION_TIGHT_PAUSE_SECONDS", 0.35, minimum=0.0),  # 段落内句间固定间隔(秒)

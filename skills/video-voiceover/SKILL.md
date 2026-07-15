@@ -57,6 +57,7 @@ python3 scripts/voiceover.py --work-dir <work_dir> \
 
 - 重跑只复用内容与 TTS 设置均匹配的分段音频；修改旁白或合成参数后，只重生成受影响的 WAV。
 - `--voice-ref` 仅用于 full/cut 解说克隆，切换到 `mimo-v2.5-tts-voiceclone`。仅在确需新合成时惰性规范化一次；
+- dub voiceclone 原始 WAV 也会用模型、提示、台词和参考音频指纹缓存；匹配重跑不再重复请求或计费，`dub_manifest.json` 逐行记录 `tts_cache=hit|miss`；
   参考音频内容或预处理指纹变化会使旧缓存失效。仅在获得授权后使用，参考音频会发送到 MiMo。
 - `TTS_WORKERS`、`TTS_TIMEOUT`、`TTS_RETRIES`、`ALLOW_PARTIAL_TTS` 用于调整并发、超时、重试与部分成功策略。
 - dub 模式有独立的确定性门禁：`dub_lint.json` 会在语音克隆前阻止空行、重叠或越界译文；

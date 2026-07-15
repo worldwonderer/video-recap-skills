@@ -51,7 +51,11 @@ def test_build_index_messages_reads_dict_frame_facts():
 
 def test_build_clean_messages_includes_transcript():
     asr = [{"start": 0, "end": 5, "text": "第一句对白"}]
-    assert "第一句对白" in consolidate.build_clean_messages(asr)[0]["content"]
+    content = consolidate.build_clean_messages(asr)[0]["content"]
+    assert "第一句对白" in content
+    assert "相邻两段" in content
+    assert "分段音频窗口互不重叠" in content
+    assert "真的很难。难得让人想放弃" in content
 
 
 # ── drivers (mocked api) ──────────────────────────────────────────────────────
@@ -82,8 +86,37 @@ def test_consolidate_transcript_writes_provenance_and_preserves_spans(monkeypatc
     assert out["source_md5"] == hashlib.md5((tmp_path / "asr_result.json").read_bytes()).hexdigest()
     assert out["model"] == consolidate.CONFIG.get("vlm_model", "")
     assert out["prompt_md5"] == consolidate._prompt_fingerprint(consolidate.CLEAN_PROMPT)
+    assert out["postprocess_version"] == consolidate.ASR_CLEAN_POSTPROCESS_VERSION
     assert out["segments"][0]["start"] == 0.0 and out["segments"][0]["end"] == 5.0
     assert out["segments"][0]["text"] == "你给我站住！"
+
+
+def test_consolidate_transcript_preserves_legitimate_boundary_repetition(
+    monkeypatch, tmp_path
+):
+    asr = [
+        {"start": 0.0, "end": 15.0, "text": "这件事真的很难。"},
+        {"start": 15.0, "end": 30.0, "text": "难得让人想放弃。"},
+    ]
+    (tmp_path / "asr_result.json").write_text(
+        json.dumps(asr), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        "consolidate.api_call",
+        lambda _payload: _fake(
+            '{"segments":['
+            '{"i":0,"text":"这件事真的很难。"},'
+            '{"i":1,"text":"难得让人想放弃。"}'
+            "]}"
+        ),
+    )
+
+    out = consolidate.consolidate_transcript(tmp_path)
+
+    assert [row["text"] for row in out["segments"]] == [
+        "这件事真的很难。",
+        "难得让人想放弃。",
+    ]
 
 
 
@@ -136,6 +169,29 @@ def test_consolidate_graceful_when_inputs_absent(tmp_path):
     # no vlm_analysis.json / asr_result.json -> no crash, returns empty-ish
     res = consolidate.consolidate(tmp_path, do_asr=True, do_index=True)
     assert res.get("index") is None and res.get("asr_clean") is None
+
+
+def test_consolidate_runs_asr_cleanup_before_index_when_both_requested(monkeypatch, tmp_path):
+    order = []
+
+    def clean(_work_dir):
+        order.append("asr")
+        return {"segments": [{"text": "clean"}]}
+
+    def index(_work_dir):
+        order.append("index")
+        return {"characters": []}
+
+    monkeypatch.setattr(consolidate, "consolidate_transcript", clean)
+    monkeypatch.setattr(consolidate, "consolidate_index", index)
+
+    result = consolidate.consolidate(tmp_path, do_asr=True, do_index=True)
+
+    assert order == ["asr", "index"]
+    assert result == {
+        "asr_clean": {"segments": [{"text": "clean"}]},
+        "index": {"characters": []},
+    }
 
 
 

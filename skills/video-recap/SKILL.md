@@ -81,6 +81,11 @@ python3 scripts/recap.py <video> --work-dir <work_dir> --context "背景"
 
 不要从标题或旁白句子开始；先锁定故事体验和素材选择。
 
+时间线有两条不可降级的硬约束：原声只能在可靠句末/静音边界被切入、切出或恢复；旁白必须使用
+完整逐段音频，任何 clip 映射裁段、TTS 裁尾或剪映引用更长的加速前素材都阻断。Agent 收到
+`interrupts_source_sentence` / `unsafe_clip_sentence_boundary` / `no_safe_fit` /
+`timeline_audio_mismatch` 时，应移动边界、缩短整句或删除该块，而不是增加抢断 override。
+
 ### 4.3 多视频与素材库
 
 多视频只支持 cut 模式。项目 brief 会列出稳定的 `source_id`，`clip_plan.json` 中每个片段都必须填写来源：
@@ -171,7 +176,9 @@ python3 scripts/recap.py --doctor
 `--context`、`--scene-threshold`、`--style`、`--edit-mode {full,cut,dub}`、`--target-duration`、
 `--skip-asr`、`--mimo-video-overview`、`--mimo-qc {off,pre-assemble,post-render,both}`、
 `--mimo-qc-refresh`、`--consolidate`、`--consolidate-asr`、`--mimo-tts-voice`、`--voice-ref`、
+`--allow-partial-tts`、`--review-narration`、`--no-review-narration`、`--require-narration-review`、
 `--subtitle-y-top`、`--subtitle-y-bot`、`--no-burn-subtitles`、`--output-dir`、
+`--export-jianying`、`--jianying-bundle-media`、`--jianying-no-bundle-media`、
 `--material-library-dir`、`--use-materials`、`--save-materials`。
 
 `--style` 是原样传给 Agent 的自由文本指导，不是 preset、枚举、开关或有限风格分类。

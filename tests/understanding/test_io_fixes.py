@@ -1,16 +1,27 @@
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'video-understanding' / 'scripts'))
+
+sys.path.insert(
+    0,
+    str(
+        Path(__file__).resolve().parents[2]
+        / "skills"
+        / "video-understanding"
+        / "scripts"
+    ),
+)
 import json  # noqa: F401
 import subprocess  # noqa: F401
 from subprocess import CompletedProcess
 import pytest  # noqa: F401
 import asr
 import extract
-import understand
+import understanding_runner as understand
 
 
-def test_segment_cut_failure_yields_empty_text_not_stale_transcription(monkeypatch, tmp_path):
+def test_segment_cut_failure_yields_empty_text_not_stale_transcription(
+    monkeypatch, tmp_path
+):
     """切分失败的段应返回空文本，而不是对磁盘陈旧音频转录。"""
     segments_dir = tmp_path / "audio_segments"
     segments_dir.mkdir()
@@ -31,10 +42,12 @@ def test_segment_cut_failure_yields_empty_text_not_stale_transcription(monkeypat
     monkeypatch.setattr("asr.run_cmd", fake_run_cmd)
     monkeypatch.setattr("asr._run_asr", fake_run_asr)
 
-    results = asr._segment_and_transcribe(audio_wav, segments_dir, total_duration=60.0, segment_length=30)
+    results = asr._segment_and_transcribe(
+        audio_wav, segments_dir, total_duration=60.0, segment_length=30
+    )
 
     assert len(results) == 2
-    assert results[0]["text"] == "STALE-GARBAGE"   # 成功段照常转录
+    assert results[0]["text"] == "STALE-GARBAGE"  # 成功段照常转录
     assert results[1]["text"] == ""
 
 
@@ -47,7 +60,9 @@ def test_zero_duration_does_not_fabricate_180s_timestamps(monkeypatch, tmp_path)
         # 音频提取这一步成功，其余不应被调用
         return CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setitem(asr.CONFIG, "mimo_asr_api_key", "tp-test")  # 跳过无 key 提前返回，测真正的零时长分支
+    monkeypatch.setitem(
+        asr.CONFIG, "mimo_asr_api_key", "tp-test"
+    )  # 跳过无 key 提前返回，测真正的零时长分支
     monkeypatch.setattr("asr.run_cmd", fake_run_cmd)
     monkeypatch.setattr("asr.get_video_duration", lambda path: 0.0)
 
@@ -159,7 +174,7 @@ def test_extract_frames_returns_only_current_run_frames(monkeypatch, tmp_path):
 
 
 def test_understand_reextracts_frames_when_source_video_changes(monkeypatch, tmp_path):
-    """understand.py must not skip stale frames just because work_dir/frames exists."""
+    """understanding_runner.py must not skip stale frames just because work_dir/frames exists."""
     old_video = tmp_path / "old.mp4"
     new_video = tmp_path / "new.mp4"
     old_video.write_bytes(b"old-video-bytes")
@@ -179,23 +194,45 @@ def test_understand_reextracts_frames_when_source_video_changes(monkeypatch, tmp
 
     def fake_detect(video_path, work_dir, threshold=None):
         scenes = [{"start": 0.0, "end": 10.0}]
-        (Path(work_dir) / "scenes.json").write_text(json.dumps(scenes), encoding="utf-8")
+        (Path(work_dir) / "scenes.json").write_text(
+            json.dumps(scenes), encoding="utf-8"
+        )
         return scenes
 
     monkeypatch.setitem(understand.CONFIG, "fps", 1.0)
     monkeypatch.setitem(understand.CONFIG, "mimo_video_overview", False)
     monkeypatch.setitem(understand.CONFIG, "api_key", "tp-test")
-    monkeypatch.setattr("understand.get_video_duration", lambda path: 10.0)
-    monkeypatch.setattr("understand.api_call", lambda payload: {"choices": [{"message": {"content": "ok"}}]})
-    monkeypatch.setattr("understand.extract_frames", fake_extract)
-    monkeypatch.setattr("understand.detect_scenes", fake_detect)
-    monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
+    monkeypatch.setattr("understanding_runner.get_video_duration", lambda path: 10.0)
     monkeypatch.setattr(
-        "understand.analyze_scenes",
-        lambda scenes, frames, work_dir, **kwargs: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
+        "understanding_runner.api_call",
+        lambda payload: {"choices": [{"message": {"content": "ok"}}]},
     )
-    monkeypatch.setattr("understand.build_agent_brief", lambda *a, **k: tmp_path / "agent_narration_brief.md")
-    monkeypatch.setattr(sys, "argv", ["understand.py", str(new_video), "--work-dir", str(tmp_path), "--skip-asr"])
+    monkeypatch.setattr("understanding_runner.extract_frames", fake_extract)
+    monkeypatch.setattr("understanding_runner.detect_scenes", fake_detect)
+    monkeypatch.setattr(
+        "understanding_runner.detect_silence_periods", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        "understanding_runner.analyze_scenes",
+        lambda scenes, frames, work_dir, **kwargs: [
+            {"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}
+        ],
+    )
+    monkeypatch.setattr(
+        "understanding_runner.build_agent_brief",
+        lambda *a, **k: tmp_path / "agent_narration_brief.md",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "understanding_runner.py",
+            str(new_video),
+            "--work-dir",
+            str(tmp_path),
+            "--skip-asr",
+        ],
+    )
 
     understand.main()
 
@@ -204,19 +241,25 @@ def test_understand_reextracts_frames_when_source_video_changes(monkeypatch, tmp
     assert understand._frames_cache_valid(new_video, tmp_path, 1.0)
 
 
-def test_understand_removes_stale_mimo_overview_before_failed_recompute(monkeypatch, tmp_path):
+def test_understand_removes_stale_mimo_overview_before_failed_recompute(
+    monkeypatch, tmp_path
+):
     """A failed overview refresh must not leave a stale final overview for the brief."""
     video = tmp_path / "video.mp4"
     video.write_bytes(b"video")
     stale_overview = tmp_path / "mimo_video_overview.json"
-    stale_overview.write_text(json.dumps({"input": "scene_chunks", "content": "STALE"}), encoding="utf-8")
+    stale_overview.write_text(
+        json.dumps({"input": "scene_chunks", "content": "STALE"}), encoding="utf-8"
+    )
     frame = tmp_path / "frames" / "frame_00001.jpg"
     frame.parent.mkdir()
     frame.write_bytes(b"frame")
 
     def fake_detect(video_path, work_dir, threshold=None):
         scenes = [{"scene_id": 0, "start": 0.0, "end": 10.0}]
-        (Path(work_dir) / "scenes.json").write_text(json.dumps(scenes), encoding="utf-8")
+        (Path(work_dir) / "scenes.json").write_text(
+            json.dumps(scenes), encoding="utf-8"
+        )
         return scenes
 
     def fail_overview(*args, **kwargs):
@@ -226,23 +269,47 @@ def test_understand_removes_stale_mimo_overview_before_failed_recompute(monkeypa
     monkeypatch.setitem(understand.CONFIG, "api_key", "tp-test")
     monkeypatch.setitem(understand.CONFIG, "mimo_video_overview", True)
     monkeypatch.setitem(understand.CONFIG, "mimo_video_api_key", "tp-test")
-    monkeypatch.setattr("understand.get_video_duration", lambda path: 10.0)
-    monkeypatch.setattr("understand.api_call", lambda payload: {"choices": [{"message": {"content": "ok"}}]})
-    monkeypatch.setattr("understand.extract_frames", lambda video_path, work_dir: [frame])
-    monkeypatch.setattr("understand.detect_scenes", fake_detect)
-    monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
+    monkeypatch.setattr("understanding_runner.get_video_duration", lambda path: 10.0)
     monkeypatch.setattr(
-        "understand.analyze_scenes",
-        lambda scenes, frames, work_dir, **kwargs: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
+        "understanding_runner.api_call",
+        lambda payload: {"choices": [{"message": {"content": "ok"}}]},
     )
-    monkeypatch.setattr("understand.analyze_video_overview", fail_overview)
-    monkeypatch.setattr("understand.build_agent_brief", lambda *a, **k: tmp_path / "agent_narration_brief.md")
-    monkeypatch.setattr(sys, "argv", ["understand.py", str(video), "--work-dir", str(tmp_path), "--skip-asr"])
+    monkeypatch.setattr(
+        "understanding_runner.extract_frames", lambda video_path, work_dir: [frame]
+    )
+    monkeypatch.setattr("understanding_runner.detect_scenes", fake_detect)
+    monkeypatch.setattr(
+        "understanding_runner.detect_silence_periods", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        "understanding_runner.analyze_scenes",
+        lambda scenes, frames, work_dir, **kwargs: [
+            {"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}
+        ],
+    )
+    monkeypatch.setattr("understanding_runner.analyze_video_overview", fail_overview)
+    monkeypatch.setattr(
+        "understanding_runner.build_agent_brief",
+        lambda *a, **k: tmp_path / "agent_narration_brief.md",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "understanding_runner.py",
+            str(video),
+            "--work-dir",
+            str(tmp_path),
+            "--skip-asr",
+        ],
+    )
 
     understand.main()
 
     assert not stale_overview.exists()
-    status = json.loads((tmp_path / "mimo_video_overview.status.json").read_text(encoding="utf-8"))
+    status = json.loads(
+        (tmp_path / "mimo_video_overview.status.json").read_text(encoding="utf-8")
+    )
     assert status["stage"] == "mimo_video_overview"
     assert status["enabled"] is True
     assert status["status"] == "failed"
@@ -260,28 +327,55 @@ def test_understand_writes_overview_status_when_key_missing(monkeypatch, tmp_pat
 
     def fake_detect(video_path, work_dir, threshold=None):
         scenes = [{"scene_id": 0, "start": 0.0, "end": 10.0}]
-        (Path(work_dir) / "scenes.json").write_text(json.dumps(scenes), encoding="utf-8")
+        (Path(work_dir) / "scenes.json").write_text(
+            json.dumps(scenes), encoding="utf-8"
+        )
         return scenes
 
     monkeypatch.setitem(understand.CONFIG, "fps", 1.0)
     monkeypatch.setitem(understand.CONFIG, "api_key", "tp-test")
     monkeypatch.setitem(understand.CONFIG, "mimo_video_overview", True)
     monkeypatch.setitem(understand.CONFIG, "mimo_video_api_key", "")
-    monkeypatch.setattr("understand.get_video_duration", lambda path: 10.0)
-    monkeypatch.setattr("understand.api_call", lambda payload: {"choices": [{"message": {"content": "ok"}}]})
-    monkeypatch.setattr("understand.extract_frames", lambda video_path, work_dir: [frame])
-    monkeypatch.setattr("understand.detect_scenes", fake_detect)
-    monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
+    monkeypatch.setattr("understanding_runner.get_video_duration", lambda path: 10.0)
     monkeypatch.setattr(
-        "understand.analyze_scenes",
-        lambda scenes, frames, work_dir, **kwargs: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
+        "understanding_runner.api_call",
+        lambda payload: {"choices": [{"message": {"content": "ok"}}]},
     )
-    monkeypatch.setattr("understand.build_agent_brief", lambda *a, **k: tmp_path / "agent_narration_brief.md")
-    monkeypatch.setattr(sys, "argv", ["understand.py", str(video), "--work-dir", str(tmp_path), "--skip-asr", "--no-consolidate"])
+    monkeypatch.setattr(
+        "understanding_runner.extract_frames", lambda video_path, work_dir: [frame]
+    )
+    monkeypatch.setattr("understanding_runner.detect_scenes", fake_detect)
+    monkeypatch.setattr(
+        "understanding_runner.detect_silence_periods", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        "understanding_runner.analyze_scenes",
+        lambda scenes, frames, work_dir, **kwargs: [
+            {"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}
+        ],
+    )
+    monkeypatch.setattr(
+        "understanding_runner.build_agent_brief",
+        lambda *a, **k: tmp_path / "agent_narration_brief.md",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "understanding_runner.py",
+            str(video),
+            "--work-dir",
+            str(tmp_path),
+            "--skip-asr",
+            "--no-consolidate",
+        ],
+    )
 
     understand.main()
 
-    status = json.loads((tmp_path / "mimo_video_overview.status.json").read_text(encoding="utf-8"))
+    status = json.loads(
+        (tmp_path / "mimo_video_overview.status.json").read_text(encoding="utf-8")
+    )
     assert status["status"] == "skipped_no_key"
     assert status["artifact"] is None
 
@@ -295,7 +389,9 @@ def test_understand_writes_failed_consolidation_status(monkeypatch, tmp_path):
 
     def fake_detect(video_path, work_dir, threshold=None):
         scenes = [{"scene_id": 0, "start": 0.0, "end": 10.0}]
-        (Path(work_dir) / "scenes.json").write_text(json.dumps(scenes), encoding="utf-8")
+        (Path(work_dir) / "scenes.json").write_text(
+            json.dumps(scenes), encoding="utf-8"
+        )
         return scenes
 
     def fake_consolidate(work_dir, do_asr=False, do_index=True):
@@ -305,22 +401,46 @@ def test_understand_writes_failed_consolidation_status(monkeypatch, tmp_path):
     monkeypatch.setitem(understand.CONFIG, "fps", 1.0)
     monkeypatch.setitem(understand.CONFIG, "api_key", "tp-test")
     monkeypatch.setitem(understand.CONFIG, "mimo_video_overview", False)
-    monkeypatch.setattr("understand.get_video_duration", lambda path: 10.0)
-    monkeypatch.setattr("understand.api_call", lambda payload: {"choices": [{"message": {"content": "ok"}}]})
-    monkeypatch.setattr("understand.extract_frames", lambda video_path, work_dir: [frame])
-    monkeypatch.setattr("understand.detect_scenes", fake_detect)
-    monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
+    monkeypatch.setattr("understanding_runner.get_video_duration", lambda path: 10.0)
     monkeypatch.setattr(
-        "understand.analyze_scenes",
-        lambda scenes, frames, work_dir, **kwargs: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
+        "understanding_runner.api_call",
+        lambda payload: {"choices": [{"message": {"content": "ok"}}]},
     )
-    monkeypatch.setattr("understand.build_agent_brief", lambda *a, **k: tmp_path / "agent_narration_brief.md")
+    monkeypatch.setattr(
+        "understanding_runner.extract_frames", lambda video_path, work_dir: [frame]
+    )
+    monkeypatch.setattr("understanding_runner.detect_scenes", fake_detect)
+    monkeypatch.setattr(
+        "understanding_runner.detect_silence_periods", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        "understanding_runner.analyze_scenes",
+        lambda scenes, frames, work_dir, **kwargs: [
+            {"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}
+        ],
+    )
+    monkeypatch.setattr(
+        "understanding_runner.build_agent_brief",
+        lambda *a, **k: tmp_path / "agent_narration_brief.md",
+    )
     monkeypatch.setattr("consolidate.consolidate", fake_consolidate, raising=False)
-    monkeypatch.setattr(sys, "argv", ["understand.py", str(video), "--work-dir", str(tmp_path), "--skip-asr"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "understanding_runner.py",
+            str(video),
+            "--work-dir",
+            str(tmp_path),
+            "--skip-asr",
+        ],
+    )
 
     understand.main()
 
-    status = json.loads((tmp_path / "consolidation.status.json").read_text(encoding="utf-8"))
+    status = json.loads(
+        (tmp_path / "consolidation.status.json").read_text(encoding="utf-8")
+    )
     assert status["stage"] == "consolidation"
     assert status["enabled"] is True
     assert status["do_asr"] is False
@@ -339,13 +459,28 @@ def _run_understand_for_cache_tests(monkeypatch, tmp_path, video, *, argv_extra=
     monkeypatch.setitem(understand.CONFIG, "api_key", "tp-test")
     monkeypatch.setitem(understand.CONFIG, "mimo_video_api_key", "")
     monkeypatch.setitem(understand.CONFIG, "mimo_video_overview", False)
-    monkeypatch.setattr("understand.get_video_duration", lambda path: 10.0)
-    monkeypatch.setattr("understand.api_call", lambda payload: {"choices": [{"message": {"content": "ok"}}]})
-    monkeypatch.setattr("understand.extract_frames", lambda video_path, work_dir: [frame])
-    monkeypatch.setattr("understand.build_agent_brief", lambda *a, **k: tmp_path / "agent_narration_brief.md")
+    monkeypatch.setattr("understanding_runner.get_video_duration", lambda path: 10.0)
+    monkeypatch.setattr(
+        "understanding_runner.api_call",
+        lambda payload: {"choices": [{"message": {"content": "ok"}}]},
+    )
+    monkeypatch.setattr(
+        "understanding_runner.extract_frames", lambda video_path, work_dir: [frame]
+    )
+    monkeypatch.setattr(
+        "understanding_runner.build_agent_brief",
+        lambda *a, **k: tmp_path / "agent_narration_brief.md",
+    )
     # These tests exercise VLM cache-key behavior, not the consolidate index (now default-on,
     # whose api_call is the real lib.api_call, not the mocked understand.api_call). Skip it.
-    argv = ["understand.py", str(video), "--work-dir", str(tmp_path), "--no-consolidate", *(argv_extra or [])]
+    argv = [
+        "understanding_runner.py",
+        str(video),
+        "--work-dir",
+        str(tmp_path),
+        "--no-consolidate",
+        *(argv_extra or []),
+    ]
     monkeypatch.setattr(sys, "argv", argv)
     understand.main()
 
@@ -376,13 +511,17 @@ def test_understand_recomputes_stage_when_artifact_bytes_change(monkeypatch, tmp
     def fake_detect(video_path, work_dir, threshold=None):
         calls.append(len(calls) + 1)
         scenes = [{"start": 0.0, "end": 10.0, "run": calls[-1]}]
-        (Path(work_dir) / "scenes.json").write_text(json.dumps(scenes), encoding="utf-8")
+        (Path(work_dir) / "scenes.json").write_text(
+            json.dumps(scenes), encoding="utf-8"
+        )
         return scenes
 
-    monkeypatch.setattr("understand.detect_scenes", fake_detect)
-    monkeypatch.setattr("understand.transcribe_audio", lambda *a, **k: [])
-    monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
-    monkeypatch.setattr("understand.analyze_scenes", lambda *a, **k: [])
+    monkeypatch.setattr("understanding_runner.detect_scenes", fake_detect)
+    monkeypatch.setattr("understanding_runner.transcribe_audio", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "understanding_runner.detect_silence_periods", lambda *a, **k: []
+    )
+    monkeypatch.setattr("understanding_runner.analyze_scenes", lambda *a, **k: [])
 
     _run_understand_for_cache_tests(monkeypatch, tmp_path, video)
     (tmp_path / "scenes.json").write_text(
@@ -392,7 +531,10 @@ def test_understand_recomputes_stage_when_artifact_bytes_change(monkeypatch, tmp
     _run_understand_for_cache_tests(monkeypatch, tmp_path, video)
 
     assert calls == [1, 2]
-    assert json.loads((tmp_path / "scenes.json").read_text(encoding="utf-8"))[0]["run"] == 2
+    assert (
+        json.loads((tmp_path / "scenes.json").read_text(encoding="utf-8"))[0]["run"]
+        == 2
+    )
 
 
 def test_understand_recomputes_scenes_when_scene_settings_change(monkeypatch, tmp_path):
@@ -404,19 +546,32 @@ def test_understand_recomputes_scenes_when_scene_settings_change(monkeypatch, tm
     def fake_detect(video_path, work_dir, threshold=None):
         calls.append(threshold)
         scenes = [{"start": 0.0, "end": 10.0, "threshold": threshold}]
-        (Path(work_dir) / "scenes.json").write_text(json.dumps(scenes), encoding="utf-8")
+        (Path(work_dir) / "scenes.json").write_text(
+            json.dumps(scenes), encoding="utf-8"
+        )
         return scenes
 
-    monkeypatch.setattr("understand.detect_scenes", fake_detect)
-    monkeypatch.setattr("understand.transcribe_audio", lambda *a, **k: [])
-    monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
-    monkeypatch.setattr("understand.analyze_scenes", lambda *a, **k: [])
+    monkeypatch.setattr("understanding_runner.detect_scenes", fake_detect)
+    monkeypatch.setattr("understanding_runner.transcribe_audio", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "understanding_runner.detect_silence_periods", lambda *a, **k: []
+    )
+    monkeypatch.setattr("understanding_runner.analyze_scenes", lambda *a, **k: [])
 
-    _run_understand_for_cache_tests(monkeypatch, tmp_path, video, argv_extra=["--scene-threshold", "0.1"])
-    _run_understand_for_cache_tests(monkeypatch, tmp_path, video, argv_extra=["--scene-threshold", "0.4"])
+    _run_understand_for_cache_tests(
+        monkeypatch, tmp_path, video, argv_extra=["--scene-threshold", "0.1"]
+    )
+    _run_understand_for_cache_tests(
+        monkeypatch, tmp_path, video, argv_extra=["--scene-threshold", "0.4"]
+    )
 
     assert calls == [0.1, 0.4]
-    assert json.loads((tmp_path / "scenes.json").read_text(encoding="utf-8"))[0]["threshold"] == 0.4
+    assert (
+        json.loads((tmp_path / "scenes.json").read_text(encoding="utf-8"))[0][
+            "threshold"
+        ]
+        == 0.4
+    )
 
 
 def test_understand_recomputes_asr_when_asr_settings_change(monkeypatch, tmp_path):
@@ -428,13 +583,25 @@ def test_understand_recomputes_asr_when_asr_settings_change(monkeypatch, tmp_pat
     def fake_asr(video_path, work_dir):
         calls.append(understand.CONFIG["asr_segment_seconds"])
         result = [{"start": 0.0, "end": 1.0, "text": f"seg-{calls[-1]}"}]
-        (Path(work_dir) / "asr_result.json").write_text(json.dumps(result), encoding="utf-8")
+        (Path(work_dir) / "asr_result.json").write_text(
+            json.dumps(result), encoding="utf-8"
+        )
         return result
 
-    monkeypatch.setattr("understand.detect_scenes", lambda video_path, work_dir, threshold=None: (Path(work_dir) / "scenes.json").write_text(json.dumps([{"start": 0.0, "end": 10.0}]), encoding="utf-8") and [{"start": 0.0, "end": 10.0}])
-    monkeypatch.setattr("understand.transcribe_audio", fake_asr)
-    monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
-    monkeypatch.setattr("understand.analyze_scenes", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "understanding_runner.detect_scenes",
+        lambda video_path, work_dir, threshold=None: (
+            (Path(work_dir) / "scenes.json").write_text(
+                json.dumps([{"start": 0.0, "end": 10.0}]), encoding="utf-8"
+            )
+            and [{"start": 0.0, "end": 10.0}]
+        ),
+    )
+    monkeypatch.setattr("understanding_runner.transcribe_audio", fake_asr)
+    monkeypatch.setattr(
+        "understanding_runner.detect_silence_periods", lambda *a, **k: []
+    )
+    monkeypatch.setattr("understanding_runner.analyze_scenes", lambda *a, **k: [])
 
     monkeypatch.setitem(understand.CONFIG, "asr_segment_seconds", 30.0)
     _run_understand_for_cache_tests(monkeypatch, tmp_path, video)
@@ -442,7 +609,12 @@ def test_understand_recomputes_asr_when_asr_settings_change(monkeypatch, tmp_pat
     _run_understand_for_cache_tests(monkeypatch, tmp_path, video)
 
     assert calls == [30.0, 12.0]
-    assert json.loads((tmp_path / "asr_result.json").read_text(encoding="utf-8"))[0]["text"] == "seg-12.0"
+    assert (
+        json.loads((tmp_path / "asr_result.json").read_text(encoding="utf-8"))[0][
+            "text"
+        ]
+        == "seg-12.0"
+    )
 
 
 def test_understand_recomputes_silence_when_asr_content_changes(monkeypatch, tmp_path):
@@ -453,19 +625,33 @@ def test_understand_recomputes_silence_when_asr_content_changes(monkeypatch, tmp
     asr_payload = {"value": [{"start": 0.0, "end": 1.0, "text": "first"}]}
 
     def fake_asr(video_path, work_dir):
-        (Path(work_dir) / "asr_result.json").write_text(json.dumps(asr_payload["value"]), encoding="utf-8")
+        (Path(work_dir) / "asr_result.json").write_text(
+            json.dumps(asr_payload["value"]), encoding="utf-8"
+        )
         return asr_payload["value"]
 
     def fake_silence(video_path, work_dir, asr_result):
         calls.append([seg["text"] for seg in asr_result])
-        result = [{"start": 0.0, "end": 1.0, "duration": 1.0, "has_speech": bool(calls[-1])}]
-        (Path(work_dir) / "silence_periods.json").write_text(json.dumps(result), encoding="utf-8")
+        result = [
+            {"start": 0.0, "end": 1.0, "duration": 1.0, "has_speech": bool(calls[-1])}
+        ]
+        (Path(work_dir) / "silence_periods.json").write_text(
+            json.dumps(result), encoding="utf-8"
+        )
         return result
 
-    monkeypatch.setattr("understand.detect_scenes", lambda video_path, work_dir, threshold=None: (Path(work_dir) / "scenes.json").write_text(json.dumps([{"start": 0.0, "end": 10.0}]), encoding="utf-8") and [{"start": 0.0, "end": 10.0}])
-    monkeypatch.setattr("understand.transcribe_audio", fake_asr)
-    monkeypatch.setattr("understand.detect_silence_periods", fake_silence)
-    monkeypatch.setattr("understand.analyze_scenes", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "understanding_runner.detect_scenes",
+        lambda video_path, work_dir, threshold=None: (
+            (Path(work_dir) / "scenes.json").write_text(
+                json.dumps([{"start": 0.0, "end": 10.0}]), encoding="utf-8"
+            )
+            and [{"start": 0.0, "end": 10.0}]
+        ),
+    )
+    monkeypatch.setattr("understanding_runner.transcribe_audio", fake_asr)
+    monkeypatch.setattr("understanding_runner.detect_silence_periods", fake_silence)
+    monkeypatch.setattr("understanding_runner.analyze_scenes", lambda *a, **k: [])
 
     _run_understand_for_cache_tests(monkeypatch, tmp_path, video)
     asr_payload["value"] = [{"start": 0.0, "end": 1.0, "text": "second"}]
@@ -485,20 +671,41 @@ def test_understand_recomputes_vlm_when_context_changes(monkeypatch, tmp_path):
     def fake_vlm(scenes, frames, work_dir, **kwargs):
         calls.append(understand.CONFIG.get("context_info", ""))
         result = [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": calls[-1]}]
-        (Path(work_dir) / "vlm_analysis.json").write_text(json.dumps(result), encoding="utf-8")
+        (Path(work_dir) / "vlm_analysis.json").write_text(
+            json.dumps(result), encoding="utf-8"
+        )
         return result
 
-    monkeypatch.setattr("understand.detect_scenes", lambda video_path, work_dir, threshold=None: (Path(work_dir) / "scenes.json").write_text(json.dumps([{"start": 0.0, "end": 10.0}]), encoding="utf-8") and [{"start": 0.0, "end": 10.0}])
-    monkeypatch.setattr("understand.transcribe_audio", lambda *a, **k: [])
-    monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
-    monkeypatch.setattr("understand.analyze_scenes", fake_vlm)
+    monkeypatch.setattr(
+        "understanding_runner.detect_scenes",
+        lambda video_path, work_dir, threshold=None: (
+            (Path(work_dir) / "scenes.json").write_text(
+                json.dumps([{"start": 0.0, "end": 10.0}]), encoding="utf-8"
+            )
+            and [{"start": 0.0, "end": 10.0}]
+        ),
+    )
+    monkeypatch.setattr("understanding_runner.transcribe_audio", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "understanding_runner.detect_silence_periods", lambda *a, **k: []
+    )
+    monkeypatch.setattr("understanding_runner.analyze_scenes", fake_vlm)
 
-    _run_understand_for_cache_tests(monkeypatch, tmp_path, video, argv_extra=["--context", "角色A"])
+    _run_understand_for_cache_tests(
+        monkeypatch, tmp_path, video, argv_extra=["--context", "角色A"]
+    )
     monkeypatch.setitem(understand.CONFIG, "context_info", "")
-    _run_understand_for_cache_tests(monkeypatch, tmp_path, video, argv_extra=["--context", "角色B"])
+    _run_understand_for_cache_tests(
+        monkeypatch, tmp_path, video, argv_extra=["--context", "角色B"]
+    )
 
     assert calls == ["角色A", "角色B"]
-    assert json.loads((tmp_path / "vlm_analysis.json").read_text(encoding="utf-8"))[0]["description"] == "角色B"
+    assert (
+        json.loads((tmp_path / "vlm_analysis.json").read_text(encoding="utf-8"))[0][
+            "description"
+        ]
+        == "角色B"
+    )
 
 
 def test_understand_recomputes_vlm_when_api_endpoint_changes(monkeypatch, tmp_path):
@@ -509,37 +716,72 @@ def test_understand_recomputes_vlm_when_api_endpoint_changes(monkeypatch, tmp_pa
     def fake_vlm(scenes, frames, work_dir, **kwargs):
         calls.append(understand.CONFIG.get("api_url", ""))
         result = [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": calls[-1]}]
-        (Path(work_dir) / "vlm_analysis.json").write_text(json.dumps(result), encoding="utf-8")
+        (Path(work_dir) / "vlm_analysis.json").write_text(
+            json.dumps(result), encoding="utf-8"
+        )
         return result
 
-    monkeypatch.setattr("understand.detect_scenes", lambda video_path, work_dir, threshold=None: (Path(work_dir) / "scenes.json").write_text(json.dumps([{"start": 0.0, "end": 10.0}]), encoding="utf-8") and [{"start": 0.0, "end": 10.0}])
-    monkeypatch.setattr("understand.transcribe_audio", lambda *a, **k: [])
-    monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
-    monkeypatch.setattr("understand.analyze_scenes", fake_vlm)
+    monkeypatch.setattr(
+        "understanding_runner.detect_scenes",
+        lambda video_path, work_dir, threshold=None: (
+            (Path(work_dir) / "scenes.json").write_text(
+                json.dumps([{"start": 0.0, "end": 10.0}]), encoding="utf-8"
+            )
+            and [{"start": 0.0, "end": 10.0}]
+        ),
+    )
+    monkeypatch.setattr("understanding_runner.transcribe_audio", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "understanding_runner.detect_silence_periods", lambda *a, **k: []
+    )
+    monkeypatch.setattr("understanding_runner.analyze_scenes", fake_vlm)
 
-    monkeypatch.setitem(understand.CONFIG, "api_url", "https://one.example/v1/chat/completions")
+    monkeypatch.setitem(
+        understand.CONFIG, "api_url", "https://one.example/v1/chat/completions"
+    )
     _run_understand_for_cache_tests(monkeypatch, tmp_path, video)
-    monkeypatch.setitem(understand.CONFIG, "api_url", "https://two.example/v1/chat/completions")
+    monkeypatch.setitem(
+        understand.CONFIG, "api_url", "https://two.example/v1/chat/completions"
+    )
     _run_understand_for_cache_tests(monkeypatch, tmp_path, video)
 
-    assert calls == ["https://one.example/v1/chat/completions", "https://two.example/v1/chat/completions"]
+    assert calls == [
+        "https://one.example/v1/chat/completions",
+        "https://two.example/v1/chat/completions",
+    ]
 
 
-def test_understand_recomputes_vlm_when_thinking_behavior_changes(monkeypatch, tmp_path):
+def test_understand_recomputes_vlm_when_thinking_behavior_changes(
+    monkeypatch, tmp_path
+):
     video = tmp_path / "video.mp4"
     video.write_bytes(b"video")
     calls = []
 
     def fake_vlm(scenes, frames, work_dir, **kwargs):
         calls.append(understand.CONFIG.get("mimo_disable_thinking"))
-        result = [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": str(calls[-1])}]
-        (Path(work_dir) / "vlm_analysis.json").write_text(json.dumps(result), encoding="utf-8")
+        result = [
+            {"scene_id": 0, "start": 0.0, "end": 10.0, "description": str(calls[-1])}
+        ]
+        (Path(work_dir) / "vlm_analysis.json").write_text(
+            json.dumps(result), encoding="utf-8"
+        )
         return result
 
-    monkeypatch.setattr("understand.detect_scenes", lambda video_path, work_dir, threshold=None: (Path(work_dir) / "scenes.json").write_text(json.dumps([{"start": 0.0, "end": 10.0}]), encoding="utf-8") and [{"start": 0.0, "end": 10.0}])
-    monkeypatch.setattr("understand.transcribe_audio", lambda *a, **k: [])
-    monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
-    monkeypatch.setattr("understand.analyze_scenes", fake_vlm)
+    monkeypatch.setattr(
+        "understanding_runner.detect_scenes",
+        lambda video_path, work_dir, threshold=None: (
+            (Path(work_dir) / "scenes.json").write_text(
+                json.dumps([{"start": 0.0, "end": 10.0}]), encoding="utf-8"
+            )
+            and [{"start": 0.0, "end": 10.0}]
+        ),
+    )
+    monkeypatch.setattr("understanding_runner.transcribe_audio", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "understanding_runner.detect_silence_periods", lambda *a, **k: []
+    )
+    monkeypatch.setattr("understanding_runner.analyze_scenes", fake_vlm)
 
     monkeypatch.setitem(understand.CONFIG, "mimo_disable_thinking", True)
     _run_understand_for_cache_tests(monkeypatch, tmp_path, video)
@@ -549,15 +791,30 @@ def test_understand_recomputes_vlm_when_thinking_behavior_changes(monkeypatch, t
     assert calls == [True, False]
 
 
-def test_understand_asr_exception_does_not_cache_empty_transcript(monkeypatch, tmp_path):
+def test_understand_asr_exception_does_not_cache_empty_transcript(
+    monkeypatch, tmp_path
+):
     """Unexpected ASR failures must fail fast and leave no reusable empty asr_result.json."""
     video = tmp_path / "video.mp4"
     video.write_bytes(b"video")
 
-    monkeypatch.setattr("understand.detect_scenes", lambda video_path, work_dir, threshold=None: (Path(work_dir) / "scenes.json").write_text(json.dumps([{"start": 0.0, "end": 10.0}]), encoding="utf-8") and [{"start": 0.0, "end": 10.0}])
-    monkeypatch.setattr("understand.transcribe_audio", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("quota")))
-    monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
-    monkeypatch.setattr("understand.analyze_scenes", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "understanding_runner.detect_scenes",
+        lambda video_path, work_dir, threshold=None: (
+            (Path(work_dir) / "scenes.json").write_text(
+                json.dumps([{"start": 0.0, "end": 10.0}]), encoding="utf-8"
+            )
+            and [{"start": 0.0, "end": 10.0}]
+        ),
+    )
+    monkeypatch.setattr(
+        "understanding_runner.transcribe_audio",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("quota")),
+    )
+    monkeypatch.setattr(
+        "understanding_runner.detect_silence_periods", lambda *a, **k: []
+    )
+    monkeypatch.setattr("understanding_runner.analyze_scenes", lambda *a, **k: [])
 
     with pytest.raises(RuntimeError, match="ASR 失败"):
         _run_understand_for_cache_tests(monkeypatch, tmp_path, video)
@@ -566,37 +823,64 @@ def test_understand_asr_exception_does_not_cache_empty_transcript(monkeypatch, t
     assert not (tmp_path / "asr_result.json.meta.json").exists()
 
 
-
-def test_understand_omits_stale_mimo_overview_when_overview_disabled(monkeypatch, tmp_path):
+def test_understand_omits_stale_mimo_overview_when_overview_disabled(
+    monkeypatch, tmp_path
+):
     """Direct understand runs must not let an old overview leak into a new brief when disabled."""
     video = tmp_path / "video.mp4"
     video.write_bytes(b"video")
     stale_overview = tmp_path / "mimo_video_overview.json"
-    stale_overview.write_text(json.dumps({"input": "scene_chunks", "content": "STALE OVERVIEW"}), encoding="utf-8")
+    stale_overview.write_text(
+        json.dumps({"input": "scene_chunks", "content": "STALE OVERVIEW"}),
+        encoding="utf-8",
+    )
     frame = tmp_path / "frames" / "frame_00001.jpg"
     frame.parent.mkdir()
     frame.write_bytes(b"frame")
 
     def fake_detect(video_path, work_dir, threshold=None):
         scenes = [{"scene_id": 0, "start": 0.0, "end": 10.0}]
-        (Path(work_dir) / "scenes.json").write_text(json.dumps(scenes), encoding="utf-8")
+        (Path(work_dir) / "scenes.json").write_text(
+            json.dumps(scenes), encoding="utf-8"
+        )
         return scenes
 
     monkeypatch.setitem(understand.CONFIG, "fps", 1.0)
     monkeypatch.setitem(understand.CONFIG, "api_key", "tp-test")
     monkeypatch.setitem(understand.CONFIG, "mimo_video_overview", False)
-    monkeypatch.setattr("understand.get_video_duration", lambda path: 10.0)
-    monkeypatch.setattr("understand.api_call", lambda payload: {"choices": [{"message": {"content": "ok"}}]})
-    monkeypatch.setattr("understand.extract_frames", lambda video_path, work_dir: [frame])
-    monkeypatch.setattr("understand.detect_scenes", fake_detect)
-    monkeypatch.setattr("understand.detect_silence_periods", lambda *a, **k: [])
+    monkeypatch.setattr("understanding_runner.get_video_duration", lambda path: 10.0)
     monkeypatch.setattr(
-        "understand.analyze_scenes",
-        lambda scenes, frames, work_dir, **kwargs: [{"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}],
+        "understanding_runner.api_call",
+        lambda payload: {"choices": [{"message": {"content": "ok"}}]},
     )
-    monkeypatch.setattr(sys, "argv", ["understand.py", str(video), "--work-dir", str(tmp_path), "--skip-asr"])
+    monkeypatch.setattr(
+        "understanding_runner.extract_frames", lambda video_path, work_dir: [frame]
+    )
+    monkeypatch.setattr("understanding_runner.detect_scenes", fake_detect)
+    monkeypatch.setattr(
+        "understanding_runner.detect_silence_periods", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        "understanding_runner.analyze_scenes",
+        lambda scenes, frames, work_dir, **kwargs: [
+            {"scene_id": 0, "start": 0.0, "end": 10.0, "description": "fresh"}
+        ],
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "understanding_runner.py",
+            str(video),
+            "--work-dir",
+            str(tmp_path),
+            "--skip-asr",
+        ],
+    )
 
     understand.main()
 
     assert not stale_overview.exists()
-    assert "STALE OVERVIEW" not in (tmp_path / "agent_narration_brief.md").read_text(encoding="utf-8")
+    assert "STALE OVERVIEW" not in (tmp_path / "agent_narration_brief.md").read_text(
+        encoding="utf-8"
+    )

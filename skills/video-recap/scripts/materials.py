@@ -25,8 +25,11 @@ from pathlib import Path
 ALLOWED_ARTIFACTS = {
     "scenes.json",
     "asr_result.json",
+    "asr_clean.json",
     "vlm_analysis.json",
     "silence_periods.json",
+    "speech_boundary_anchors.json",
+    "speech_boundary_anchors_output.json",
     "timeline_fusion.json",
     "understanding_index.json",
     "understanding_index.md",

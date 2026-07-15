@@ -13,7 +13,7 @@ description: >
 本技能只执行 Agent 已经做出的剪辑决定：
 
 1. 校验并补全 `clip_plan.json`，写出带 `clip_id`、原片/输出时间与时长的 `clip_plan_validated.json`。
-2. 先把边界吸附到自然停顿，再避开原片硬切附近的闪帧风险。
+2. 先避开原片硬切附近的闪帧风险，最后把边界吸附到可靠句末/自然停顿；声音完整性拥有最终优先级。
 3. 拼接选定区间，输出 `edited_source.mp4`。
 4. 编排流程默认到此停止，由 Agent 按真实输出时间线写 `narration.json`。
 5. 旧版单阶段路径还会把原片时间的旁白映射为 `narration_mapped.json`。
@@ -31,6 +31,7 @@ description: >
 - `start` / `end` 是原片秒数；也接受 `source_start` / `source_end` 或 `in` / `out`。
 - 顶层可选 `target_duration`，例如 `"10m"`。
 - 多视频项目的每个片段还必须填写 `source_id`。
+- `speech_boundary_anchors.json` 与 ASR 时间段由理解阶段提供；Agent 先写大致区间，工具会尝试吸附并把仍在讲话区间内的入/出点作为 blocker 返回。
 
 `work_dir/narration.json` 只在旧版单阶段路径中可选读取；该路径要求旁白使用原片时间。若允许重复或重叠片段，旁白可带 `source_clip_id` 消歧。
 
@@ -68,8 +69,10 @@ python3 scripts/cut.py <video> --work-dir <work_dir> \
 - 旧版路径中，`clip_plan.json` 与 `narration.json` 都使用原片时间；本工具负责原片 → 输出映射。
 - 编排路径中，`narration.json` 直接使用剪后输出时间，不再映射。
 - 默认禁止重叠或重复原片区间；`--allow-overlap` 开启后，旁白应填写 `source_clip_id`。
-- 旧版映射时，不在任何保留片段内的旁白会被丢弃并记录日志。
-- `SCENE_CUT_SNAP` 默认开启：自然停顿吸附后，若边界落在原片硬切附近，source start 会向后、source end 会向前吸附到切点，避免相邻镜头闪一下又切走。默认范围为 `SCENE_CUT_SNAP_MARGIN=0.5` 秒，检测阈值为 `SCENE_CUT_DETECT_THRESHOLD=0.4`。若吸附会把片段压到约 0.5 秒以下则跳过；设 `SCENE_CUT_SNAP=0` 可关闭。
+- 片段起点只能位于源头、可靠句末/静音窗，或与上一片段构成无损同源连续连接；片段终点同理。ASR 判定仍在讲话且无法吸附时写入 `unsafe_clip_sentence_boundary` 并阻断。
+- `SCENE_CUT_SNAP` 默认开启：先按画面把 source start 向后、source end 向前吸附到附近硬切，随后句末吸附再做最终修正，避免视觉修正重新制造半句原声。默认范围为 `SCENE_CUT_SNAP_MARGIN=0.5` 秒，检测阈值为 `SCENE_CUT_DETECT_THRESHOLD=0.4`。
+- 连续同源片段的无损连接不做句中双侧音频淡出；非连续片段仍在安全停顿内做防爆音淡入淡出。
+- 旧版旁白映射若跨越 clip 边界，不再裁短后继续：`clamped_beats` 永久阻断，`--allow-sparse-cut` 也不能绕过旁白句子完整性。
 
 ## 7. 能力边界
 
